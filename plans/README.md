@@ -37,6 +37,8 @@ The work is split into gated stages. Complete stages in order unless a stage exp
 - All additions live under `x_codex` except the agreed continuation field `previous_response_id`.
 - A response ID maps to a Codex thread ID in a durable, versioned local store; raw thread IDs are not exposed.
 - One HTTP completion corresponds to one externally visible response, though a Codex turn may remain suspended while a dynamic tool result is pending.
+- A Codex thread runs at most one active turn. Concurrent requests targeting the same thread queue behind a bound or fail with a conflict error; they never interleave.
+- The proxy must never leave a server-initiated app-server request (approval, tool call, elicitation) unanswered past its owning HTTP request's documented lifecycle.
 - Client disconnects must not leak active turns, pending JSON-RPC requests, or child processes.
 - No default test invokes a paid model.
 

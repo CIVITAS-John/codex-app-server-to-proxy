@@ -7,13 +7,13 @@ Translate the supported Chat Completions subset to app-server threads/turns and 
 ## Work
 
 1. Validate `model`, `messages`, `stream`, `stream_options`, `tools`, `tool_choice`, `previous_response_id`, and `x_codex`; collect harmless unsupported fields for one structured warning.
-2. Convert system/developer/user/assistant/tool messages into app-server input without silently changing role or order.
+2. Convert system/developer/user/assistant/tool messages into app-server input using the history mechanism decided in Stage 01; `turn/start` input carries no roles, so never silently collapse role or order into plain user text without documenting it.
 3. Start a thread when no continuation exists, then start a turn with the request model and policy settings.
-4. Create a single event-normalization layer for app-server item lifecycle and delta notifications.
+4. Create a single event-normalization layer for app-server item lifecycle and delta notifications. Treat `item/*` notifications as the canonical item stream; `turn/completed` currently carries an empty `items` array and must not be relied on for content.
 5. Translate assistant text to `choices[0].delta.content` and exposed reasoning to documented `choices[0].delta.x_codex.reasoning` parts.
 6. Translate internal shell, file, MCP, web-search, approval, and tool-result activity to typed `x_codex` deltas. Do not disguise internal activity as a client-defined function call.
 7. Produce stable response, choice, and tool-call IDs; preserve event ordering per item while allowing interleaved items.
-8. Emit standard finish reasons where applicable: `stop`, `length`, `tool_calls`, and `content_filter`; map other terminal states to an error or documented extension.
+8. Emit standard finish reasons where applicable: `stop`, `length`, `tool_calls`, and `content_filter`; map other terminal states to an error or documented extension. A mid-turn `error` notification may precede `turn/completed` with `status: "failed"` carrying the same payload; deduplicate into one client-visible error.
 9. For `stream_options.include_usage`, emit a final usage-bearing chunk with empty choices before `[DONE]`. Include cached and reasoning details only when reported.
 10. Implement `stream: false` by aggregating the same normalized event stream, avoiding a second translation path.
 11. Propagate client disconnect to turn interruption unless a documented pending-tool suspension owns the turn.

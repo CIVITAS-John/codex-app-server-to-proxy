@@ -7,11 +7,11 @@ Reliably own one initialized app-server child process and complete ChatGPT login
 ## Work
 
 1. Resolve the Codex executable from the supported package first and explicit `--codex-path`/PATH fallback second. Validate its version before serving.
-2. Spawn without a shell, communicate through newline-delimited JSON-RPC on stdio, and keep stderr separate with redaction.
-3. Implement request IDs, response correlation, server-to-client requests, notifications, cancellation, bounded queues, and malformed-line handling.
-4. Send `initialize` with stable client metadata and experimental capability opt-in, then send `initialized`.
+2. Spawn without a shell, communicate through newline-delimited JSON-RPC on stdio, and keep stderr separate with redaction. App-server omits the `"jsonrpc": "2.0"` member on the wire; the transport must tolerate and mirror this rather than assume a strict JSON-RPC library will.
+3. Implement request IDs, response correlation, server-to-client requests, notifications, cancellation, bounded queues, and malformed-line handling. Surface app-server `-32001` overload errors as retryable OpenAI-shaped HTTP 429 responses.
+4. Send `initialize` with stable client metadata and experimental capability opt-in, then send `initialized`. Pick one stable `clientInfo.name` and keep it fixed; app-server forwards it for compliance logging.
 5. Query account state at startup. If unauthenticated, call `account/login/start` with ChatGPT browser login.
-6. Attempt to open the authorization URL using a narrowly scoped platform launcher; always print a safe URL/instruction fallback. Wait for `account/login/completed` and support cancellation/timeout.
+6. Attempt to open the authorization URL using a narrowly scoped platform launcher; always print a safe URL/instruction fallback. Wait for `account/login/completed` and support cancellation/timeout. The browser flow's callback binds to localhost on the proxy host, so a remote browser cannot complete it; decide whether v1 fails with instructions or offers the `chatgptDeviceCode` flow for headless machines.
 7. Mark readiness only after initialization and usable authentication.
 8. Define restart policy for unexpected app-server exit: bounded exponential backoff, failure threshold, readiness changes, and failure of in-flight requests.
 9. On proxy shutdown, interrupt active turns, reject pending tool continuations, close stdio, then terminate the child after a grace period.

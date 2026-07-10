@@ -6,17 +6,18 @@ Support standard client-defined tools across requests while maximizing safe Code
 
 ## Work
 
-1. Translate Chat Completions function tools to app-server `dynamicTools` with experimental capability enabled.
+1. Translate Chat Completions function tools to app-server `dynamicTools` with experimental capability enabled. Tools are per-request in Chat Completions but thread-scoped at `thread/start`; apply the Stage 01 finding for whether a continued thread can change its tool set, and reject or document requests it cannot honor.
 2. When app-server issues `item/tool/call`, correlate name, call ID, arguments, thread, turn, and pending JSON-RPC response.
 3. Stream standard `delta.tool_calls` argument fragments and end the HTTP response with `finish_reason: "tool_calls"` while keeping the app-server call pending.
 4. Persist a non-secret tombstone for pending calls but keep the actual responder in memory. Document that restart invalidates pending calls.
-5. On the next request, require `previous_response_id`, the assistant tool-call message, and exactly one matching `role: "tool"` result per required call. Reject missing, duplicate, foreign, or already-consumed IDs.
+5. On the next request, locate the pending calls per the Stage 01 correlation decision (by `previous_response_id`, or by `tool_call_id` alone if that proves safe for unmodified clients), and require the assistant tool-call message plus exactly one matching `role: "tool"` result per required call. Reject missing, duplicate, foreign, or already-consumed IDs.
 6. Respond to each pending app-server request, resume event streaming, and associate the resulting completion with the same Codex thread.
 7. Support multiple parallel tool calls and out-of-order result messages while responding to app-server in deterministic call order.
 8. Store opaque response-to-thread mappings atomically in the state directory. Resume with `thread/resume` after completed-response restarts.
 9. Bind continuation records to effective cwd and policy metadata. Define which settings may change on a resumed thread and reject unsafe ambiguity.
 10. Add retention, pruning, corruption recovery, and schema migration for the local mapping store.
 11. Detect replayed continuation requests and make behavior idempotent where possible; otherwise return a clear conflict.
+12. Serialize access per thread: a thread runs at most one active turn, so a request arriving while another turn or pending tool suspension owns the same thread must queue behind a bound or fail fast with a conflict error, never interleave.
 
 ## Acceptance criteria
 
