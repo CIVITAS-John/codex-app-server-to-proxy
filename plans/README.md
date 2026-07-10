@@ -1,0 +1,46 @@
+# Implementation plan
+
+The work is split into gated stages. Complete stages in order unless a stage explicitly calls for a parallel spike. Each stage must leave the repository testable and document unresolved protocol risk.
+
+## Fixed decisions
+
+- Provide only `POST /v1/chat/completions` to generic HTTP clients.
+- Ship only an npm CLI named `codex-openai-proxy`.
+- Bind only to localhost/loopback and require no proxy bearer token.
+- Spawn and supervise `codex app-server` as a child process.
+- Prefer bundling or depending on a supported Codex npm distribution; otherwise discover the executable and provide installation guidance.
+- Use persisted Codex threads behind the additive `previous_response_id` continuation field.
+- Support text, exposed reasoning, tool calls, tool results, and token usage streaming.
+- Support client-defined dynamic tools across multiple HTTP requests.
+- Allow arbitrary absolute request working directories.
+- Support `read-only`, `workspace-write`, and explicit `danger-full-access` sandbox selections.
+- Support `disabled`, `cached`, and `live` web-search selections.
+- Ignore harmless unsupported fields and log structured warnings.
+- Use mocks by default and only `gpt-5.4-nano` for opt-in live development tests.
+
+## Stage map
+
+| Stage | Outcome | Gate |
+| --- | --- | --- |
+| [01](01-contract-and-spikes.md) | Verified protocol contract and resolved feasibility risks | Written mappings and executable spikes |
+| [02](02-package-and-cli.md) | Installable CLI and loopback HTTP skeleton | Offline CLI tests pass |
+| [03](03-app-server-and-auth.md) | Reliable child process plus first-run ChatGPT login | Fake-server lifecycle/auth tests pass |
+| [04](04-chat-streaming.md) | Chat request/response and SSE translation | Golden protocol tests pass |
+| [05](05-tools-and-threads.md) | Multi-request tools and persisted thread reuse | Continuation/restart tests pass |
+| [06](06-policies.md) | Per-request cwd, sandbox, approvals, and web search | Policy matrix tests pass |
+| [07](07-quality-and-ci.md) | Security, compatibility, observability, and CI | Release test matrix passes |
+| [08](08-packaging-and-release.md) | Publishable npm artifact and release runbook | Packed-install smoke test passes |
+
+## Cross-stage rules
+
+- Standard Chat Completions fields take precedence over extensions where a faithful mapping exists.
+- All additions live under `x_codex` except the agreed continuation field `previous_response_id`.
+- A response ID maps to a Codex thread ID in a durable, versioned local store; raw thread IDs are not exposed.
+- One HTTP completion corresponds to one externally visible response, though a Codex turn may remain suspended while a dynamic tool result is pending.
+- Client disconnects must not leak active turns, pending JSON-RPC requests, or child processes.
+- No default test invokes a paid model.
+
+## Definition of done
+
+The first release is done when a fresh user can install the npm package, run one command, complete ChatGPT browser login, stream a `gpt-5.4-nano` chat completion, execute a client-defined tool across two HTTP requests, continue via `previous_response_id`, choose allowed policies, receive real usage metadata, restart the proxy and resume a completed thread, and verify that the listener is unreachable through non-loopback interfaces.
+

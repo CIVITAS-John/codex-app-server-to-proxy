@@ -1,108 +1,144 @@
-# Vercel AI SDK provider for Codex app-server
+# codex-openai-proxy
 
-This repository is the design workspace for a Vercel AI SDK language-model provider backed by `codex app-server`.
+`codex-openai-proxy` is a planned npm/TypeScript CLI that exposes a deliberately small, OpenAI-compatible Chat Completions API backed by a local `codex app-server` child process and ChatGPT login.
 
-The provider will launch and communicate with the local Codex app-server over stdio JSONL, expose Codex as an AI SDK model, and translate its thread/turn/item protocol into AI SDK streaming parts.
+This repository is currently in the design stage. The implementation plan starts at [plans/README.md](plans/README.md).
 
-## Scope
+## Intended scope
 
-The first release supports only:
+The proxy will:
 
-- first-use sign-in with ChatGPT;
-- streamed text, reasoning, and tool-call parts;
-- Vercel AI SDK dynamic tools bridged to Codex dynamic tools;
-- opt-in sandbox and web-search modes, disabled unless explicitly enabled;
-- token usage and Codex metadata;
-- aggressive reuse of Codex threads, including across tool steps belonging to one AI SDK streaming request.
+- serve `POST /v1/chat/completions` on loopback only;
+- start and supervise `codex app-server` over stdio;
+- guide the user through ChatGPT login on first start by opening a browser when possible and printing a URL/instructions as a fallback;
+- stream assistant text, exposed reasoning, tool calls, tool results, and lifecycle information;
+- support client-defined function tools, returning `tool_calls` and accepting results in a later request as `role: "tool"` messages;
+- reuse persisted Codex threads through an additive `previous_response_id` request field;
+- allow per-request working directory, sandbox mode, and web-search mode selection;
+- return prompt, completion, total, cached-input, and reasoning token usage when app-server provides them;
+- ignore harmless unsupported Chat Completions fields and log a warning; and
+- provide mocked tests plus a small opt-in live suite that uses only `gpt-5.4-nano`.
 
-Everything else in the app-server protocol is out of scope until these paths are reliable. In particular, the first release does not expose Codex approvals, MCP/apps, file/image generation, realtime/audio, thread management UI, or arbitrary app-server RPCs.
+It will not initially provide the Responses API, embeddings, images, audio, remote network serving, a programmatic library API, thread-management endpoints, or broad compatibility with every Chat Completions field.
 
-## Intended API
+## Proposed CLI
 
-The exact names will be validated against the installed AI SDK version during implementation, but the target ergonomics are:
+The package name is `codex-openai-proxy` and its only public interface is a CLI:
 
-```ts
-import { streamText, tool } from 'ai';
-import { createCodex } from '@ai-sdk/codex-app-server';
-import { z } from 'zod';
-
-const codex = createCodex({
-  cwd: process.cwd(),
-  sandbox: false,
-  webSearch: false,
-});
-
-const result = streamText({
-  model: codex('gpt-5.1-codex'),
-  prompt: 'Check the deployment and explain what you find.',
-  tools: {
-    deploymentStatus: tool({
-      description: 'Read the current deployment status',
-      inputSchema: z.object({ deploymentId: z.string() }),
-      execute: async ({ deploymentId }) => lookupDeployment(deploymentId),
-    }),
-  },
-  providerOptions: {
-    codex: {
-      sandbox: 'workspace-write',
-      webSearch: true,
-    },
-  },
-});
+```sh
+npx codex-openai-proxy serve
 ```
 
-On first use, the provider checks `account/read`. If OpenAI authentication is required and no account is present, it starts the managed ChatGPT browser login, opens or reports the returned authorization URL, waits for `account/login/completed`, and then continues the original request. Codex owns token persistence and refresh.
+Proposed defaults:
 
-## Architecture
+- listen address: `127.0.0.1`;
+- port: `8787`;
+- model: supplied by each request (live development tests are pinned to `gpt-5.4-nano`);
+- Codex process: package-managed Codex executable when packaging permits, otherwise a discovered `codex` executable with an actionable installation error;
+- local proxy authentication: none;
+- unsupported request fields: ignored with structured warnings.
 
-The implementation is intentionally small and layered:
+The host will be validated as loopback. Values other than `127.0.0.1`, `::1`, or `localhost` will be rejected rather than silently exposed.
 
-1. **Process and RPC transport** owns one long-lived `codex app-server` child process, performs `initialize`/`initialized`, correlates bidirectional JSON-RPC messages, handles cancellation, and fails all pending work if the process exits.
-2. **Authentication gate** runs once per process/account state and coalesces concurrent first-use login attempts.
-3. **Thread coordinator** starts or resumes threads and serializes turns per thread. A thread ID is propagated through provider metadata and reused for all compatible steps of one AI SDK request.
-4. **Protocol adapter** converts AI SDK prompts and tools to `turn/start` and Codex dynamic-tool declarations, then maps app-server notifications back to AI SDK stream parts.
-5. **Policy adapter** maps the two explicit feature switches to Codex sandbox and web-search configuration without silently widening access.
+## Proposed HTTP contract
 
-The app-server is stateful and bidirectional. It should not be spawned once per token stream, and its stdout must never be treated as an ordinary subprocess log stream.
+The primary endpoint is:
 
-## Streaming contract
+```text
+POST /v1/chat/completions
+Content-Type: application/json
+```
 
-The adapter consumes the canonical app-server lifecycle:
+Ordinary Chat Completions fields remain conventional, including `model`, `messages`, `tools`, `tool_choice`, `stream`, and `stream_options.include_usage`.
 
-- `item/agentMessage/delta` becomes AI SDK text parts;
-- `item/reasoning/summaryTextDelta` (and supported raw reasoning deltas) becomes reasoning parts;
-- `item/tool/call` and `dynamicToolCall` lifecycle events become tool-call parts and tool execution/result handling;
-- `thread/tokenUsage/updated` is accumulated and attached to the AI SDK finish event;
-- `turn/completed` closes the stream with a mapped finish reason or error.
+The minimum extension is additive:
 
-Ordering is preserved per app-server connection. Each logical item is keyed by its Codex `itemId`/`callId`, so interleaved text, reasoning, and tool activity can be reconstructed safely.
+```json
+{
+  "model": "gpt-5.4-nano",
+  "messages": [{ "role": "user", "content": "Inspect this project" }],
+  "stream": true,
+  "previous_response_id": "chatcmpl_codex_...",
+  "x_codex": {
+    "cwd": "/absolute/path/to/project",
+    "sandbox": "workspace-write",
+    "web_search": "live"
+  }
+}
+```
 
-## Thread strategy
+`previous_response_id` is not a standard Chat Completions field. The proxy uses it to locate and resume the persisted Codex thread associated with an earlier response. Clients may omit prior message history when continuing through this extension; without it, the proxy creates a new thread.
 
-Threads are the unit of conversation state; turns are the unit of execution.
+Initial `x_codex` values are:
 
-- A new independent AI SDK request starts a Codex thread unless the caller supplies resumable Codex metadata.
-- Tool-related AI SDK steps reuse the originating thread instead of replaying the complete prompt into a fresh thread.
-- Only one turn runs on a thread at a time. Concurrent continuations are queued or rejected deterministically.
-- Aborts call `turn/interrupt`, wait for terminal `turn/completed`, and leave the thread eligible for an explicit later resume.
-- Thread IDs are exposed as provider metadata, not hidden in global prompt hashes.
+- `sandbox`: `read-only`, `workspace-write`, or `danger-full-access`;
+- `cwd`: an existing absolute directory, allowed to be outside the proxy's launch directory;
+- `web_search`: `disabled`, `cached`, or `live`.
 
-Codex dynamic tools expect a response while the same turn is active, whereas the AI SDK provider lifecycle may execute tools between model steps. Resolving that contract without deadlock is the first implementation spike and release gate; see the staged plan.
+Sandbox choice controls approval behavior. `danger-full-access` is never inferred. The request must select it explicitly, and the implementation must preserve any stricter machine or organization policy enforced by Codex.
 
-## Security defaults
+## Streaming and tools
 
-- Sandbox access is off/read-only unless the caller explicitly enables a supported mode.
-- Web search is off unless explicitly enabled.
-- Sandbox and web-search options are validated independently.
-- The provider never upgrades permissions in response to a model request.
-- ChatGPT credentials remain managed by Codex and are never returned through provider metadata or logs.
+Streaming uses standard Chat Completions SSE framing:
 
-## Planning
+```text
+data: {"object":"chat.completion.chunk",...}
 
-The implementation sequence, acceptance criteria, and open protocol decisions are in [plans/codex-vercel-provider.md](plans/codex-vercel-provider.md).
+data: [DONE]
+```
 
-The local app-server reference is in [docs/codex-app-server.md](docs/codex-app-server.md).
+Standard clients receive assistant text in `choices[].delta.content`, function calls in `choices[].delta.tool_calls`, a final `finish_reason`, and usage in the final usage-bearing chunk when requested.
 
-## Status
+Additional Codex events that have no standard Chat Completions representation are carried under `choices[].delta.x_codex`. This may include exposed reasoning summaries/text, internal shell or file-operation progress, web-search activity, tool results, and approval state. Consumers that do not understand the extension can ignore it.
 
-Design only. No provider package has been implemented yet.
+Client-defined tools follow the normal multi-request Chat Completions pattern:
+
+1. Send `tools` with the user request.
+2. Receive streamed `tool_calls` and a completion with `finish_reason: "tool_calls"`.
+3. Send a new request with the returned assistant tool-call message, corresponding `role: "tool"` messages, and the prior response's `previous_response_id`.
+4. The proxy delivers those results to the pending app-server dynamic-tool calls and continues the same Codex thread.
+
+Pending dynamic calls are process-local in the first release. Persisted, completed threads can resume after a proxy restart, but a tool call awaiting a client result cannot.
+
+## Usage metadata
+
+The proxy will populate standard Chat Completions usage fields:
+
+```json
+{
+  "prompt_tokens": 120,
+  "completion_tokens": 35,
+  "total_tokens": 155,
+  "prompt_tokens_details": { "cached_tokens": 80 },
+  "completion_tokens_details": { "reasoning_tokens": 12 }
+}
+```
+
+Fields unavailable from app-server are omitted rather than estimated.
+
+## Development constraints
+
+- Runtime baseline: Node.js 20+ on macOS, Linux, and Windows.
+- Language: strict TypeScript.
+- Public surface: CLI only.
+- Unit and protocol tests use fixtures/mocks and make no paid model calls.
+- Live tests are opt-in, narrowly scoped, and must use `gpt-5.4-nano` exclusively.
+- Documentation and implementation must distinguish standard Chat Completions behavior from `x_codex` extensions.
+
+## Design status
+
+See the staged plan:
+
+1. [Contract and spikes](plans/01-contract-and-spikes.md)
+2. [Package and CLI foundation](plans/02-package-and-cli.md)
+3. [App-server process and authentication](plans/03-app-server-and-auth.md)
+4. [Chat Completions translation and streaming](plans/04-chat-streaming.md)
+5. [Dynamic tools and thread reuse](plans/05-tools-and-threads.md)
+6. [Sandbox, working directory, and web search](plans/06-policies.md)
+7. [Quality, security, compatibility, and CI](plans/07-quality-and-ci.md)
+8. [Packaging and release](plans/08-packaging-and-release.md)
+
+## Source material
+
+- [`docs/codex-app-server.md`](docs/codex-app-server.md) is the checked-in app-server protocol reference.
+- OpenAI Chat Completions compatibility should be checked against the current official API reference during implementation.
