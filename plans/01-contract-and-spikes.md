@@ -17,6 +17,8 @@ Freeze the smallest honest compatibility contract and prove the uncertain app-se
 9. Spike all app-server web-search settings to verify how `disabled`, `cached`, and `live` map for the supported Codex version. The protocol reference documents no per-turn web-search setting — only `allowedWebSearchModes` in `configRequirements/read` — so treat this mapping as unproven until the spike lands.
 10. Spike package ownership of the Codex executable. Prefer an official supported npm dependency; document the fallback discovery/install path if no stable distributable contract exists.
 11. Spike how to represent multi-role message history on a fresh thread. `turn/start` input accepts only user text/image items with no role concept, so system/developer/assistant/tool history from a stateless client needs `thread/inject_items` (raw Responses API items) or a documented flattening; define the v1 mechanism and what it loses.
+12. Define the dynamic-tool suspension lifecycle: registration before ending the originating HTTP response, continuation deadline, timeout response to app-server, client-visible expiration error, disconnect behavior, and cleanup on shutdown.
+13. Define the `previous_response_id` resumability preflight and error taxonomy. Distinguish unknown mappings, expired mappings, pending-tool continuations, busy threads, archived/deleted threads, corrupt state, policy incompatibility, and `thread/resume` races; none may fall back to `thread/start`.
 
 ## Decisions to record
 
@@ -27,6 +29,8 @@ Freeze the smallest honest compatibility contract and prove the uncertain app-se
 - Whether tool continuations can be correlated by `tool_call_id` alone so an unmodified Chat Completions client can complete the tool loop, or whether `previous_response_id` is a hard requirement that must be documented as a compatibility break.
 - How `tool_choice` values other than `auto` behave, given no documented app-server equivalent for forcing or forbidding a tool call.
 - Whether app-server exposes cumulative or per-turn usage and how to derive per-response values without estimation. Usage streams via `thread/tokenUsage/updated` (thread-scoped), not on `turn/completed`.
+- Exact HTTP 409 error code/body for a concurrent request targeting a busy Codex thread. Same-thread requests are rejected immediately; v1 does not queue them.
+- Exact OpenAI-shaped status/code mapping for unknown, expired, and non-resumable `previous_response_id` values, including which failures are retryable.
 
 ## Acceptance criteria
 
@@ -34,9 +38,9 @@ Freeze the smallest honest compatibility contract and prove the uncertain app-se
 - Synthetic fixtures exist for every app-server event type the proxy claims to expose.
 - A disposable spike demonstrates text streaming and a two-request dynamic-tool round trip using `gpt-5.4-nano` only.
 - A disposable restart spike proves a completed persisted thread can resume.
+- Fixtures prove every rejected continuation leaves the response mapping and Codex thread unchanged and never starts a replacement thread.
 - Every unresolved behavior has an explicit conservative fallback or blocks the next stage.
 
 ## Cost guard
 
 Run at most four live model calls for this stage: text, tool request, tool continuation, and post-restart continuation. All use `gpt-5.4-nano` with small output limits.
-
