@@ -36,14 +36,34 @@ The work is split into gated stages. Complete stages in order unless a stage exp
 - Standard Chat Completions fields take precedence over extensions where a faithful mapping exists.
 - All additions live under `x_codex` except the agreed continuation field `previous_response_id`.
 - A response ID maps to a Codex thread ID in a durable, versioned local store; raw thread IDs are not exposed.
-- Supplying `previous_response_id` requires continuation. The proxy must validate the local mapping and confirm that app-server can resume the mapped thread; it rejects any non-resumable reference and never falls back to a new thread.
+- Supplying `previous_response_id` requires continuation.
+    - The proxy must validate the local mapping and confirm that app-server can resume the mapped thread.
+    - It rejects any non-resumable reference and never falls back to a new thread.
+- A `previous_response_id` must reference its thread's newest completed response.
+    - Continuing from an older response is a branch; v1 rejects it with a distinct error rather than resuming a thread whose later turns would be silently included.
+    - `thread/fork` with `lastTurnId` is the documented mechanism if branching is ever supported.
 - One HTTP completion corresponds to one externally visible response, though a Codex turn may remain suspended while a dynamic tool result is pending.
-- A Codex thread runs at most one active turn. A concurrent request targeting a thread with an active turn or suspended dynamic tool call is rejected immediately with an OpenAI-shaped HTTP 409 conflict; requests never queue or interleave.
-- A registered `item/tool/call` dynamic-tool request may remain suspended after its originating HTTP response ends, but only until its documented continuation deadline. Every other server-initiated app-server request must be answered or rejected within the owning HTTP request lifecycle.
-- Elicitation is disabled: the proxy does not advertise form-elicitation capability or expose user-input elicitation, and it immediately rejects any unexpected elicitation request from app-server.
+- A Codex thread runs at most one active turn.
+    - A concurrent request targeting a thread with an active turn or suspended dynamic tool call is rejected immediately with an OpenAI-shaped HTTP 409 conflict.
+    - Requests never queue or interleave.
+- A registered `item/tool/call` dynamic-tool request may remain suspended after its originating HTTP response ends, but only until its documented continuation deadline.
+    - Every other server-initiated app-server request must be answered or rejected within the owning HTTP request lifecycle.
+- Elicitation is disabled.
+    - The proxy does not advertise form-elicitation capability or expose user-input elicitation.
+    - It immediately rejects any unexpected elicitation request from app-server.
 - Client disconnects must not leak active turns, pending JSON-RPC requests, or child processes.
 - No default test invokes a paid model.
 
 ## Definition of done
 
-The first release is done when a fresh user can install the npm package, run one command, complete ChatGPT browser login, stream a `gpt-5.4-nano` chat completion, execute a client-defined tool across two HTTP requests, continue via `previous_response_id`, choose allowed policies, receive real usage metadata, restart the proxy and resume a completed thread, and verify that the listener is unreachable through non-loopback interfaces.
+The first release is done when a fresh user can:
+
+- install the npm package and run one command;
+- complete ChatGPT browser login;
+- stream a `gpt-5.4-nano` chat completion;
+- execute a client-defined tool across two HTTP requests;
+- continue via `previous_response_id`;
+- choose allowed policies;
+- receive real usage metadata;
+- restart the proxy and resume a completed thread;
+- verify that the listener is unreachable through non-loopback interfaces.

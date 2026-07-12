@@ -67,7 +67,7 @@ The minimum extension is additive:
 }
 ```
 
-`previous_response_id` is not a standard Chat Completions field. The proxy uses it to locate and resume the persisted Codex thread associated with an earlier response. Before accepting the request, the proxy verifies both its durable response mapping and the thread's current app-server state. An unknown, expired, busy, archived, deleted, policy-incompatible, or otherwise non-resumable continuation is rejected; the proxy never silently creates a replacement thread. Clients may omit prior message history when continuing through this extension; only omission of `previous_response_id` creates a new thread.
+`previous_response_id` is not a standard Chat Completions field. The proxy uses it to locate and resume the persisted Codex thread associated with an earlier response. Before accepting the request, the proxy verifies both its durable response mapping and the thread's current app-server state. An unknown, expired, superseded, busy, archived, deleted, policy-incompatible, or otherwise non-resumable continuation is rejected; the proxy never silently creates a replacement thread. A superseded reference (one that is no longer the newest response on its thread) is rejected rather than treated as a branch, because resuming would silently include the later turns. Clients may omit prior message history when continuing through this extension; only omission of `previous_response_id` creates a new thread.
 
 Initial `x_codex` values are:
 

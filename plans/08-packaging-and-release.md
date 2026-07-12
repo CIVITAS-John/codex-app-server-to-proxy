@@ -7,7 +7,8 @@ Publish a reproducible npm CLI that can locate a compatible Codex executable and
 ## Work
 
 1. Finalize package metadata, files allow-list, bin mapping, license, provenance, repository links, supported engines, and platform declarations.
-2. Pin or constrain the supported Codex distribution/version based on Stage 01. If it cannot be installed as an npm dependency, add precise detection and official installation guidance instead of an implicit runtime download.
+2. Pin or constrain the supported Codex distribution/version based on Stage 01.
+    - If it cannot be installed as an npm dependency, add precise detection and official installation guidance instead of an implicit runtime download.
 3. Ensure installation scripts do not execute downloaded binaries or perform login/network activity.
 4. Add `--version`, `--help`, startup diagnostics, and actionable errors for missing/incompatible Codex, failed login, unavailable port, invalid host, and denied policy.
 5. Test installation from the packed tarball in clean Node 20+ environments on each supported OS.
