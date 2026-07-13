@@ -2,6 +2,8 @@ import { access, constants, stat } from "node:fs/promises";
 import { parseServeOptions } from "./config.js";
 import { createLogger } from "./logger.js";
 import { createProxyServer } from "./server.js";
+import { startAppServer, type AppServer } from "./app-server.js";
+import { ensureAuthenticated } from "./auth.js";
 
 export const usage = `Usage: codex-openai-proxy serve [options]
 
@@ -37,24 +39,91 @@ export async function run(argv: readonly string[]): Promise<number> {
     ready: false,
   });
 
+  let appServer: AppServer | undefined;
+  let lifecycleStopping = false;
+  const initializeAppServer = async () => {
+    const next = await startAppServer({
+      codexPath: options.codexPath,
+      root: options.root,
+      startupTimeoutMs: options.toolTimeoutMs,
+      shutdownTimeoutMs: options.shutdownTimeoutMs,
+      log,
+    });
+    try {
+      await ensureAuthenticated({
+        rpc: next.rpc,
+        log,
+        timeoutMs: options.toolTimeoutMs,
+        interactive: Boolean(process.stderr.isTTY),
+        terminal: (message) => process.stderr.write(message),
+      });
+    } catch (error) {
+      await next.stop().catch(() => undefined);
+      throw error;
+    }
+    next.child.once("exit", () => {
+      if (!lifecycleStopping) void recoverAppServer();
+    });
+    return next;
+  };
+  let recovering = false;
+  const recoverAppServer = async (): Promise<void> => {
+    if (recovering || lifecycleStopping) return;
+    recovering = true;
+    proxy.setReady(false);
+    for (let attempt = 1; attempt <= 3 && !lifecycleStopping; attempt += 1) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, 100 * 2 ** (attempt - 1)),
+      );
+      try {
+        appServer = await initializeAppServer();
+        proxy.setReady(true);
+        log("info", "app_server_restarted", { attempt });
+        recovering = false;
+        return;
+      } catch (error) {
+        log("error", "app_server_restart_failed", {
+          attempt,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    recovering = false;
+    log("error", "app_server_restart_exhausted");
+  };
+  try {
+    appServer = await initializeAppServer();
+    proxy.setReady(true);
+    log("info", "app_server_ready");
+  } catch (error) {
+    await appServer?.stop().catch(() => undefined);
+    await proxy.close().catch(() => undefined);
+    throw error;
+  }
+
   return await new Promise<number>((resolve) => {
     let stopping = false;
     const stop = (signal: NodeJS.Signals): void => {
       if (stopping) return;
       stopping = true;
+      lifecycleStopping = true;
       log("info", "shutdown_started", { signal });
-      void proxy.close().then(
-        () => {
-          log("info", "shutdown_complete");
-          resolve(0);
-        },
-        (error: unknown) => {
-          log("error", "shutdown_failed", {
-            error: error instanceof Error ? error.message : String(error),
-          });
-          resolve(1);
-        },
-      );
+      proxy.setReady(false);
+      void appServer!
+        .stop()
+        .then(() => proxy.close())
+        .then(
+          () => {
+            log("info", "shutdown_complete");
+            resolve(0);
+          },
+          (error: unknown) => {
+            log("error", "shutdown_failed", {
+              error: error instanceof Error ? error.message : String(error),
+            });
+            resolve(1);
+          },
+        );
     };
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);

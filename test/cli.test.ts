@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { test } from "vitest";
 
 test("CLI rejects unsafe binds before opening a socket", async () => {
@@ -20,16 +23,33 @@ test("CLI rejects unsafe binds before opening a socket", async () => {
 });
 
 test("CLI exits cleanly after a termination signal", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-proxy-test-"));
+  const fake = join(directory, "codex");
+  await writeFile(
+    fake,
+    `#!${process.execPath}\nif (process.argv.includes('--version')) { console.log('codex-cli 1.0.0'); process.exit(0); }\nconst rl=require('readline').createInterface({input:process.stdin});\nrl.on('line', line => { const m=JSON.parse(line); if(m.method==='initialize') console.log(JSON.stringify({id:m.id,result:{}})); if(m.method==='account/read') console.log(JSON.stringify({id:m.id,result:{account:{type:'chatgpt'},requiresOpenaiAuth:true}})); });\n`,
+    "utf8",
+  );
+  await chmod(fake, 0o755);
   const child = spawn(
     process.execPath,
-    ["dist/bin.js", "serve", "--port", "0", "--root", "."],
+    [
+      "dist/bin.js",
+      "serve",
+      "--port",
+      "0",
+      "--root",
+      ".",
+      "--codex-path",
+      fake,
+    ],
     { cwd: new URL("..", import.meta.url), stdio: ["ignore", "pipe", "pipe"] },
   );
   let stderr = "";
   child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
     stderr += chunk;
   });
-  while (!stderr.includes("server_listening")) {
+  while (!stderr.includes("app_server_ready")) {
     await once(child.stderr, "data");
   }
   child.kill("SIGTERM");
@@ -37,4 +57,5 @@ test("CLI exits cleanly after a termination signal", async () => {
   assert.equal(code, 0);
   assert.equal(signal, null);
   assert.match(stderr, /shutdown_complete/);
+  await rm(directory, { recursive: true });
 });

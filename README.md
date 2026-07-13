@@ -4,7 +4,7 @@
 
 ## Development CLI
 
-Build and start the Stage 02 server:
+Build and start the Stage 03 server:
 
 ```sh
 npm install
@@ -12,7 +12,9 @@ npm run build
 node dist/bin.js serve
 ```
 
-The listener defaults to `127.0.0.1:8787`. `GET /health` returns process liveness, while `GET /ready` returns HTTP 503 until Stage 03 supplies an initialized and authenticated app-server. Chat Completions requests are bounded and validated but are not translated in this stage.
+The listener defaults to `127.0.0.1:8787`. The CLI resolves Codex from the supported npm package when available, with `--codex-path` or `PATH` as fallbacks, validates it, and owns one `codex app-server` child. `GET /health` reports proxy liveness. `GET /ready` remains HTTP 503 until app-server initialization and usable ChatGPT authentication complete, and becomes unavailable again during bounded crash recovery. Chat Completions requests are bounded and validated but are not translated until Stage 04.
+
+On first use, an interactive CLI attempts to open the ChatGPT authorization URL without a shell. If that fails, it prints the URL once to the interactive terminal; structured logs contain only a redacted event. A non-interactive CLI uses the device-code flow. Shutdown closes pending transport requests and terminates app-server after the configured grace period.
 
 Run `node dist/bin.js --help` for loopback host, port, root, Codex path, state directory, timeout, request limit, and log-level options. Logs are structured JSON written only to stderr.
 
