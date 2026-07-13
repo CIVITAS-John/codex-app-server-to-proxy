@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://codex-openai-proxy.invalid/x-codex.schema.json",
+  "title": "x_codex request extension",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "cwd": { "type": "string", "minLength": 1 },
+    "sandbox": { "enum": ["read-only", "workspace-write", "danger-full-access"] },
+    "web_search": { "enum": ["disabled", "cached", "live"] }
+  }
+}

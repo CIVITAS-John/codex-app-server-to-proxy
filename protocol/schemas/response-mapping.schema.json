@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://codex-openai-proxy.invalid/response-mapping.schema.json",
+  "title": "Durable response mapping record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "responseId", "threadId", "turnId", "status", "createdAt", "updatedAt", "fingerprint"],
+  "properties": {
+    "version": { "const": 1 },
+    "responseId": { "type": "string", "pattern": "^chatcmpl_codex_[A-Za-z0-9_-]{16,}$" },
+    "threadId": { "type": "string", "minLength": 1 },
+    "turnId": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["completed", "pending_tool", "expired", "failed"] },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "fingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "toolsSha256", "cwd", "policySha256"],
+      "properties": {
+        "model": { "type": "string" },
+        "toolsSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "cwd": { "type": "string" },
+        "policySha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "pendingTool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["callIds", "deadlineAt"],
+      "properties": {
+        "callIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+        "deadlineAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "allOf": [{
+    "if": { "properties": { "status": { "const": "pending_tool" } }, "required": ["status"] },
+    "then": { "required": ["pendingTool"] },
+    "else": { "not": { "required": ["pendingTool"] } }
+  }]
+}

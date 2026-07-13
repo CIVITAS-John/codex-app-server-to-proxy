@@ -1,0 +1,8 @@
+{
+  "codexVersion": "0.144.0-alpha.4",
+  "generatedAt": "2026-07-12",
+  "experimental": true,
+  "typescriptCommand": "codex app-server generate-ts --experimental --out protocol/generated/typescript",
+  "jsonSchemaCommand": "codex app-server generate-json-schema --experimental --out protocol/generated/json-schema",
+  "executableSource": "Discovered codex executable; an official stable npm executable contract is not established for this alpha build. Packaging must prefer an official supported distribution if one exists at Stage 08, otherwise use --codex-path or PATH discovery with installation guidance."
+}

@@ -1,0 +1,14 @@
+{
+  "name": "codex-openai-proxy",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate:protocol": "node scripts/generate-protocol.mjs",
+    "test": "node --test",
+    "spike:offline": "node scripts/offline-spike.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

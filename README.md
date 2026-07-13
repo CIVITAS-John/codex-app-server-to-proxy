@@ -2,7 +2,7 @@
 
 `codex-openai-proxy` is a planned npm/TypeScript CLI that exposes a deliberately small, OpenAI-compatible Chat Completions API backed by a local `codex app-server` child process and ChatGPT login.
 
-This repository is currently in the design stage. The implementation plan starts at [plans/README.md](plans/README.md).
+Stage 01's offline protocol contract is implemented. See [protocol/CONTRACT.md](protocol/CONTRACT.md) and the remaining gates in [plans/README.md](plans/README.md).
 
 ## Intended scope
 

@@ -37,7 +37,7 @@ The work is split into gated stages. Complete stages in order unless a stage exp
 
 ## Current status
 
-The repository is pre-implementation. Stage 01 verifies the remaining protocol details; the product behavior above is already decided.
+Stage 01's offline contract gate is implemented. The generated protocol artifacts, compatibility contract, schemas, fixtures, and disposable offline spikes are checked in and tested. Live observations remain explicitly unproven until the opt-in four-call spike is run; Stage 02 must not assume those behaviors.
 
 ## Cross-stage rules
 
