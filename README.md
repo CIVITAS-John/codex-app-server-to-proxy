@@ -11,10 +11,10 @@ The proxy will:
 - serve `POST /v1/chat/completions` on loopback only;
 - start and supervise `codex app-server` over stdio;
 - guide the user through ChatGPT login on first start by opening a browser when possible and printing a URL/instructions as a fallback;
-- stream assistant text, exposed reasoning, tool calls, tool results, and lifecycle information;
-- support client-defined function tools, returning `tool_calls` and accepting results in a later request as `role: "tool"` messages;
+- stream assistant text, exposed reasoning, tool calls, tool results, and lifecycle information where the pinned app-server exposes them;
+- support client-defined function tools across requests by keeping app-server calls pending for a short client round trip;
 - reuse persisted Codex threads through an additive `previous_response_id` request field;
-- allow per-request working directory, sandbox mode, and web-search mode selection;
+- allow per-request working directory and sandbox selection, plus each web-search mode app-server can enforce for that request;
 - return prompt, completion, total, cached-input, and reasoning token usage when app-server provides them;
 - ignore harmless unsupported Chat Completions fields and log a warning; and
 - provide mocked tests plus a small opt-in live suite that uses only `gpt-5.4-nano`.
@@ -35,6 +35,7 @@ Proposed defaults:
 - port: `8787`;
 - model: supplied by each request (live development tests are pinned to `gpt-5.4-nano`);
 - Codex process: package-managed Codex executable when packaging permits, otherwise a discovered `codex` executable with an actionable installation error;
+- root directory: the proxy's launch directory, configurable with `--root`;
 - local proxy authentication: none;
 - unsupported request fields: ignored with structured warnings.
 
@@ -72,8 +73,8 @@ The minimum extension is additive:
 Initial `x_codex` values are:
 
 - `sandbox`: `read-only`, `workspace-write`, or `danger-full-access`;
-- `cwd`: an existing absolute directory, allowed to be outside the proxy's launch directory;
-- `web_search`: `disabled`, `cached`, or `live`.
+- `cwd`: an existing directory that resolves to the configured root or one of its descendants;
+- `web_search`: any enforceable value among `disabled`, `cached`, or `live`; unsupported values return an error.
 
 Sandbox choice controls approval behavior. `danger-full-access` is never inferred. The request must select it explicitly, and the implementation must preserve any stricter machine or organization policy enforced by Codex.
 
@@ -98,7 +99,7 @@ Client-defined tools follow the normal multi-request Chat Completions pattern:
 3. Send a new request with the returned assistant tool-call message, corresponding `role: "tool"` messages, and the prior response's `previous_response_id`.
 4. The proxy delivers those results to the pending app-server dynamic-tool calls and continues the same Codex thread.
 
-Pending dynamic calls are process-local in the first release. Persisted, completed threads can resume after a proxy restart, but a tool call awaiting a client result cannot.
+Pending dynamic calls are process-local in the first release. Their deadline is configurable and defaults to five minutes. Persisted, completed threads can resume after a proxy restart, but a tool call awaiting a client result cannot.
 
 ## Usage metadata
 

@@ -6,10 +6,10 @@ Translate the supported Chat Completions subset to app-server threads/turns and 
 
 ## Work
 
-1. Validate `model`, `messages`, `stream`, `stream_options`, `tools`, `tool_choice`, `previous_response_id`, and `x_codex`; collect harmless unsupported fields for one structured warning.
+1. Validate `model`, `messages`, `stream`, `stream_options`, `tools`, `tool_choice`, `previous_response_id`, and `x_codex`. Reject any value that cannot be applied faithfully; warn only for fields proven harmless to ignore.
 2. Convert system/developer/user/assistant/tool messages into app-server input using the history mechanism decided in Stage 01.
     - `turn/start` input carries no roles, so never silently collapse role or order into plain user text without documenting it.
-3. Start a thread when no continuation exists, then start a turn with the request model and policy settings.
+3. Start a thread when no continuation exists, then start a turn with only the request model and policy settings proven enforceable in Stage 01.
 4. Create a single event-normalization layer for app-server item lifecycle and delta notifications.
     - Treat `item/*` notifications as the canonical item stream.
     - `turn/completed` currently carries an empty `items` array and must not be relied on for content.

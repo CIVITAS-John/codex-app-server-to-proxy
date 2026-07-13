@@ -14,14 +14,13 @@ Publish a reproducible npm CLI that can locate a compatible Codex executable and
 5. Test installation from the packed tarball in clean Node 20+ environments on each supported OS.
 6. Write the end-user quick start, curl examples, tool continuation example, `x_codex` reference, security model, troubleshooting, and uninstall/state cleanup instructions.
 7. Create a release checklist covering schema refresh, changelog, offline suite, packed smoke test, opt-in nano live smoke, dependency audit, provenance, and rollback/deprecation.
-8. Publish a prerelease first. Validate install, login, streaming, tool continuation, usage, policy selection, and restart continuation before a stable tag.
+8. Publish a prerelease first. Validate install, login, streaming, every retained Stage 01 feature, usage when reported, and restart continuation before a stable tag.
 
 ## Acceptance criteria
 
 - A clean user can install and run the CLI without cloning the repository.
 - `npm pack --dry-run` contains only intended runtime/docs files and no credentials, fixtures with private data, or local state.
 - Packed-install smoke tests pass on macOS, Linux, and Windows with Node 20+.
-- One manual prerelease smoke uses only `gpt-5.4-nano` and records its exact call count.
+- One manual prerelease smoke uses only `gpt-5.4-nano`, declares its expected maximum call count before execution, and records its exact call count.
 - The README accurately labels every compatibility extension and known limitation.
 - The release can be rolled back or deprecated without stranding persisted thread mappings.
-

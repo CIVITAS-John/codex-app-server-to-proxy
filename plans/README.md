@@ -2,7 +2,7 @@
 
 The work is split into gated stages. Complete stages in order unless a stage explicitly calls for a parallel spike. Each stage must leave the repository testable and document unresolved protocol risk.
 
-## Fixed decisions
+## Product decisions
 
 - Provide only `POST /v1/chat/completions` to generic HTTP clients.
 - Ship only an npm CLI named `codex-openai-proxy`.
@@ -11,10 +11,14 @@ The work is split into gated stages. Complete stages in order unless a stage exp
 - Prefer bundling or depending on a supported Codex npm distribution; otherwise discover the executable and provide installation guidance.
 - Use persisted Codex threads behind the additive `previous_response_id` continuation field.
 - Support text, exposed reasoning, tool calls, tool results, and token usage streaming.
-- Support client-defined dynamic tools across multiple HTTP requests.
-- Allow arbitrary absolute request working directories.
+- Support client-defined dynamic tools across multiple HTTP requests. Keep the app-server tool request pending for the short client round trip, as with a locally executed tool.
+- Restrict request working directories to the configured root or its descendants. The root defaults to the proxy's launch directory.
 - Support `read-only`, `workspace-write`, and explicit `danger-full-access` sandbox selections.
-- Support `disabled`, `cached`, and `live` web-search selections.
+- Expose each web-search mode the pinned app-server can enforce per request and reject the others.
+- Handle approvals non-interactively with `auto_review` where policy permits and decline any unexpected approval request.
+- On continuation, require the original tool set, model, cwd, and policy.
+- Reject message history that cannot be represented faithfully.
+- Reject any request value the proxy cannot apply exactly. During v1 development, prefer a clear error over fallback or approximation.
 - Ignore harmless unsupported fields and log structured warnings.
 - Use mocks by default and only `gpt-5.4-nano` for opt-in live development tests.
 
@@ -31,6 +35,10 @@ The work is split into gated stages. Complete stages in order unless a stage exp
 | [07](07-quality-and-ci.md) | Security, compatibility, observability, and CI | Release test matrix passes |
 | [08](08-packaging-and-release.md) | Publishable npm artifact and release runbook | Packed-install smoke test passes |
 
+## Current status
+
+The repository is pre-implementation. Stage 01 verifies the remaining protocol details; the product behavior above is already decided.
+
 ## Cross-stage rules
 
 - Standard Chat Completions fields take precedence over extensions where a faithful mapping exists.
@@ -46,7 +54,7 @@ The work is split into gated stages. Complete stages in order unless a stage exp
 - A Codex thread runs at most one active turn.
     - A concurrent request targeting a thread with an active turn or suspended dynamic tool call is rejected immediately with an OpenAI-shaped HTTP 409 conflict.
     - Requests never queue or interleave.
-- A registered `item/tool/call` dynamic-tool request may remain suspended after its originating HTTP response ends, but only until its documented continuation deadline.
+- A registered `item/tool/call` request may remain pending for the client tool round trip. The deadline is configurable and defaults to five minutes.
     - Every other server-initiated app-server request must be answered or rejected within the owning HTTP request lifecycle.
 - Elicitation is disabled.
     - The proxy does not advertise form-elicitation capability or expose user-input elicitation.
@@ -64,6 +72,6 @@ The first release is done when a fresh user can:
 - execute a client-defined tool across two HTTP requests;
 - continue via `previous_response_id`;
 - choose allowed policies;
-- receive real usage metadata;
+- receive usage metadata when app-server reports attributable counts;
 - restart the proxy and resume a completed thread;
 - verify that the listener is unreachable through non-loopback interfaces.

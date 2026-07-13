@@ -20,7 +20,7 @@ Reliably own one initialized app-server child process and complete ChatGPT login
 6. Attempt to open the authorization URL using a narrowly scoped platform launcher.
     - If launching fails, write the authorization URL once to the interactive terminal with instructions; send only a redacted event to structured logs and never persist the URL.
     - Wait for `account/login/completed` and support cancellation/timeout.
-    - The browser flow's callback binds to localhost on the proxy host, so a remote browser cannot complete it; decide whether v1 fails with instructions or offers the `chatgptDeviceCode` flow for headless machines.
+    - If local browser login cannot complete, offer `chatgptDeviceCode` login for headless or remote environments.
 7. Mark readiness only after initialization and usable authentication.
 8. Define restart policy for unexpected app-server exit: bounded exponential backoff, failure threshold, readiness changes, and failure of in-flight requests.
 9. On proxy shutdown, interrupt active turns, reject pending tool continuations, close stdio, then terminate the child after a grace period.
@@ -31,7 +31,7 @@ Reliably own one initialized app-server child process and complete ChatGPT login
 ## Acceptance criteria
 
 - A fake app-server verifies initialization ordering, interleaved requests/notifications, overload errors, malformed output, crash loops, and graceful shutdown.
-- Auth tests cover already logged in, browser launch success, launcher failure with a one-time interactive fallback, login failure, cancellation, and timeout.
+- Auth tests cover already logged in, browser launch success, device-code fallback, login failure, cancellation, and timeout.
 - Tests prove the fallback authorization URL reaches only the interactive terminal sink while structured logs, diagnostics, and state redact or omit it.
 - Elicitation capabilities are absent from initialization and unexpected elicitation requests receive an immediate fail-closed response.
 - No shell interpolation is used for spawning Codex or opening the browser.

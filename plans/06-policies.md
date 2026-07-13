@@ -6,18 +6,19 @@ Expose per-request execution controls without weakening app-server or managed po
 
 ## Work
 
-1. Require `x_codex.cwd` to be absolute, existing, and a directory. Canonicalize it without restricting it to the proxy launch directory.
+1. Canonicalize the configured root and every `x_codex.cwd`. Require cwd to be an existing directory whose resolved path is the root or a descendant.
+    - Default the root to the proxy's launch directory and allow an explicit `--root` override.
+    - Reject relative paths, sibling paths, prefix lookalikes, and symlink escapes.
 2. Map `read-only`, `workspace-write`, and `danger-full-access` to the supported app-server sandbox/permission representation discovered in Stage 01.
 3. Never default to `danger-full-access`. Make the safe default explicit and visible in startup logs.
-4. Map `disabled`, `cached`, and `live` web search to the current supported Codex setting. Fail closed if the requested distinction cannot be honored.
+4. Accept each web-search mode that app-server can enforce for the individual request. Reject unsupported modes and never mutate shared configuration to simulate them.
 5. Read effective configuration requirements via `configRequirements/read` where available (`allowedSandboxModes`, `allowedApprovalPolicies`, `allowedWebSearchModes`) and reject selections disallowed by organization or machine policy.
-6. Define approval policy by sandbox mode. Read-only/workspace operations may surface approval requests through `x_codex`; full-access behavior must still respect effective managed policy.
-7. Add an approval continuation mechanism only if it can be represented without confusing it with client function tools; otherwise return a documented terminal error and leave interactive approvals out of v1.
-    - Either way, never leave a server-initiated approval request unanswered: approvals are blocking JSON-RPC requests, so the proxy must select a non-interactive approval policy and auto-respond (decline) to any that still arrive, or the turn hangs forever.
-    - Evaluate the documented `approvalsReviewer: "auto_review"` subagent as a non-interactive alternative to blanket decline, and record the security consequence of whichever is chosen.
+6. Use non-interactive `auto_review` where effective policy permits; full access must still respect managed policy.
+7. Do not add an approval continuation protocol in v1. Approval activity may be reported as `x_codex` diagnostics, but generic Chat Completions clients cannot answer it.
+    - Never leave a server-initiated approval request unanswered. Apply the selected non-interactive reviewer/policy, and immediately decline any unexpected request that still reaches the proxy.
 8. Account for the project-trust side effect: `thread/start` with a `cwd` and a writable sandbox marks that project as trusted in the user's `config.toml`.
     - Document it prominently.
-    - Decide whether v1 must prevent or scope it, since the proxy accepts arbitrary request directories.
+    - The configured root boundary limits which directories the proxy can cause app-server to trust.
 9. Prevent policy changes on a continued response from mutating the historical meaning of prior tool calls.
     - Record and validate effective settings on every response mapping.
     - `turn/start` config overrides become the default for subsequent turns on the same thread, so set or verify the effective policy explicitly on every turn instead of relying on prior-request state.
@@ -26,7 +27,7 @@ Expose per-request execution controls without weakening app-server or managed po
 ## Acceptance criteria
 
 - A policy matrix covers every sandbox × web-search combination, allowed and managed-denied cases, and continuation changes.
-- Symlink, nonexistent path, file-as-cwd, relative path, permission-denied, and platform path tests pass.
+- Root equality, valid descendants, sibling paths, prefix lookalikes, symlink escapes, nonexistent paths, files, relative paths, permission-denied paths, and platform-specific paths are tested.
 - Network/web-search disabled requests do not silently fall back to live search.
 - `danger-full-access` can only be selected explicitly and cannot bypass stricter effective policy.
 - Live policy smoke tests, if required, use `gpt-5.4-nano` and the minimum number of calls.

@@ -2,16 +2,17 @@
 
 ## Goal
 
-Support standard client-defined tools across requests while maximizing safe Codex thread reuse.
+Support client-defined tools across requests while preserving safe Codex thread reuse.
 
 ## Work
 
 1. Translate Chat Completions function tools to app-server `dynamicTools` with experimental capability enabled.
-    - Tools are per-request in Chat Completions but thread-scoped at `thread/start`; apply the Stage 01 finding for whether a continued thread can change its tool set, and reject or document requests it cannot honor.
+    - Tools are thread-scoped in app-server. Canonicalize the definition and reject a changed tool set on continuation.
     - Register only top-level functions so `item/tool/call` correlation never depends on `namespace`.
     - Validate function names against the app-server constraints (`^[a-zA-Z0-9_-]+$`, 1 to 128 characters) with OpenAI-shaped errors.
 2. When app-server issues `item/tool/call`, correlate name, call ID, arguments, thread, turn, and pending JSON-RPC response.
-3. Stream standard `delta.tool_calls` argument fragments, register the pending continuation with a deadline, and end the HTTP response with `finish_reason: "tool_calls"` while keeping the app-server call pending.
+3. Stream standard `delta.tool_calls` argument fragments, register the pending continuation with the configured deadline, and end the HTTP response with `finish_reason: "tool_calls"` while keeping the app-server call pending.
+    - Default the deadline to five minutes.
     - This registered dynamic-tool suspension is the only server-initiated request allowed to outlive its originating HTTP request.
 4. Persist a non-secret tombstone for pending calls but keep the actual responder in memory.
     - On deadline expiry, answer the app-server request with a timeout error and invalidate the continuation.
@@ -27,7 +28,7 @@ Support standard client-defined tools across requests while maximizing safe Code
     - For every completed-response continuation, first require a valid, unexpired mapping.
     - Then inspect the mapped thread through app-server (`thread/read` returns stored status without resuming) and verify that its status and effective policy are resumable.
     - Treat `thread/resume` as the final authoritative check and handle a state change between inspection and resume as a rejected continuation.
-9. Bind continuation records to effective model, cwd, and policy metadata. Define which settings may change on a resumed thread and reject unsafe ambiguity, applying the Stage 01 model-consistency decision.
+9. Bind continuation records to the canonical tool set, model, cwd, and effective policy. Reject any mismatch.
 10. Add retention, pruning, corruption recovery, and schema migration for the local mapping store.
 11. Detect replayed continuation requests and make behavior idempotent where possible; otherwise return a clear conflict.
 12. Serialize access per thread: a thread runs at most one active turn.
