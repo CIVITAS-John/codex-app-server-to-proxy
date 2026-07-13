@@ -1,8 +1,22 @@
 # codex-openai-proxy
 
-`codex-openai-proxy` is a planned npm/TypeScript CLI that exposes a deliberately small, OpenAI-compatible Chat Completions API backed by a local `codex app-server` child process and ChatGPT login.
+`codex-openai-proxy` is an npm/TypeScript CLI under staged development that exposes a deliberately small, OpenAI-compatible Chat Completions API backed by a local `codex app-server` child process and ChatGPT login.
 
-Stage 01's offline protocol contract is implemented. See [protocol/CONTRACT.md](protocol/CONTRACT.md) and the remaining gates in [plans/README.md](plans/README.md).
+Stages 01 and 02 are implemented: the offline protocol contract and a loopback-only HTTP CLI foundation. See [protocol/CONTRACT.md](protocol/CONTRACT.md) and the remaining gates in [plans/README.md](plans/README.md).
+
+## Development CLI
+
+Build and start the Stage 02 server:
+
+```sh
+npm install
+npm run build
+node dist/bin.js serve
+```
+
+The listener defaults to `127.0.0.1:8787`. `GET /health` returns process liveness, while `GET /ready` returns HTTP 503 until Stage 03 supplies an initialized and authenticated app-server. Chat Completions requests are bounded and validated but are not translated in this stage.
+
+Run `node dist/bin.js --help` for loopback host, port, root, Codex path, state directory, timeout, request limit, and log-level options. Logs are structured JSON written only to stderr.
 
 ## Intended scope
 

@@ -37,7 +37,7 @@ The work is split into gated stages. Complete stages in order unless a stage exp
 
 ## Current status
 
-Stage 01's offline contract gate is implemented. The generated protocol artifacts, compatibility contract, schemas, fixtures, and disposable offline spikes are checked in and tested. Live observations remain explicitly unproven until the opt-in four-call spike is run; Stage 02 must not assume those behaviors.
+Stages 01 and 02 are implemented. The generated protocol artifacts, compatibility contract, schemas, fixtures, and disposable offline spikes are checked in and tested. The installable TypeScript CLI enforces loopback-only binding and provides offline-tested health, readiness, request bounds, structured errors, and graceful shutdown. Readiness remains false until Stage 03 implements app-server initialization and authentication. Live observations remain explicitly unproven until the opt-in four-call spike is run; later stages must not assume those behaviors.
 
 ## Cross-stage rules
 

@@ -1,0 +1,132 @@
+import { isAbsolute, resolve } from "node:path";
+
+export const DEFAULT_BODY_LIMIT = 1024 * 1024;
+
+export interface ServeOptions {
+  host: "127.0.0.1" | "::1";
+  port: number;
+  root: string;
+  codexPath: string;
+  toolTimeoutMs: number;
+  requestTimeoutMs: number;
+  shutdownTimeoutMs: number;
+  bodyLimitBytes: number;
+  maxRequests: number;
+  logLevel: LogLevel;
+  stateDir: string;
+}
+
+export type LogLevel = "debug" | "info" | "warn" | "error";
+
+export function normalizeLoopbackHost(value: string): ServeOptions["host"] {
+  const host = value.trim().toLowerCase();
+  if (host === "127.0.0.1") return "127.0.0.1";
+  if (host === "::1") return "::1";
+  if (host === "localhost") return "127.0.0.1";
+  throw new Error(
+    `Invalid --host ${JSON.stringify(value)}. Only 127.0.0.1, ::1, and localhost are allowed.`,
+  );
+}
+
+function integer(
+  name: string,
+  value: string,
+  minimum: number,
+  maximum: number,
+): number {
+  if (!/^\d+$/.test(value)) throw new Error(`${name} must be an integer.`);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`${name} must be between ${minimum} and ${maximum}.`);
+  }
+  return parsed;
+}
+
+function duration(name: string, value: string): number {
+  const match = /^(\d+)(ms|s|m)?$/.exec(value);
+  if (!match)
+    throw new Error(`${name} must be a duration such as 500ms, 30s, or 5m.`);
+  const amount = Number(match[1]);
+  const multiplier = match[2] === "m" ? 60_000 : match[2] === "s" ? 1_000 : 1;
+  const result = amount * multiplier;
+  if (!Number.isSafeInteger(result) || result < 1)
+    throw new Error(`${name} must be positive.`);
+  return result;
+}
+
+export function parseServeOptions(
+  args: readonly string[],
+  cwd = process.cwd(),
+): ServeOptions {
+  const values = new Map<string, string>();
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (token === undefined || !token.startsWith("--"))
+      throw new Error(`Unexpected argument: ${token}`);
+    const equals = token.indexOf("=");
+    const name = equals < 0 ? token : token.slice(0, equals);
+    const next = equals < 0 ? args[index + 1] : token.slice(equals + 1);
+    if (next === undefined || (equals < 0 && next.startsWith("--")))
+      throw new Error(`Missing value for ${name}.`);
+    if (values.has(name)) throw new Error(`Duplicate option: ${name}.`);
+    values.set(name, next);
+    if (equals < 0) index += 1;
+  }
+  const known = new Set([
+    "--host",
+    "--port",
+    "--root",
+    "--codex-path",
+    "--tool-timeout",
+    "--request-timeout",
+    "--shutdown-timeout",
+    "--body-limit",
+    "--max-requests",
+    "--log-level",
+    "--state-dir",
+  ]);
+  for (const name of values.keys())
+    if (!known.has(name)) throw new Error(`Unknown option: ${name}.`);
+
+  const root = resolve(cwd, values.get("--root") ?? ".");
+  const stateValue = values.get("--state-dir") ?? ".codex-openai-proxy";
+  const stateDir = isAbsolute(stateValue)
+    ? stateValue
+    : resolve(root, stateValue);
+  const logLevel = values.get("--log-level") ?? "info";
+  if (!["debug", "info", "warn", "error"].includes(logLevel)) {
+    throw new Error("--log-level must be debug, info, warn, or error.");
+  }
+  return {
+    host: normalizeLoopbackHost(values.get("--host") ?? "127.0.0.1"),
+    port: integer("--port", values.get("--port") ?? "8787", 0, 65_535),
+    root,
+    codexPath: values.get("--codex-path") ?? "codex",
+    toolTimeoutMs: duration(
+      "--tool-timeout",
+      values.get("--tool-timeout") ?? "5m",
+    ),
+    requestTimeoutMs: duration(
+      "--request-timeout",
+      values.get("--request-timeout") ?? "30s",
+    ),
+    shutdownTimeoutMs: duration(
+      "--shutdown-timeout",
+      values.get("--shutdown-timeout") ?? "10s",
+    ),
+    bodyLimitBytes: integer(
+      "--body-limit",
+      values.get("--body-limit") ?? String(DEFAULT_BODY_LIMIT),
+      1,
+      100 * 1024 * 1024,
+    ),
+    maxRequests: integer(
+      "--max-requests",
+      values.get("--max-requests") ?? "100",
+      1,
+      10_000,
+    ),
+    logLevel: logLevel as LogLevel,
+    stateDir,
+  };
+}

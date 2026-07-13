@@ -1,0 +1,12 @@
+dist
+node_modules
+AGENTS.md
+docs
+plans
+protocol/CONTRACT.md
+protocol/generated
+protocol/fixtures
+protocol/schemas
+package-lock.json
+scripts
+test/contract.test.mjs

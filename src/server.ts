@@ -1,0 +1,272 @@
+import { randomUUID } from "node:crypto";
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
+import type { Socket } from "node:net";
+import { HttpError, writeError, writeJson } from "./errors.js";
+import type { ServeOptions } from "./config.js";
+import type { Logger } from "./logger.js";
+
+export interface ProxyServer {
+  server: Server;
+  listen(): Promise<{ address: string; port: number }>;
+  close(): Promise<void>;
+  setReady(ready: boolean): void;
+}
+
+export function createProxyServer(
+  options: ServeOptions,
+  log: Logger,
+): ProxyServer {
+  let ready = false;
+  let active = 0;
+  const controllers = new Set<AbortController>();
+  const sockets = new Set<Socket>();
+  const server = createServer((request, response) => {
+    const requestId = randomUUID();
+    response.setHeader("x-request-id", requestId);
+    if (active >= options.maxRequests) {
+      writeError(
+        response,
+        new HttpError(
+          429,
+          "The proxy is handling too many requests.",
+          "rate_limit_error",
+          "overloaded",
+        ),
+      );
+      return;
+    }
+    active += 1;
+    const controller = new AbortController();
+    controllers.add(controller);
+    const timer = setTimeout(
+      () => controller.abort(new Error("request timeout")),
+      options.requestTimeoutMs,
+    );
+    timer.unref();
+    const started = Date.now();
+    const finish = (): void => {
+      clearTimeout(timer);
+      controllers.delete(controller);
+      active -= 1;
+      log("info", "http_request", {
+        request_id: requestId,
+        method: request.method,
+        path: request.url,
+        status: response.statusCode,
+        duration_ms: Date.now() - started,
+      });
+    };
+    response.once("finish", finish);
+    response.once("close", () => {
+      if (!response.writableFinished)
+        controller.abort(new Error("client disconnected"));
+    });
+    void route(
+      request,
+      response,
+      ready,
+      options.bodyLimitBytes,
+      controller.signal,
+    ).catch((cause: unknown) => {
+      const error =
+        cause instanceof HttpError
+          ? cause
+          : controller.signal.aborted
+            ? new HttpError(
+                408,
+                "The request timed out.",
+                "invalid_request_error",
+                "request_timeout",
+              )
+            : new HttpError(
+                500,
+                "An internal error occurred.",
+                "server_error",
+                "internal_error",
+              );
+      if (!(cause instanceof HttpError))
+        log("error", "request_failed", {
+          request_id: requestId,
+          error: cause instanceof Error ? cause.message : String(cause),
+        });
+      writeError(response, error);
+    });
+  });
+  server.requestTimeout = options.requestTimeoutMs;
+  server.headersTimeout = Math.min(options.requestTimeoutMs, 60_000);
+  server.keepAliveTimeout = 5_000;
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
+
+  return {
+    server,
+    setReady(value) {
+      ready = value;
+    },
+    listen: () =>
+      new Promise((resolve, reject) => {
+        const onError = (error: Error): void => reject(error);
+        server.once("error", onError);
+        server.listen(
+          { host: options.host, port: options.port, exclusive: true },
+          () => {
+            server.off("error", onError);
+            const address = server.address();
+            if (address === null || typeof address === "string")
+              return reject(
+                new Error("Listener did not return a TCP address."),
+              );
+            resolve({ address: address.address, port: address.port });
+          },
+        );
+      }),
+    close: () =>
+      new Promise((resolve, reject) => {
+        controllers.forEach((controller) =>
+          controller.abort(new Error("server shutting down")),
+        );
+        server.close((error) => (error ? reject(error) : resolve()));
+        server.closeIdleConnections();
+        const force = setTimeout(() => {
+          sockets.forEach((socket) => socket.destroy());
+          server.closeAllConnections();
+        }, options.shutdownTimeoutMs);
+        force.unref();
+      }),
+  };
+}
+
+async function route(
+  request: IncomingMessage,
+  response: ServerResponse,
+  ready: boolean,
+  bodyLimit: number,
+  signal: AbortSignal,
+): Promise<void> {
+  const url = new URL(request.url ?? "/", "http://loopback.invalid");
+  if (request.method === "GET" && url.pathname === "/health") {
+    writeJson(response, 200, { status: "ok" });
+    return;
+  }
+  if (request.method === "GET" && url.pathname === "/ready") {
+    writeJson(response, ready ? 200 : 503, {
+      status: ready ? "ready" : "not_ready",
+    });
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
+    const contentType = request.headers["content-type"]
+      ?.split(";", 1)[0]
+      ?.trim()
+      .toLowerCase();
+    if (contentType !== "application/json")
+      throw new HttpError(
+        415,
+        "Content-Type must be application/json.",
+        "invalid_request_error",
+        "unsupported_media_type",
+      );
+    await readJsonBody(request, bodyLimit, signal);
+    if (!ready)
+      throw new HttpError(
+        503,
+        "The app-server is not ready.",
+        "server_error",
+        "app_server_not_ready",
+      );
+    throw new HttpError(
+      501,
+      "Chat Completions translation is not implemented in this stage.",
+      "server_error",
+      "not_implemented",
+    );
+  }
+  throw new HttpError(
+    404,
+    "The requested route was not found.",
+    "not_found_error",
+    "route_not_found",
+  );
+}
+
+async function readJsonBody(
+  request: IncomingMessage,
+  limit: number,
+  signal: AbortSignal,
+): Promise<unknown> {
+  const declared = Number(request.headers["content-length"]);
+  if (Number.isFinite(declared) && declared > limit)
+    throw new HttpError(
+      413,
+      "Request body is too large.",
+      "invalid_request_error",
+      "body_too_large",
+    );
+  const chunks = await new Promise<Buffer[]>((resolve, reject) => {
+    const result: Buffer[] = [];
+    let size = 0;
+    const cleanup = (): void => {
+      request.off("data", onData);
+      request.off("end", onEnd);
+      request.off("error", onError);
+      signal.removeEventListener("abort", onAbort);
+    };
+    const fail = (error: unknown): void => {
+      cleanup();
+      request.pause();
+      reject(error);
+    };
+    const onData = (raw: Buffer): void => {
+      const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+      size += chunk.length;
+      if (size > limit) {
+        fail(
+          new HttpError(
+            413,
+            "Request body is too large.",
+            "invalid_request_error",
+            "body_too_large",
+          ),
+        );
+        return;
+      }
+      result.push(chunk);
+    };
+    const onEnd = (): void => {
+      cleanup();
+      resolve(result);
+    };
+    const onError = (): void =>
+      fail(
+        new HttpError(
+          400,
+          "The request body could not be read.",
+          "invalid_request_error",
+          "invalid_body",
+        ),
+      );
+    const onAbort = (): void => fail(signal.reason);
+    request.on("data", onData);
+    request.once("end", onEnd);
+    request.once("error", onError);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    throw new HttpError(
+      400,
+      "The request body is not valid JSON.",
+      "invalid_request_error",
+      "invalid_json",
+    );
+  }
+}
