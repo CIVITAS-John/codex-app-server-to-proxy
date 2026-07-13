@@ -20,6 +20,7 @@ The work is split into gated stages. Complete stages in order unless a stage exp
 - Reject message history that cannot be represented faithfully.
 - Reject any request value the proxy cannot apply exactly. During v1 development, prefer a clear error over fallback or approximation.
 - Ignore harmless unsupported fields and log structured warnings.
+- Use TypeScript and Vitest for unit, integration, HTTP/SSE, and packed-CLI tests. Organize test files by responsibility rather than implementation stage, and keep the default Vitest configuration deterministic and offline.
 - Use mocks by default and only `gpt-5.4-nano` for opt-in live development tests.
 
 ## Stage map
@@ -38,6 +39,8 @@ The work is split into gated stages. Complete stages in order unless a stage exp
 ## Current status
 
 Stages 01 and 02 are implemented. The generated protocol artifacts, compatibility contract, schemas, fixtures, and disposable offline spikes are checked in and tested. The installable TypeScript CLI enforces loopback-only binding and provides offline-tested health, readiness, request bounds, structured errors, and graceful shutdown. Readiness remains false until Stage 03 implements app-server initialization and authentication. Live observations remain explicitly unproven until the opt-in four-call spike is run; later stages must not assume those behaviors.
+
+Stage 01 and Stage 02 coverage now runs as type-checked TypeScript through Vitest. The files are split by protocol contract, continuation behavior, offline spike, configuration, HTTP server, and CLI lifecycle. The checked-in default configuration selects offline tests and excludes opt-in live-test filenames. This is a development-only compatibility change: it does not alter the Node.js 20+ runtime or the CLI/API contract, but contributors and CI must use the TypeScript and Vitest configurations.
 
 ## Cross-stage rules
 
@@ -61,6 +64,7 @@ Stages 01 and 02 are implemented. The generated protocol artifacts, compatibilit
     - It immediately rejects any unexpected elicitation request from app-server.
 - Client disconnects must not leak active turns, pending JSON-RPC requests, or child processes.
 - No default test invokes a paid model.
+- `npm test` runs Vitest in non-watch mode and cannot select opt-in live tests.
 
 ## Definition of done
 

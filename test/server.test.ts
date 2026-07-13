@@ -1,19 +1,21 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import http from "node:http";
 import { once } from "node:events";
-import test from "node:test";
-import { normalizeLoopbackHost, parseServeOptions } from "../dist/config.js";
-import { createLogger } from "../dist/logger.js";
-import { createProxyServer } from "../dist/server.js";
+import { test } from "vitest";
+import { parseServeOptions, type ServeOptions } from "../src/config.js";
+import { createLogger } from "../src/logger.js";
+import { createProxyServer, type ProxyServer } from "../src/server.js";
 
 const silentLogger = createLogger("error", () => {});
 
-function options(overrides = {}) {
+function options(overrides: Partial<ServeOptions> = {}): ServeOptions {
   return { ...parseServeOptions(["--port", "0"]), ...overrides };
 }
 
-async function withServer(overrides, run) {
+async function withServer(
+  overrides: Partial<ServeOptions>,
+  run: (origin: string, proxy: ProxyServer) => Promise<void>,
+): Promise<void> {
   const proxy = createProxyServer(options(overrides), silentLogger);
   const address = await proxy.listen();
   try {
@@ -26,47 +28,12 @@ async function withServer(overrides, run) {
   }
 }
 
-test("loopback validation accepts only exact safe forms", () => {
-  assert.equal(normalizeLoopbackHost("127.0.0.1"), "127.0.0.1");
-  assert.equal(normalizeLoopbackHost("::1"), "::1");
-  assert.equal(normalizeLoopbackHost("LOCALHOST"), "127.0.0.1");
-  for (const host of [
-    "0.0.0.0",
-    "::",
-    "192.168.1.2",
-    "example.test",
-    "127.0.0.2",
-    "::ffff:127.0.0.1",
-    "[::1]",
-    "localhost.",
-  ]) {
-    assert.throws(
-      () => normalizeLoopbackHost(host),
-      /Only 127\.0\.0\.1, ::1, and localhost/,
-    );
-  }
-});
-
-test("serve options have safe documented defaults and reject ambiguity", () => {
-  const parsed = parseServeOptions([], "/tmp/project");
-  assert.equal(parsed.host, "127.0.0.1");
-  assert.equal(parsed.port, 8787);
-  assert.equal(parsed.root, "/tmp/project");
-  assert.equal(parsed.toolTimeoutMs, 300_000);
-  assert.equal(parsed.stateDir, "/tmp/project/.codex-openai-proxy");
-  assert.throws(
-    () => parseServeOptions(["--port", "80", "--port", "81"]),
-    /Duplicate/,
-  );
-  assert.throws(() => parseServeOptions(["--unknown", "x"]), /Unknown/);
-});
-
 test("health is live while readiness remains false", async () => {
   await withServer({}, async (origin, proxy) => {
     let response = await fetch(`${origin}/health`);
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { status: "ok" });
-    assert.match(response.headers.get("x-request-id"), /^[0-9a-f-]{36}$/);
+    assert.match(response.headers.get("x-request-id") ?? "", /^[0-9a-f-]{36}$/);
     response = await fetch(`${origin}/ready`);
     assert.equal(response.status, 503);
     assert.deepEqual(await response.json(), { status: "not_ready" });
@@ -78,7 +45,7 @@ test("health is live while readiness remains false", async () => {
 
 test("HTTP failures use OpenAI-shaped JSON and never leak warnings", async () => {
   await withServer({}, async (origin) => {
-    const cases = [
+    const cases: Array<[Promise<Response>, number, string]> = [
       [fetch(`${origin}/missing`), 404, "route_not_found"],
       [
         fetch(`${origin}/v1/chat/completions`, {
@@ -107,7 +74,9 @@ test("HTTP failures use OpenAI-shaped JSON and never leak warnings", async () =>
     for (const [pending, status, code] of cases) {
       const response = await pending;
       assert.equal(response.status, status);
-      const body = await response.json();
+      const body = (await response.json()) as {
+        error: { code: string; param: unknown };
+      };
       assert.deepEqual(Object.keys(body), ["error"]);
       assert.equal(body.error.code, code);
       assert.equal(body.error.param, null);
@@ -124,7 +93,8 @@ test("body limit applies to declared and streamed bodies", async () => {
         body,
       });
       assert.equal(response.status, 413);
-      assert.equal((await response.json()).error.code, "body_too_large");
+      const result = (await response.json()) as { error: { code: string } };
+      assert.equal(result.error.code, "body_too_large");
     }
   });
 });
@@ -141,48 +111,18 @@ test("an incomplete request receives the configured timeout error", async () => 
     });
     request.flushHeaders();
     const [response] = await once(request, "response");
+    assert(response instanceof http.IncomingMessage);
     assert.equal(response.statusCode, 408);
     let body = "";
     response.setEncoding("utf8");
-    response.on("data", (chunk) => {
+    response.on("data", (chunk: string) => {
       body += chunk;
     });
     await once(response, "end");
-    assert.equal(JSON.parse(body).error.code, "request_timeout");
+    assert.equal(
+      (JSON.parse(body) as { error: { code: string } }).error.code,
+      "request_timeout",
+    );
     request.destroy();
   });
-});
-
-test("CLI rejects unsafe binds before opening a socket", async () => {
-  const child = spawn(
-    process.execPath,
-    ["dist/bin.js", "serve", "--host", "0.0.0.0"],
-    { cwd: new URL("..", import.meta.url), stdio: ["ignore", "pipe", "pipe"] },
-  );
-  let stderr = "";
-  child.stderr.setEncoding("utf8").on("data", (chunk) => {
-    stderr += chunk;
-  });
-  const [code] = await once(child, "exit");
-  assert.equal(code, 1);
-  assert.match(stderr, /startup_failed/);
-  assert.match(stderr, /Only 127\.0\.0\.1/);
-});
-
-test("CLI exits cleanly after a termination signal", async () => {
-  const child = spawn(
-    process.execPath,
-    ["dist/bin.js", "serve", "--port", "0", "--root", "."],
-    { cwd: new URL("..", import.meta.url), stdio: ["ignore", "pipe", "pipe"] },
-  );
-  let stderr = "";
-  child.stderr.setEncoding("utf8").on("data", (chunk) => {
-    stderr += chunk;
-  });
-  while (!stderr.includes("server_listening")) await once(child.stderr, "data");
-  child.kill("SIGTERM");
-  const [code, signal] = await once(child, "exit");
-  assert.equal(code, 0);
-  assert.equal(signal, null);
-  assert.match(stderr, /shutdown_complete/);
 });

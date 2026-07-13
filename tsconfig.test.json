@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "noEmit": true,
+    "rootDir": ".",
+    "types": ["node", "vitest"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/offline-spike.mjs"]
+}

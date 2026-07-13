@@ -87,7 +87,7 @@ Implemented on 2026-07-12:
 - Froze the request, protocol, SSE, error, usage, tool-suspension, response-ID, and continuation contracts in `protocol/CONTRACT.md`.
 - Added schemas for `x_codex` and version 1 durable response mappings.
 - Added synthetic exposed-event and rejected-continuation fixtures.
-- Added deterministic tests proving that rejected continuations do not mutate state or start a replacement thread.
+- Added deterministic, type-checked Vitest coverage split between protocol contract, continuation behavior, and offline spike responsibilities. The continuation tests prove that rejections do not mutate state or start a replacement thread.
 - Added a zero-model-call disposable offline spike for text streaming, a two-request tool round trip, and restart/resume mechanics.
 
 Live verification is pending and is not implied by the offline spike. Browser login/fallback, actual dynamic-request lifetime, per-request web-search enforcement, persisted app-server restart, branching fidelity, and executable npm ownership remain unproven. The compatibility contract rejects or withholds these behaviors until an opt-in live spike records the expected observation, cleanup, output cap, and call count within the four-call guard.

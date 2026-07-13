@@ -20,7 +20,8 @@
     "generate:protocol": "node scripts/generate-protocol.mjs",
     "lint": "eslint .",
     "prepack": "npm run build",
-    "test": "npm run build --silent && node --test",
+    "test": "npm run build --silent && npm run test:typecheck --silent && vitest run",
+    "test:typecheck": "tsc -p tsconfig.test.json",
     "spike:offline": "node scripts/offline-spike.mjs"
   },
   "devDependencies": {
@@ -29,7 +30,8 @@
     "eslint": "^9.0.0",
     "prettier": "^3.0.0",
     "typescript": "^5.0.0",
-    "typescript-eslint": "^8.0.0"
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^4.1.10"
   },
   "engines": {
     "node": ">=20"
