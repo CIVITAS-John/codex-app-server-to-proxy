@@ -27,9 +27,9 @@ The work is split into gated stages. Complete stages in order unless a stage exp
 
 | Stage | Outcome | Gate |
 | --- | --- | --- |
-| [01](01-contract-and-spikes.md) | Verified protocol contract and resolved feasibility risks | Written mappings and executable spikes |
+| [01](01-contract-and-spikes.md) | Offline compatibility contract and risk-reduction fixtures | Offline contract gate passes |
 | [02](02-package-and-cli.md) | Installable CLI and loopback HTTP skeleton | Offline CLI tests pass |
-| [03](03-app-server-and-auth.md) | Reliable child process plus first-run ChatGPT login | Fake-server lifecycle/auth tests pass |
+| [03](03-app-server-and-auth.md) | Reliable child process, ChatGPT login, and live protocol verification | Fake-server tests and bounded live spike pass |
 | [04](04-chat-streaming.md) | Chat request/response and SSE translation | Golden protocol tests pass |
 | [05](05-tools-and-threads.md) | Multi-request tools and persisted thread reuse | Continuation/restart tests pass |
 | [06](06-policies.md) | Per-request cwd, sandbox, approvals, and web search | Policy matrix tests pass |
@@ -38,7 +38,7 @@ The work is split into gated stages. Complete stages in order unless a stage exp
 
 ## Current status
 
-Stages 01 and 02 are implemented. The generated protocol artifacts, compatibility contract, schemas, fixtures, and disposable offline spikes are checked in and tested. The installable TypeScript CLI enforces loopback-only binding and provides offline-tested health, readiness, request bounds, structured errors, and graceful shutdown. Readiness remains false until Stage 03 implements app-server initialization and authentication. Live observations remain explicitly unproven until the opt-in four-call spike is run; later stages must not assume those behaviors.
+Stages 01 and 02 are implemented as offline gates. The generated protocol artifacts, compatibility contract, schemas, fixtures, and disposable offline spike are checked in and tested. The TypeScript CLI enforces loopback-only binding and provides offline-tested health, readiness, request bounds, structured errors, and graceful shutdown. Readiness remains false until Stage 03 implements app-server initialization and authentication. Stage 03 owns the opt-in four-call live protocol proof; Stage 08 owns packed-tarball installation and bin-shim proof. Later stages must not assume unverified behavior.
 
 Stage 01 and Stage 02 coverage now runs as type-checked TypeScript through Vitest. The files are split by protocol contract, continuation behavior, offline spike, configuration, HTTP server, and CLI lifecycle. The checked-in default configuration selects offline tests and excludes opt-in live-test filenames. This is a development-only compatibility change: it does not alter the Node.js 20+ runtime or the CLI/API contract, but contributors and CI must use the TypeScript and Vitest configurations.
 

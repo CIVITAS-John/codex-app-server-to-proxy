@@ -37,6 +37,7 @@ This contract targets `codex-cli 0.144.0-alpha.4`. The checked-in TypeScript and
 | account read/login events | `account/read` detects auth. `account/login/start` with ChatGPT opens the returned URL when possible; one interactive-terminal fallback may print it, but logs/state never retain it. |
 
 Unknown app-server events are retained only in redacted diagnostics and are not exposed over HTTP.
+`protocol/fixtures/exposed-events.json` is the authoritative manifest of event types claimed for HTTP exposure; each entry must have exactly one synthetic JSONL fixture.
 
 ## SSE mapping
 
@@ -59,6 +60,4 @@ Continuation requires exact model, canonical tool set, canonical cwd, and effect
 
 ## Unproven live behavior
 
-The offline gate does not claim the following as verified: browser launch fallback, the actual pending-request lifetime, web-search enforcement, `thread/fork` fidelity, executable npm ownership, or live restart resumption. Until opt-in spikes prove otherwise, per-request web search is rejected as `unsupported_web_search_mode`, branching is unsupported, and executable discovery uses an explicit path or `PATH`.
-
-Each live spike must declare its expected observation, cleanup, output cap, and maximum calls. The entire stage permits four calls, all with `gpt-5.4-nano`: text, tool request, tool continuation, and post-restart continuation.
+The offline contract does not claim the following as verified: browser launch fallback, the actual pending-request lifetime, web-search enforcement, `thread/fork` fidelity, executable npm ownership, or live restart resumption. Until Stage 03 live verification proves otherwise, per-request web search is rejected as `unsupported_web_search_mode`, branching is unsupported, and executable discovery uses an explicit path or `PATH`.

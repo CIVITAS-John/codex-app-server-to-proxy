@@ -49,7 +49,10 @@ export function createProxyServer(
     );
     timer.unref();
     const started = Date.now();
+    let finished = false;
     const finish = (): void => {
+      if (finished) return;
+      finished = true;
       clearTimeout(timer);
       controllers.delete(controller);
       active -= 1;
@@ -63,8 +66,10 @@ export function createProxyServer(
     };
     response.once("finish", finish);
     response.once("close", () => {
-      if (!response.writableFinished)
+      if (!response.writableFinished) {
         controller.abort(new Error("client disconnected"));
+        finish();
+      }
     });
     void route(
       request,

@@ -21,7 +21,7 @@ Create an installable TypeScript CLI with strict loopback enforcement and no dep
 
 ## Acceptance criteria
 
-- `npm pack` produces a package whose CLI starts under Node 20.
+- The compiled CLI starts under Node 20.
 - Loopback bind tests cover IPv4, IPv6, hostname, wildcard, LAN, and IPv4-mapped edge cases.
 - The process shuts down without open handles after signals or startup failures.
 - Health/readiness, body limit, timeout, and malformed-request tests pass offline.
@@ -34,6 +34,6 @@ Complete. The package builds a strict TypeScript CLI with an executable npm `bin
 
 `GET /health` reports process liveness. `GET /ready` deliberately remains unavailable until Stage 03 initializes and authenticates app-server. `POST /v1/chat/completions` validates its content type, body bound, and JSON syntax, then returns `app_server_not_ready`; translation begins in Stage 04.
 
-The packed artifact contains only the compiled CLI declarations/source maps, README, and protocol artifacts. No default npm script starts Codex or makes a network or model call.
+The package allow-list is limited to the compiled CLI declarations/source maps, README, and protocol artifacts.  No default npm script starts Codex or makes a network or model call.
 
 The Stage 02 coverage is type-checked and runs through Vitest, with files split by configuration, HTTP server, and CLI lifecycle responsibilities. Vitest is a development dependency, and the default non-watch configuration excludes opt-in live-test filenames. 

@@ -2,6 +2,7 @@ import type { ServerResponse } from "node:http";
 
 export type ErrorType =
   | "invalid_request_error"
+  | "conflict_error"
   | "not_found_error"
   | "rate_limit_error"
   | "server_error";

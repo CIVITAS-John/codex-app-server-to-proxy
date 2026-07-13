@@ -27,6 +27,10 @@ Reliably own one initialized app-server child process and complete ChatGPT login
 10. Fail closed on elicitation.
     - Immediately answer unexpected user-input or elicitation requests with a documented unsupported/declined response so they cannot block a turn.
     - This covers `item/tool/requestUserInput`, `mcpServer/elicitation/request` in both form and URL modes, and equivalent server-initiated requests.
+11. Run the opt-in Stage 01 protocol verification against the owned app-server process.
+    - Declare expected observations, cleanup, output caps, and maximum calls before execution.
+    - Demonstrate text streaming, a two-request dynamic-tool round trip, and post-restart continuation of a completed persisted thread.
+    - Verify the pending dynamic-request lifetime and the enforceability of web-search modes; keep any unproven behavior rejected.
 
 ## Acceptance criteria
 
@@ -35,3 +39,8 @@ Reliably own one initialized app-server child process and complete ChatGPT login
 - Tests prove the fallback authorization URL reaches only the interactive terminal sink while structured logs, diagnostics, and state redact or omit it.
 - Elicitation capabilities are absent from initialization and unexpected elicitation requests receive an immediate fail-closed response.
 - No shell interpolation is used for spawning Codex or opening the browser.
+- The opt-in protocol spike records text, tool round trip, and persisted restart/resume observations using at most four model calls, all with `gpt-5.4-nano` and small output limits.
+
+## Cost guard
+
+The live protocol spike uses at most four calls: text, tool request, tool continuation, and post-restart continuation. All use `gpt-5.4-nano`.

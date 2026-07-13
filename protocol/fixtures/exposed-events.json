@@ -1,0 +1,16 @@
+[
+  "error",
+  "item/agentMessage/delta",
+  "item/commandExecution/outputDelta",
+  "item/commandExecution/requestApproval",
+  "item/fileChange/outputDelta",
+  "item/fileChange/patchUpdated",
+  "item/mcpToolCall/progress",
+  "item/reasoning/summaryPartAdded",
+  "item/reasoning/summaryTextDelta",
+  "item/reasoning/textDelta",
+  "item/tool/call",
+  "serverRequest/resolved",
+  "thread/tokenUsage/updated",
+  "turn/completed"
+]

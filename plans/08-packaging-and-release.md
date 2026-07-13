@@ -11,7 +11,7 @@ Publish a reproducible npm CLI that can locate a compatible Codex executable and
     - If it cannot be installed as an npm dependency, add precise detection and official installation guidance instead of an implicit runtime download.
 3. Ensure installation scripts do not execute downloaded binaries or perform login/network activity.
 4. Add `--version`, `--help`, startup diagnostics, and actionable errors for missing/incompatible Codex, failed login, unavailable port, invalid host, and denied policy.
-5. Test installation from the packed tarball in clean Node 20+ environments on each supported OS.
+5. Test installation from the packed tarball in clean Node 20+ environments on each supported OS, including invocation through the generated npm bin shim.
 6. Write the end-user quick start, curl examples, tool continuation example, `x_codex` reference, security model, troubleshooting, and uninstall/state cleanup instructions.
 7. Create a release checklist covering schema refresh, changelog, offline suite, packed smoke test, opt-in nano live smoke, dependency audit, provenance, and rollback/deprecation.
 8. Publish a prerelease first. Validate install, login, streaming, every retained Stage 01 feature, usage when reported, and restart continuation before a stable tag.
@@ -21,6 +21,7 @@ Publish a reproducible npm CLI that can locate a compatible Codex executable and
 - A clean user can install and run the CLI without cloning the repository.
 - `npm pack --dry-run` contains only intended runtime/docs files and no credentials, fixtures with private data, or local state.
 - Packed-install smoke tests pass on macOS, Linux, and Windows with Node 20+.
+- The packed CLI starts through its installed npm bin shim; source-tree invocation alone is not sufficient evidence.
 - One manual prerelease smoke uses only `gpt-5.4-nano`, declares its expected maximum call count before execution, and records its exact call count.
 - The README accurately labels every compatibility extension and known limitation.
 - The release can be rolled back or deprecated without stranding persisted thread mappings.

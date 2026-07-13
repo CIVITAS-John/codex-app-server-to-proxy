@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import http from "node:http";
+import net from "node:net";
 import { once } from "node:events";
 import { test } from "vitest";
 import { parseServeOptions, type ServeOptions } from "../src/config.js";
@@ -124,5 +125,24 @@ test("an incomplete request receives the configured timeout error", async () => 
       "request_timeout",
     );
     request.destroy();
+  });
+});
+
+test("a disconnected client releases request capacity", async () => {
+  await withServer({ maxRequests: 1 }, async (origin) => {
+    const url = new URL(origin);
+    const socket = net.connect(Number(url.port), url.hostname);
+    await once(socket, "connect");
+    socket.write(
+      "POST /v1/chat/completions HTTP/1.1\r\n" +
+        `Host: ${url.host}\r\n` +
+        "Content-Type: application/json\r\n" +
+        "Content-Length: 2\r\n\r\n",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    socket.destroy();
+    await once(socket, "close");
+    const response = await fetch(`${origin}/health`);
+    assert.equal(response.status, 200);
   });
 });

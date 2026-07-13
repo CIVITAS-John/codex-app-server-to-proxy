@@ -22,6 +22,9 @@ test("generated artifacts pin the exact experimental Codex version", async () =>
 });
 
 test("every claimed exposed app-server event has a synthetic fixture", async () => {
+  const claimed = (await readJson(
+    "protocol/fixtures/exposed-events.json",
+  )) as string[];
   const lines = (
     await readFile(
       new URL("protocol/fixtures/exposed-events.jsonl", root),
@@ -30,27 +33,16 @@ test("every claimed exposed app-server event has a synthetic fixture", async () 
   )
     .trim()
     .split("\n");
-  const methods = new Set(
-    lines.map((line) => (JSON.parse(line) as { method: string }).method),
+  const fixtureMethods = lines.map(
+    (line) => (JSON.parse(line) as { method: string }).method,
   );
-  for (const method of [
-    "item/agentMessage/delta",
-    "item/reasoning/summaryPartAdded",
-    "item/reasoning/summaryTextDelta",
-    "item/reasoning/textDelta",
-    "item/commandExecution/outputDelta",
-    "item/fileChange/outputDelta",
-    "item/fileChange/patchUpdated",
-    "item/mcpToolCall/progress",
-    "thread/tokenUsage/updated",
-    "turn/completed",
-    "error",
-    "item/tool/call",
-    "item/commandExecution/requestApproval",
-    "serverRequest/resolved",
-  ]) {
-    assert(methods.has(method), `missing fixture: ${method}`);
-  }
+  assert.equal(new Set(claimed).size, claimed.length, "duplicate event claim");
+  assert.equal(
+    new Set(fixtureMethods).size,
+    fixtureMethods.length,
+    "duplicate event fixture",
+  );
+  assert.deepEqual([...fixtureMethods].sort(), [...claimed].sort());
 });
 
 test("contract explicitly classifies every unsupported mapping", async () => {
@@ -58,6 +50,17 @@ test("contract explicitly classifies every unsupported mapping", async () => {
     new URL("protocol/CONTRACT.md", root),
     "utf8",
   );
+  const rejectedRow = contract
+    .split("\n")
+    .find((line) => line.includes("| Rejected |"));
+  assert(rejectedRow, "missing rejected-field classification");
+  const rejectedFields = [...rejectedRow.matchAll(/`([^`]+)`/g)].map(
+    (match) => match[1],
+  );
+  assert(rejectedFields.length > 20, "rejected fields were not enumerated");
+  assert.match(rejectedRow, /`unsupported_parameter`/);
+  assert.match(contract, /Any unknown top-level field.*Ignored with warning/);
+  assert.match(contract, /`unsupported_field_ignored`/);
   for (const code of [
     "unrepresentable_message_history",
     "unsupported_tool_choice",
