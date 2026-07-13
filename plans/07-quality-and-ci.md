@@ -33,4 +33,4 @@ Make the proxy predictable under hostile local input, protocol churn, and operat
 
 ## Test-runner decision
 
-Vitest is the sole test runner for maintained automated suites, and test sources use a strict TypeScript configuration. Suites are organized by tested responsibility rather than delivery stage. The Stage 01 and Stage 02 files were migrated without changing their assertions or reducing edge-case coverage, and the old JavaScript and `node:test` paths were removed. Vitest remains a development dependency and must not affect the Node.js 20+ runtime support, published dependency graph, packed artifact, or public CLI/API behavior.
+Vitest is the sole test runner for maintained automated suites.
