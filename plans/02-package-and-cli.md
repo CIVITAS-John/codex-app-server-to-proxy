@@ -12,7 +12,7 @@ Create an installable TypeScript CLI with strict loopback enforcement and no dep
     - `--tool-timeout` defaults to five minutes.
 3. Default to `127.0.0.1`; normalize and allow only `127.0.0.1`, `::1`, and `localhost`. Resolve `localhost` defensively or bind explicit loopback sockets.
 4. Refuse wildcard, LAN, DNS, mapped, or ambiguous addresses before opening a socket.
-5. Add `GET /healthz` and `GET /readyz`; readiness remains false until app-server initialization and authentication are ready.
+5. Add `GET /health` and `GET /ready`; readiness remains false until app-server initialization and authentication are ready.
 6. Add request IDs, bounded body size, timeouts, abort propagation, graceful signal handling, and structured stderr logging.
 7. Build OpenAI-shaped JSON errors for invalid JSON, validation failures, unsupported routes, overload, and internal failures.
 8. Ensure warnings never enter SSE/JSON response bodies except through documented error events.
