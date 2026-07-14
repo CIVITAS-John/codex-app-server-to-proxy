@@ -8,6 +8,7 @@ import { JsonRpcTransport, type ServerRequest } from "./json-rpc.js";
 import type { Logger } from "./logger.js";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
+import { dirname, resolve } from "node:path";
 
 /** Identifies this proxy to app-server during initialization. */
 export const CLIENT_NAME = "codex-openai-proxy";
@@ -16,8 +17,19 @@ export const CLIENT_NAME = "codex-openai-proxy";
 export function resolveCodexExecutable(configuredPath: string): string {
   if (configuredPath !== "codex") return configuredPath;
   try {
-    return createRequire(import.meta.url).resolve("@openai/codex");
+    const require = createRequire(import.meta.url);
+    const packageJsonPath = require.resolve("@openai/codex/package.json");
+    const packageJson = require(packageJsonPath) as {
+      bin?: string | Record<string, string>;
+    };
+    const bin =
+      typeof packageJson.bin === "string"
+        ? packageJson.bin
+        : packageJson.bin?.codex;
+    if (!bin) throw new Error("@openai/codex does not declare a codex binary");
+    return resolve(dirname(packageJsonPath), bin);
   } catch {
+    // PATH remains a compatibility fallback for development and custom installs.
     return configuredPath;
   }
 }

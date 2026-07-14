@@ -12,7 +12,7 @@ Options:
   --host <host>                 Loopback host (default: 127.0.0.1)
   --port <port>                 TCP port, or 0 for an ephemeral port (default: 8787)
   --root <directory>            Allowed working-directory root (default: launch directory)
-  --codex-path <path>           Codex executable (default: codex)
+  --codex-path <path>           Override the package-owned Codex executable
   --tool-timeout <duration>     Dynamic tool deadline (default: 5m)
   --request-timeout <duration>  HTTP request deadline (default: 30s)
   --shutdown-timeout <duration> Graceful shutdown deadline (default: 10s)

@@ -11,7 +11,7 @@ npm install
 npm start
 ```
 
-The listener defaults to `127.0.0.1:8787`. The CLI resolves Codex from the supported npm package when available, with `--codex-path` or `PATH` as fallbacks, validates it, and owns one `codex app-server` child. `GET /health` reports proxy liveness. `GET /ready` remains HTTP 503 until app-server initialization and usable ChatGPT authentication complete, and becomes unavailable again during bounded crash recovery.
+The listener defaults to `127.0.0.1:8787`. The proxy installs and uses its own `@openai/codex` runtime dependency by default. `--codex-path` can override that executable, and `PATH` is only a compatibility fallback when the package is unavailable. The proxy validates the executable and owns one `codex app-server` child. `GET /health` reports proxy liveness. `GET /ready` remains HTTP 503 until app-server initialization and usable ChatGPT authentication complete, and becomes unavailable again during bounded crash recovery.
 
 Fresh text-only Chat Completions are translated in both streaming and non-streaming modes. Prior system, developer, user, and assistant messages are injected as role-preserving Responses API history; the final user message starts the Codex turn. Standard assistant text remains usable by generic clients, while exposed reasoning and internal activity use `x_codex` extensions. Exact last-turn usage is returned when app-server reports it. Continuation, client tool-result round trips, and request policy selection remain unavailable until their later stages and are rejected rather than approximated.
 
@@ -27,7 +27,7 @@ The opt-in smoke test starts a real app-server and proxy, then makes exactly one
 CODEX_PROXY_LIVE=1 npm run test:live:hello
 ```
 
-Set `CODEX_PATH` if `codex` is not on `PATH`. The command uses the existing ChatGPT login when available; otherwise it starts the normal interactive or device-code login flow. The default `npm test` configuration excludes all `*.live.test.ts` files.
+The command uses the existing ChatGPT login when available; otherwise it starts the normal interactive or device-code login flow. Use `--codex-path` only to test or run a specific Codex executable. The default `npm test` configuration excludes all `*.live.test.ts` files.
 
 ## Intended scope
 
@@ -59,7 +59,7 @@ Proposed defaults:
 - listen address: `127.0.0.1`;
 - port: `8787`;
 - model: supplied by each request (live development tests are pinned to `gpt-5.4-mini`);
-- Codex process: package-managed Codex executable when packaging permits, otherwise a discovered `codex` executable with an actionable installation error;
+- Codex process: package-owned Codex executable by default, with an explicit `--codex-path` override and `PATH` compatibility fallback;
 - root directory: the proxy's launch directory, configurable with `--root`;
 - local proxy authentication: none;
 - unsupported request fields: ignored with structured warnings.

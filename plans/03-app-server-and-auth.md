@@ -6,7 +6,7 @@ Reliably own one initialized app-server child process and complete ChatGPT login
 
 ## Work
 
-1. Resolve the Codex executable from the supported package first and explicit `--codex-path`/PATH fallback second. Validate its version before serving.
+1. Resolve the package-owned Codex executable by default, with explicit `--codex-path` override and PATH compatibility fallback. Validate its version before serving.
 2. Spawn without a shell, communicate through newline-delimited JSON-RPC on stdio, and keep stderr separate with redaction.
     - App-server omits the `"jsonrpc": "2.0"` member on the wire; the transport must tolerate and mirror this rather than assume a strict JSON-RPC library will.
 3. Implement request IDs, response correlation, server-to-client requests, notifications, cancellation, bounded queues, and malformed-line handling.
@@ -50,5 +50,7 @@ The live protocol spike uses at most four calls: text, tool request, tool contin
 The offline Stage 03 implementation owns and version-checks a shell-free app-server child, implements bounded newline-delimited request correlation, initialization, authentication, redacted login fallback, fail-closed elicitation, readiness transitions, graceful termination, and three-attempt exponential crash recovery. Version checks and initialization use the configured tool timeout, and any initialization or authentication failure terminates the candidate child before retry or exit. The login completion listener is active before login starts so an immediate completion notification cannot be lost. Mocked tests cover initialization order and timeout cleanup, interleaved messages, overload errors, malformed output, authentication outcomes and immediate completion, cancellation, timeout, terminal-only URL disclosure, and elicitation decline.
 
 The CLI starts app-server before becoming ready and may initiate ChatGPT login. Stage 04 implements `POST /v1/chat/completions`. The isolated `CODEX_PROXY_LIVE=1 npm run test:live:hello` command exercises that route with one `gpt-5.4-mini` call, bounded output, and unconditional cleanup; default tests exclude it.
+
+The proxy declares `@openai/codex` as a runtime dependency and resolves the package's declared `codex` binary. This makes a normal local install self-contained; existing deployments that rely on a global PATH installation continue to work only as a compatibility fallback, while `--codex-path` remains the explicit override.
 
 The one-call `gpt-5.4-mini` hello-world smoke passed through the real HTTP proxy on 2026-07-13. Dynamic-tool round trip, policy enforcement, and persisted restart/resume remain pending.

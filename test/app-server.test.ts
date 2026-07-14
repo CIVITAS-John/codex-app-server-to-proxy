@@ -3,8 +3,21 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { test } from "vitest";
-import { startAppServer } from "../src/app-server.js";
+import {
+  resolveCodexExecutable,
+  startAppServer,
+} from "../src/app-server.js";
 import { createLogger } from "../src/logger.js";
+
+test("default Codex resolution uses the package-owned executable", () => {
+  const executable = resolveCodexExecutable("codex");
+  assert.notEqual(executable, "codex");
+  assert.match(executable, /@openai[/\\]codex[/\\]bin[/\\]codex\.js$/);
+});
+
+test("explicit Codex paths override package resolution", () => {
+  assert.equal(resolveCodexExecutable("/tmp/custom-codex"), "/tmp/custom-codex");
+});
 
 test("app-server initializes in order and declines elicitation without advertising it", async () => {
   const directory = await mkdtemp(join(tmpdir(), "app-server-test-"));
