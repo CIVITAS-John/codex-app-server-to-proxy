@@ -38,7 +38,7 @@ The work is split into gated stages. Complete stages in order unless a stage exp
 
 ## Current status
 
-Stages 01, 02, 04, and the offline portion of Stage 03 are implemented. The Stage 03 one-call live HTTP smoke passed with `gpt-5.4-mini`; tool, policy, and restart/resume observations remain pending. Stage 08 owns packed-tarball installation and bin-shim proof.
+Stages 01, 02, 04, and the offline portion of Stage 03 are implemented. A shared Chat Completions contract now targets either a deterministic fake backend under `npm test` or real Codex under the explicit `npm run test:live` opt-in, with at most four `gpt-5.4-mini` call attempts. The expanded live contract passed on 2026-07-14 with exactly four attempts. Tool, policy, and restart/resume observations remain pending. Stage 08 owns packed-tarball installation and bin-shim proof.
 
 Stage 01 and Stage 02 coverage now runs as type-checked TypeScript through Vitest. The files are split by protocol contract, continuation behavior, offline spike, configuration, HTTP server, and CLI lifecycle. The checked-in default configuration selects offline tests and excludes opt-in live-test filenames. This is a development-only compatibility change: it does not alter the Node.js 20+ runtime or the CLI/API contract, but contributors and CI must use the TypeScript and Vitest configurations.
 

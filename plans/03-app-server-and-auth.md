@@ -43,14 +43,14 @@ Reliably own one initialized app-server child process and complete ChatGPT login
 
 ## Cost guard
 
-The live protocol spike uses at most four calls: text, tool request, tool continuation, and post-restart continuation. All use `gpt-5.4-mini`.
+The implemented live HTTP contract attempts at most four calls: aggregate output, streaming history, an interrupted stream, and its successful follow-up. All use `gpt-5.4-mini`. The pending tool and persisted-restart protocol spike requires a separate explicit budget before it is implemented.
 
 ## Implementation status
 
 The offline Stage 03 implementation owns and version-checks a shell-free app-server child, implements bounded newline-delimited request correlation, initialization, authentication, redacted login fallback, fail-closed elicitation, readiness transitions, graceful termination, and three-attempt exponential crash recovery. Version checks and initialization use the configured tool timeout, and any initialization or authentication failure terminates the candidate child before retry or exit. The login completion listener is active before login starts so an immediate completion notification cannot be lost. Mocked tests cover initialization order and timeout cleanup, interleaved messages, overload errors, malformed output, authentication outcomes and immediate completion, cancellation, timeout, terminal-only URL disclosure, and elicitation decline.
 
-The CLI starts app-server before becoming ready and may initiate ChatGPT login. Stage 04 implements `POST /v1/chat/completions`. The isolated `CODEX_PROXY_LIVE=1 npm run test:live:hello` command exercises that route with one `gpt-5.4-mini` call, bounded output, and unconditional cleanup; default tests exclude it.
+The CLI starts app-server before becoming ready and may initiate ChatGPT login. Stage 04 implements `POST /v1/chat/completions`. The isolated `npm run test:live` command runs one shared HTTP contract against the real app-server, serially attempts at most four `gpt-5.4-mini` calls, bounds diagnostics, and unconditionally cleans up; default tests run that contract against only a deterministic fake backend.
 
 The proxy declares `@openai/codex` as a runtime dependency and resolves the package's declared `codex` binary. This makes a normal local install self-contained; existing deployments that rely on a global PATH installation continue to work only as a compatibility fallback, while `--codex-path` remains the explicit override.
 
-The one-call `gpt-5.4-mini` hello-world smoke passed through the real HTTP proxy on 2026-07-13. Dynamic-tool round trip, policy enforcement, and persisted restart/resume remain pending.
+The unified aggregate, streaming-history, disconnect, and follow-up contract passed through the real HTTP proxy on 2026-07-14 with exactly four `gpt-5.4-mini` model-call attempts. Dynamic-tool round trip, policy enforcement, and persisted restart/resume remain pending.

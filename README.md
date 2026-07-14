@@ -19,15 +19,15 @@ On first use, an interactive CLI attempts to open the ChatGPT authorization URL 
 
 Run `node dist/bin.js --help` for loopback host, port, root, Codex path, state directory, timeout, request limit, and log-level options. Logs are structured JSON written only to stderr.
 
-## Live hello-world test
+## Live contract tests
 
-The opt-in smoke test starts a real app-server and proxy, then makes exactly one model call through `POST /v1/chat/completions`. It runs serially, captures at most 1,000 response characters, and always uses `gpt-5.4-mini`:
+The opt-in suite runs the same Chat Completions HTTP contract used by the offline fake backend against a real app-server. It covers aggregate output, streaming with role history, invalid-input preflight, disconnect interruption, and a successful follow-up. The suite runs serially, attempts at most four model calls, bounds captured diagnostics, and always uses `gpt-5.4-mini`:
 
 ```sh
-CODEX_PROXY_LIVE=1 npm run test:live:hello
+npm run test:live
 ```
 
-The command uses the existing ChatGPT login when available; otherwise it starts the normal interactive or device-code login flow. Use `--codex-path` only to test or run a specific Codex executable. The default `npm test` configuration excludes all `*.live.test.ts` files.
+Running the dedicated command is the live-test opt-in. It uses the existing ChatGPT login when available; otherwise it starts the normal interactive or device-code login flow. Set `CODEX_PATH` to test a specific Codex executable; the CLI's equivalent runtime option is `--codex-path`. The default `npm test` configuration excludes all `*.live.test.ts` files and runs the shared contract against only the deterministic fake backend. Transport framing and fault-injection cases remain fake-only because a live app-server cannot safely provide deterministic malformed frames or process failures.
 
 ## Intended scope
 
@@ -147,8 +147,8 @@ Fields unavailable from app-server are omitted rather than estimated.
 - Runtime baseline: Node.js 20+ on macOS, Linux, and Windows.
 - Language: strict TypeScript.
 - Public surface: CLI only.
-- Unit and protocol tests use fixtures/mocks and make no paid model calls.
-- Live tests are opt-in, narrowly scoped, and must use `gpt-5.4-mini` exclusively.
+- Offline unit, protocol, and shared contract tests use fixtures/mocks and make no paid model calls.
+- Live contract tests are opt-in, attempt at most four calls per run, and use `gpt-5.4-mini` exclusively.
 - Documentation and implementation must distinguish standard Chat Completions behavior from `x_codex` extensions.
 
 ## Design status

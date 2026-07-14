@@ -9,6 +9,7 @@ Make the proxy predictable under hostile local input, protocol churn, and operat
 1. Create layered Vitest suites: pure translation units, fake app-server integration, HTTP/SSE conformance, and packed CLI smoke tests.
     - Use Vitest projects or equivalent explicit configuration to separate fast unit tests, offline integration tests, packed-CLI tests, and opt-in live tests.
     - Exclude live-test files from every default and required-CI Vitest project; run them only through an explicit live-test script and environment flag.
+    - Define HTTP/SSE conformance once and select either the deterministic fake backend or authenticated real app-server. Keep transport fault injection fake-only.
 2. Run the offline suite across supported Node versions and macOS/Linux/Windows.
 3. Add fuzz/property tests for JSON-RPC framing, SSE serialization, tool argument fragmentation, response mapping, and ignored fields.
 4. Test slow clients, bounded queues, abort races, app-server overload, child crashes, port conflicts, state corruption, same-thread concurrency rejection, continuation preflight/resume races, and shutdown during login/tool calls.
@@ -34,3 +35,5 @@ Make the proxy predictable under hostile local input, protocol churn, and operat
 ## Test-runner decision
 
 Vitest is the sole test runner for maintained automated suites.
+
+The shared Chat Completions contract runs through `npm test` with a fake app-server and through the dedicated `npm run test:live` opt-in with real Codex. The live configuration is serial, bounded to four `gpt-5.4-mini` call attempts, and excluded from required CI.
