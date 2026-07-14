@@ -22,6 +22,6 @@ Publish a reproducible npm CLI that can locate a compatible Codex executable and
 - `npm pack --dry-run` contains only intended runtime/docs files and no credentials, fixtures with private data, or local state.
 - Packed-install smoke tests pass on macOS, Linux, and Windows with Node 20+.
 - The packed CLI starts through its installed npm bin shim; source-tree invocation alone is not sufficient evidence.
-- One manual prerelease smoke uses only `gpt-5.4-nano`, declares its expected maximum call count before execution, and records its exact call count.
+- One manual prerelease smoke uses only `gpt-5.4-mini`, declares its expected maximum call count before execution, and records its exact call count.
 - The README accurately labels every compatibility extension and known limitation.
 - The release can be rolled back or deprecated without stranding persisted thread mappings.

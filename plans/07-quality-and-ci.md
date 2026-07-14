@@ -28,7 +28,7 @@ Make the proxy predictable under hostile local input, protocol churn, and operat
 - Security tests prove body, queue, concurrency, and timeout bounds.
 - Elicitation is absent from advertised capabilities, and injected elicitation requests fail closed without leaving an app-server request pending.
 - Logs and persisted state pass a secrets/path review.
-- Opt-in live tests declare call counts and hard-code `gpt-5.4-nano`; CI cannot run them accidentally.
+- Opt-in live tests declare call counts and hard-code `gpt-5.4-mini`; CI cannot run them accidentally.
 - Supported generic HTTP/SSE clients pass the published compatibility examples.
 
 ## Test-runner decision

@@ -7,6 +7,7 @@ import { once } from "node:events";
 import { JsonRpcTransport, type ServerRequest } from "./json-rpc.js";
 import type { Logger } from "./logger.js";
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
 
 /** Identifies this proxy to app-server during initialization. */
 export const CLIENT_NAME = "codex-openai-proxy";
@@ -195,7 +196,9 @@ function failClosed(
 
 /** Removes common URL and credential forms from app-server diagnostics. */
 function redact(value: string): string {
+  const home = homedir();
   return value
+    .replaceAll(home, "[REDACTED_HOME]")
     .replace(/https?:\/\/\S+/gi, "[REDACTED_URL]")
     .replace(/\b(token|code|secret)=\S+/gi, "$1=[REDACTED]");
 }

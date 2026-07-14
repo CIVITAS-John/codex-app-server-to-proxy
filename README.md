@@ -4,19 +4,30 @@
 
 ## Development CLI
 
-Build and start the Stage 03 server:
+Build and start the Stage 04 server:
 
 ```sh
 npm install
-npm run build
-node dist/bin.js serve
+npm start
 ```
 
-The listener defaults to `127.0.0.1:8787`. The CLI resolves Codex from the supported npm package when available, with `--codex-path` or `PATH` as fallbacks, validates it, and owns one `codex app-server` child. `GET /health` reports proxy liveness. `GET /ready` remains HTTP 503 until app-server initialization and usable ChatGPT authentication complete, and becomes unavailable again during bounded crash recovery. Chat Completions requests are bounded and validated but are not translated until Stage 04.
+The listener defaults to `127.0.0.1:8787`. The CLI resolves Codex from the supported npm package when available, with `--codex-path` or `PATH` as fallbacks, validates it, and owns one `codex app-server` child. `GET /health` reports proxy liveness. `GET /ready` remains HTTP 503 until app-server initialization and usable ChatGPT authentication complete, and becomes unavailable again during bounded crash recovery.
+
+Fresh text-only Chat Completions are translated in both streaming and non-streaming modes. Prior system, developer, user, and assistant messages are injected as role-preserving Responses API history; the final user message starts the Codex turn. Standard assistant text remains usable by generic clients, while exposed reasoning and internal activity use `x_codex` extensions. Exact last-turn usage is returned when app-server reports it. Continuation, client tool-result round trips, and request policy selection remain unavailable until their later stages and are rejected rather than approximated.
 
 On first use, an interactive CLI attempts to open the ChatGPT authorization URL without a shell. If that fails, it prints the URL once to the interactive terminal; structured logs contain only a redacted event. A non-interactive CLI uses the device-code flow. Shutdown closes pending transport requests and terminates app-server after the configured grace period.
 
 Run `node dist/bin.js --help` for loopback host, port, root, Codex path, state directory, timeout, request limit, and log-level options. Logs are structured JSON written only to stderr.
+
+## Live hello-world test
+
+The opt-in smoke test starts a real app-server and proxy, then makes exactly one model call through `POST /v1/chat/completions`. It runs serially, captures at most 1,000 response characters, and always uses `gpt-5.4-mini`:
+
+```sh
+CODEX_PROXY_LIVE=1 npm run test:live:hello
+```
+
+Set `CODEX_PATH` if `codex` is not on `PATH`. The command uses the existing ChatGPT login when available; otherwise it starts the normal interactive or device-code login flow. The default `npm test` configuration excludes all `*.live.test.ts` files.
 
 ## Intended scope
 
@@ -31,7 +42,7 @@ The proxy will:
 - allow per-request working directory and sandbox selection, plus each web-search mode app-server can enforce for that request;
 - return prompt, completion, total, cached-input, and reasoning token usage when app-server provides them;
 - ignore harmless unsupported Chat Completions fields and log a warning; and
-- provide mocked tests plus a small opt-in live suite that uses only `gpt-5.4-nano`.
+- provide mocked tests plus a small opt-in live suite that uses only `gpt-5.4-mini`.
 
 It will not initially provide the Responses API, embeddings, images, audio, remote network serving, a programmatic library API, thread-management endpoints, or broad compatibility with every Chat Completions field.
 
@@ -47,7 +58,7 @@ Proposed defaults:
 
 - listen address: `127.0.0.1`;
 - port: `8787`;
-- model: supplied by each request (live development tests are pinned to `gpt-5.4-nano`);
+- model: supplied by each request (live development tests are pinned to `gpt-5.4-mini`);
 - Codex process: package-managed Codex executable when packaging permits, otherwise a discovered `codex` executable with an actionable installation error;
 - root directory: the proxy's launch directory, configurable with `--root`;
 - local proxy authentication: none;
@@ -70,7 +81,7 @@ The minimum extension is additive:
 
 ```json
 {
-  "model": "gpt-5.4-nano",
+  "model": "gpt-5.4-mini",
   "messages": [{ "role": "user", "content": "Inspect this project" }],
   "stream": true,
   "previous_response_id": "chatcmpl_codex_...",
@@ -137,7 +148,7 @@ Fields unavailable from app-server are omitted rather than estimated.
 - Language: strict TypeScript.
 - Public surface: CLI only.
 - Unit and protocol tests use fixtures/mocks and make no paid model calls.
-- Live tests are opt-in, narrowly scoped, and must use `gpt-5.4-nano` exclusively.
+- Live tests are opt-in, narrowly scoped, and must use `gpt-5.4-mini` exclusively.
 - Documentation and implementation must distinguish standard Chat Completions behavior from `x_codex` extensions.
 
 ## Design status

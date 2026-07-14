@@ -47,4 +47,4 @@ Support client-defined tools across requests while preserving safe Codex thread 
 - Unknown or non-resumable `previous_response_id` values never create a new thread, including a superseded response on a multi-response thread and a thread that changes state between preflight and `thread/resume`.
 - A pending tool continuation returns a clear non-retryable error after restart.
 - Mapping writes survive abrupt termination without corrupting other records.
-- One opt-in live scenario completes a tool round trip with `gpt-5.4-nano` using at most two model calls.
+- One opt-in live scenario completes a tool round trip with `gpt-5.4-mini` using at most two model calls.

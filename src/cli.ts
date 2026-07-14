@@ -81,6 +81,7 @@ export async function run(argv: readonly string[]): Promise<number> {
       );
       try {
         appServer = await initializeAppServer();
+        proxy.setTransport(appServer.rpc);
         proxy.setReady(true);
         log("info", "app_server_restarted", { attempt });
         recovering = false;
@@ -97,6 +98,7 @@ export async function run(argv: readonly string[]): Promise<number> {
   };
   try {
     appServer = await initializeAppServer();
+    proxy.setTransport(appServer.rpc);
     proxy.setReady(true);
     log("info", "app_server_ready");
   } catch (error) {
@@ -113,6 +115,7 @@ export async function run(argv: readonly string[]): Promise<number> {
       lifecycleStopping = true;
       log("info", "shutdown_started", { signal });
       proxy.setReady(false);
+      proxy.setTransport(undefined);
       void appServer!
         .stop()
         .then(() => proxy.close())

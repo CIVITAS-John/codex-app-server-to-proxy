@@ -9,6 +9,8 @@ import type { Socket } from "node:net";
 import { HttpError, writeError, writeJson } from "./errors.js";
 import type { ServeOptions } from "./config.js";
 import type { Logger } from "./logger.js";
+import type { JsonRpcTransport } from "./json-rpc.js";
+import { handleChatCompletion } from "./chat.js";
 
 /** Controls the proxy HTTP listener and readiness state. */
 export interface ProxyServer {
@@ -16,6 +18,7 @@ export interface ProxyServer {
   listen(): Promise<{ address: string; port: number }>;
   close(): Promise<void>;
   setReady(ready: boolean): void;
+  setTransport(transport: JsonRpcTransport | undefined): void;
 }
 
 /** Creates a loopback proxy with bounded concurrency and request lifetimes. */
@@ -24,6 +27,7 @@ export function createProxyServer(
   log: Logger,
 ): ProxyServer {
   let ready = false;
+  let transport: JsonRpcTransport | undefined;
   let active = 0;
   const controllers = new Set<AbortController>();
   const sockets = new Set<Socket>();
@@ -80,6 +84,9 @@ export function createProxyServer(
       ready,
       options.bodyLimitBytes,
       controller.signal,
+      transport,
+      log,
+      requestId,
     ).catch((cause: unknown) => {
       const error =
         cause instanceof HttpError
@@ -117,6 +124,9 @@ export function createProxyServer(
     server,
     setReady(value) {
       ready = value;
+    },
+    setTransport(value) {
+      transport = value;
     },
     listen: () =>
       new Promise((resolve, reject) => {
@@ -158,6 +168,9 @@ async function route(
   ready: boolean,
   bodyLimit: number,
   signal: AbortSignal,
+  transport: JsonRpcTransport | undefined,
+  log: Logger,
+  requestId: string,
 ): Promise<void> {
   const url = new URL(request.url ?? "/", "http://loopback.invalid");
   if (request.method === "GET" && url.pathname === "/health") {
@@ -182,7 +195,7 @@ async function route(
         "invalid_request_error",
         "unsupported_media_type",
       );
-    await readJsonBody(request, bodyLimit, signal);
+    const body = await readJsonBody(request, bodyLimit, signal);
     if (!ready)
       throw new HttpError(
         503,
@@ -190,12 +203,20 @@ async function route(
         "server_error",
         "app_server_not_ready",
       );
-    throw new HttpError(
-      501,
-      "Chat Completions translation is not implemented in this stage.",
-      "server_error",
-      "not_implemented",
-    );
+    if (!transport)
+      throw new HttpError(
+        503,
+        "The app-server transport is unavailable.",
+        "server_error",
+        "app_server_not_ready",
+      );
+    await handleChatCompletion(body, response, {
+      rpc: transport,
+      log,
+      requestId,
+      signal,
+    });
+    return;
   }
   throw new HttpError(
     404,

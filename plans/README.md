@@ -21,7 +21,7 @@ The work is split into gated stages. Complete stages in order unless a stage exp
 - Reject any request value the proxy cannot apply exactly. During v1 development, prefer a clear error over fallback or approximation.
 - Ignore harmless unsupported fields and log structured warnings.
 - Use TypeScript and Vitest for unit, integration, HTTP/SSE, and packed-CLI tests. Organize test files by responsibility rather than implementation stage, and keep the default Vitest configuration deterministic and offline.
-- Use mocks by default and only `gpt-5.4-nano` for opt-in live development tests.
+- Use mocks by default and only `gpt-5.4-mini` for opt-in live development tests.
 
 ## Stage map
 
@@ -38,7 +38,7 @@ The work is split into gated stages. Complete stages in order unless a stage exp
 
 ## Current status
 
-Stages 01, 02, and the offline portion of Stage 03 are implemented. The generated protocol artifacts, compatibility contract, schemas, fixtures, and disposable offline spike are checked in and tested. The TypeScript CLI enforces loopback-only binding, owns an initialized and authenticated app-server child, and provides offline-tested health, readiness, request bounds, structured errors, crash recovery, and graceful shutdown. The Stage 03 opt-in four-call live protocol proof remains unrun; Stage 08 owns packed-tarball installation and bin-shim proof. Later stages must not assume unverified live behavior.
+Stages 01, 02, 04, and the offline portion of Stage 03 are implemented. The Stage 03 one-call live HTTP smoke passed with `gpt-5.4-mini`; tool, policy, and restart/resume observations remain pending. Stage 08 owns packed-tarball installation and bin-shim proof.
 
 Stage 01 and Stage 02 coverage now runs as type-checked TypeScript through Vitest. The files are split by protocol contract, continuation behavior, offline spike, configuration, HTTP server, and CLI lifecycle. The checked-in default configuration selects offline tests and excludes opt-in live-test filenames. This is a development-only compatibility change: it does not alter the Node.js 20+ runtime or the CLI/API contract, but contributors and CI must use the TypeScript and Vitest configurations.
 
@@ -72,7 +72,7 @@ The first release is done when a fresh user can:
 
 - install the npm package and run one command;
 - complete ChatGPT browser login;
-- stream a `gpt-5.4-nano` chat completion;
+- stream a `gpt-5.4-mini` chat completion;
 - execute a client-defined tool across two HTTP requests;
 - continue via `previous_response_id`;
 - choose allowed policies;

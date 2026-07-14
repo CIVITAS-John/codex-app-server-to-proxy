@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { test } from "vitest";
 import { startAppServer } from "../src/app-server.js";
 import { createLogger } from "../src/logger.js";
@@ -16,12 +16,13 @@ test("app-server initializes in order and declines elicitation without advertisi
     "utf8",
   );
   await chmod(executable, 0o755);
+  const logs: string[] = [];
   const app = await startAppServer({
     codexPath: executable,
     root: directory,
     startupTimeoutMs: 1_000,
     shutdownTimeoutMs: 100,
-    log: createLogger("error", () => {}),
+    log: createLogger("debug", (entry) => logs.push(JSON.stringify(entry))),
   });
   try {
     await new Promise((resolve) => setTimeout(resolve, 30));
@@ -41,6 +42,9 @@ test("app-server initializes in order and declines elicitation without advertisi
       id: "elicit",
       result: { action: "decline", content: null },
     });
+    app.child.stderr.emit("data", `${homedir()}/private-file`);
+    assert.doesNotMatch(logs.join(""), new RegExp(homedir()));
+    assert.match(logs.join(""), /\[REDACTED_HOME\]/);
   } finally {
     await app.stop();
     await rm(directory, { recursive: true });

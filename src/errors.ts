@@ -28,6 +28,11 @@ export function writeJson(
   value: unknown,
 ): void {
   if (response.writableEnded) return;
+  // A streaming route may fail after its status and content type are committed.
+  if (response.headersSent) {
+    response.end();
+    return;
+  }
   const body = JSON.stringify(value);
   response.writeHead(status, {
     "content-type": "application/json; charset=utf-8",

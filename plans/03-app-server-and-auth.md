@@ -39,14 +39,16 @@ Reliably own one initialized app-server child process and complete ChatGPT login
 - Tests prove the fallback authorization URL reaches only the interactive terminal sink while structured logs, diagnostics, and state redact or omit it.
 - Elicitation capabilities are absent from initialization and unexpected elicitation requests receive an immediate fail-closed response.
 - No shell interpolation is used for spawning Codex or opening the browser.
-- The opt-in protocol spike records text, tool round trip, and persisted restart/resume observations using at most four model calls, all with `gpt-5.4-nano` and small output limits.
+- The opt-in protocol spike records text, tool round trip, and persisted restart/resume observations using at most four model calls, all with `gpt-5.4-mini` and small output limits.
 
 ## Cost guard
 
-The live protocol spike uses at most four calls: text, tool request, tool continuation, and post-restart continuation. All use `gpt-5.4-nano`.
+The live protocol spike uses at most four calls: text, tool request, tool continuation, and post-restart continuation. All use `gpt-5.4-mini`.
 
 ## Implementation status
 
 The offline Stage 03 implementation owns and version-checks a shell-free app-server child, implements bounded newline-delimited request correlation, initialization, authentication, redacted login fallback, fail-closed elicitation, readiness transitions, graceful termination, and three-attempt exponential crash recovery. Version checks and initialization use the configured tool timeout, and any initialization or authentication failure terminates the candidate child before retry or exit. The login completion listener is active before login starts so an immediate completion notification cannot be lost. Mocked tests cover initialization order and timeout cleanup, interleaved messages, overload errors, malformed output, authentication outcomes and immediate completion, cancellation, timeout, terminal-only URL disclosure, and elicitation decline.
 
-The compatibility consequence is that the CLI now starts app-server before becoming ready and may initiate ChatGPT login. `POST /v1/chat/completions` remains unimplemented until Stage 04. The opt-in four-call live protocol spike has not been run by the offline test suite; its text, dynamic-tool, policy, and persisted-resume observations remain an explicit live gate and no model calls are made by default tests.
+The CLI starts app-server before becoming ready and may initiate ChatGPT login. Stage 04 implements `POST /v1/chat/completions`. The isolated `CODEX_PROXY_LIVE=1 npm run test:live:hello` command exercises that route with one `gpt-5.4-mini` call, bounded output, and unconditional cleanup; default tests exclude it.
+
+The one-call `gpt-5.4-mini` hello-world smoke passed through the real HTTP proxy on 2026-07-13. Dynamic-tool round trip, policy enforcement, and persisted restart/resume remain pending.

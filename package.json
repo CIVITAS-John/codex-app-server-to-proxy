@@ -20,7 +20,10 @@
     "generate:protocol": "node scripts/generate-protocol.mjs",
     "lint": "eslint .",
     "prepack": "npm run build",
+    "serve": "node dist/bin.js serve",
+    "start": "npm run build && npm run serve",
     "test": "npm run build --silent && npm run test:typecheck --silent && vitest run",
+    "test:live:hello": "npm run build --silent && npm run test:typecheck --silent && vitest run --config vitest.live.config.js",
     "test:typecheck": "tsc -p tsconfig.test.json",
     "spike:offline": "node scripts/offline-spike.mjs"
   },

@@ -31,3 +31,13 @@ Translate the supported Chat Completions subset to app-server threads/turns and 
 - A generic SSE parser can ignore every `x_codex` field and still reconstruct standard text/tool calls.
 - Missing usage detail is omitted and never synthesized.
 - Non-streaming output matches the aggregation of streaming output.
+
+## Implemented decisions
+
+- A fresh request must end in one text-only user message. Earlier system, developer, user, and assistant messages are passed to `thread/inject_items` as role-preserving raw Responses API message items; they are never flattened into user text.
+- One stateful event normalizer owns item indexes and maps both streaming and non-streaming output. Assistant text uses standard `delta.content`; reasoning and internal app-server activity use typed `x_codex` extensions. Dynamic tool-call starts use standard `delta.tool_calls`, while the pending-result lifecycle remains Stage 05 work.
+- Usage attribution begins only after `turn/start` returns and accepts only matching thread and turn notifications. The exact `tokenUsage.last` values are mapped; unavailable details are omitted.
+- Client abort requests `turn/interrupt` for an active turn. Streaming writes wait for HTTP drain before consuming another normalized event.
+- `previous_response_id`, tool-result messages, and nonempty policy `x_codex` objects are rejected until Stages 05 and 06 can enforce their full state and policy contracts.
+
+These decisions add working fresh-completion compatibility without changing the planned continuation or policy contracts. Clients relying on later-stage extensions receive an explicit validation error instead of fallback behavior.
