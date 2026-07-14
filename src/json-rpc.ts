@@ -2,12 +2,14 @@ import { EventEmitter } from "node:events";
 import type { Writable, Readable } from "node:stream";
 import { createInterface } from "node:readline";
 
+/** JSON-RPC error object accepted by respondError. */
 export interface RpcErrorData {
   code: number;
   message: string;
   data?: unknown;
 }
 
+/** Represents an error response received over JSON-RPC. */
 export class RpcError extends Error {
   constructor(
     public readonly rpcCode: number,
@@ -19,17 +21,20 @@ export class RpcError extends Error {
   }
 }
 
+/** Completion callbacks for an in-flight client request. */
 type Pending = {
   resolve(value: unknown): void;
   reject(reason: unknown): void;
 };
 
+/** Request initiated by app-server toward the proxy. */
 export interface ServerRequest {
   id: string | number;
   method: string;
   params: unknown;
 }
 
+/** Exchanges newline-delimited JSON-RPC messages with app-server. */
 export class JsonRpcTransport extends EventEmitter {
   readonly #pending = new Map<number, Pending>();
   readonly #output: Writable;
@@ -157,6 +162,7 @@ export class JsonRpcTransport extends EventEmitter {
   }
 }
 
+/** Narrows parsed JSON values to non-array objects. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

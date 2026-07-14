@@ -7,12 +7,15 @@ import { parseServeOptions, type ServeOptions } from "../src/config.js";
 import { createLogger } from "../src/logger.js";
 import { createProxyServer, type ProxyServer } from "../src/server.js";
 
+/** Suppresses expected request logs during server tests. */
 const silentLogger = createLogger("error", () => {});
 
+/** Builds safe ephemeral listener options for a server test. */
 function options(overrides: Partial<ServeOptions> = {}): ServeOptions {
   return { ...parseServeOptions(["--port", "0"]), ...overrides };
 }
 
+/** Runs a test callback against an ephemeral proxy and always closes it. */
 async function withServer(
   overrides: Partial<ServeOptions>,
   run: (origin: string, proxy: ProxyServer) => Promise<void>,

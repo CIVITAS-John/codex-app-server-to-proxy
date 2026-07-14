@@ -1,5 +1,6 @@
 import { HttpError } from "./errors.js";
 
+/** Classifies whether a prior response can resume its Codex thread. */
 export type ContinuationState =
   | "ready"
   | "expired"
@@ -14,20 +15,24 @@ export type ContinuationState =
   | "tools"
   | "cwd";
 
+/** Maps an x_codex response identifier to continuation state. */
 export interface ContinuationMapping {
   responseId: string;
   threadId: string;
   state: ContinuationState;
 }
 
+/** Looks up persisted response-to-thread mappings. */
 export interface ContinuationStore {
   get(responseId: string): ContinuationMapping | undefined;
 }
 
+/** Attempts to resume an existing Codex thread. */
 export interface ThreadResumer {
   resume(threadId: string): "resumable" | "not_resumable";
 }
 
+/** Stable OpenAI-shaped failures for non-resumable continuation states. */
 const failures: Record<Exclude<ContinuationState, "ready">, HttpError> = {
   expired: failure(410, "expired_previous_response_id"),
   superseded: failure(409, "superseded_previous_response_id"),
@@ -42,6 +47,7 @@ const failures: Record<Exclude<ContinuationState, "ready">, HttpError> = {
   cwd: failure(409, "continuation_cwd_mismatch"),
 };
 
+/** Validates a continuation without mutating its stored mapping. */
 export function preflightContinuation(
   responseId: string,
   store: ContinuationStore,
@@ -58,6 +64,7 @@ export function preflightContinuation(
   return mapping;
 }
 
+/** Builds a continuation-specific HTTP error. */
 function failure(status: number, code: string): HttpError {
   return new HttpError(
     status,

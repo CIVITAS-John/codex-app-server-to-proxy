@@ -5,6 +5,7 @@ import { createProxyServer } from "./server.js";
 import { startAppServer, type AppServer } from "./app-server.js";
 import { ensureAuthenticated } from "./auth.js";
 
+/** Documents the CLI's supported command and options. */
 export const usage = `Usage: codex-openai-proxy serve [options]
 
 Options:
@@ -20,6 +21,7 @@ Options:
   --log-level <level>           debug, info, warn, or error (default: info)
   --state-dir <directory>       State directory (default: <root>/.codex-openai-proxy)`;
 
+/** Runs the CLI lifecycle and returns its eventual process exit code. */
 export async function run(argv: readonly string[]): Promise<number> {
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
     process.stdout.write(`${usage}\n`);
@@ -41,6 +43,7 @@ export async function run(argv: readonly string[]): Promise<number> {
 
   let appServer: AppServer | undefined;
   let lifecycleStopping = false;
+  // Authentication must finish before readiness admits proxy traffic.
   const initializeAppServer = async () => {
     const next = await startAppServer({
       codexPath: options.codexPath,
@@ -67,6 +70,7 @@ export async function run(argv: readonly string[]): Promise<number> {
     return next;
   };
   let recovering = false;
+  // Keep the HTTP listener alive while bounded retries restore app-server.
   const recoverAppServer = async (): Promise<void> => {
     if (recovering || lifecycleStopping) return;
     recovering = true;
@@ -130,6 +134,7 @@ export async function run(argv: readonly string[]): Promise<number> {
   });
 }
 
+/** Validates that a CLI path names a readable directory. */
 async function assertDirectory(path: string, option: string): Promise<void> {
   await access(path, constants.R_OK);
   if (!(await stat(path)).isDirectory())

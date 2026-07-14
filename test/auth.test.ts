@@ -5,9 +5,11 @@ import { ensureAuthenticated } from "../src/auth.js";
 import { JsonRpcTransport } from "../src/json-rpc.js";
 import { createLogger } from "../src/logger.js";
 
+/** Authentication scenario simulated by fakeRpc. */
 type LoginKind =
   "logged-in" | "browser" | "early" | "device" | "failure" | "timeout";
 
+/** Creates an in-memory app-server authentication transport. */
 function fakeRpc(kind: LoginKind): JsonRpcTransport {
   const input = new PassThrough();
   const output = new PassThrough();
@@ -61,6 +63,7 @@ function fakeRpc(kind: LoginKind): JsonRpcTransport {
   return rpc;
 }
 
+/** Suppresses expected logs during authentication tests. */
 const silent = createLogger("error", () => {});
 
 test("authentication accepts an existing account", async () => {

@@ -6,5 +6,11 @@
     "rootDir": ".",
     "types": ["node", "vitest"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/offline-spike.mjs"]
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "scripts/**/*.mjs",
+    "eslint.config.js",
+    "vitest.config.js"
+  ]
 }

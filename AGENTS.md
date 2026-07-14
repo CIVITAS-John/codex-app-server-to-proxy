@@ -19,6 +19,8 @@ This repository builds `codex-openai-proxy`, a localhost-only TypeScript CLI tha
 ## Implementation conventions
 
 - Target Node.js 20+ and strict TypeScript.
+- Add a concise documentation comment to every top-level definition in maintained source and test code. Generated artifacts are exempt.
+- Add inline comments at important implementation points where security constraints, protocol behavior, lifecycle ordering, or other non-obvious reasoning would otherwise be unclear.
 - Keep the public product surface CLI-only. Internal modules should still have narrow interfaces and be independently testable.
 - Bind only to validated loopback addresses. Treat any possible non-loopback bind as a release-blocking security defect.
 - Spawn app-server without a shell and use structured argument arrays.

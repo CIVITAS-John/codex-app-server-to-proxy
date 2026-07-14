@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 import { test } from "vitest";
 
+/** Repository root used to resolve generated protocol artifacts. */
 const root = new URL("../", import.meta.url);
+/** Reads and parses a JSON protocol artifact. */
 const readJson = async (path: string): Promise<unknown> =>
   JSON.parse(await readFile(new URL(path, root), "utf8"));
 

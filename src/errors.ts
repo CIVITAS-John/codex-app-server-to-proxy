@@ -1,5 +1,6 @@
 import type { ServerResponse } from "node:http";
 
+/** OpenAI-compatible error categories emitted by the proxy. */
 export type ErrorType =
   | "invalid_request_error"
   | "conflict_error"
@@ -7,6 +8,7 @@ export type ErrorType =
   | "rate_limit_error"
   | "server_error";
 
+/** Carries an HTTP status and OpenAI-shaped error metadata. */
 export class HttpError extends Error {
   constructor(
     readonly status: number,
@@ -19,6 +21,7 @@ export class HttpError extends Error {
   }
 }
 
+/** Writes a non-cacheable JSON response unless it has already ended. */
 export function writeJson(
   response: ServerResponse,
   status: number,
@@ -34,6 +37,7 @@ export function writeJson(
   response.end(body);
 }
 
+/** Serializes an HttpError in the OpenAI error envelope. */
 export function writeError(response: ServerResponse, error: HttpError): void {
   writeJson(response, error.status, {
     error: {

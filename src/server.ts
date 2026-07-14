@@ -10,6 +10,7 @@ import { HttpError, writeError, writeJson } from "./errors.js";
 import type { ServeOptions } from "./config.js";
 import type { Logger } from "./logger.js";
 
+/** Controls the proxy HTTP listener and readiness state. */
 export interface ProxyServer {
   server: Server;
   listen(): Promise<{ address: string; port: number }>;
@@ -17,6 +18,7 @@ export interface ProxyServer {
   setReady(ready: boolean): void;
 }
 
+/** Creates a loopback proxy with bounded concurrency and request lifetimes. */
 export function createProxyServer(
   options: ServeOptions,
   log: Logger,
@@ -28,6 +30,7 @@ export function createProxyServer(
   const server = createServer((request, response) => {
     const requestId = randomUUID();
     response.setHeader("x-request-id", requestId);
+    // Reject before allocating per-request resources when capacity is full.
     if (active >= options.maxRequests) {
       writeError(
         response,
@@ -148,6 +151,7 @@ export function createProxyServer(
   };
 }
 
+/** Routes the intentionally small public HTTP surface. */
 async function route(
   request: IncomingMessage,
   response: ServerResponse,
@@ -201,6 +205,7 @@ async function route(
   );
 }
 
+/** Reads and parses a size-limited, abortable JSON request body. */
 async function readJsonBody(
   request: IncomingMessage,
   limit: number,

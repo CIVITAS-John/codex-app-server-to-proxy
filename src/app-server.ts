@@ -8,8 +8,10 @@ import { JsonRpcTransport, type ServerRequest } from "./json-rpc.js";
 import type { Logger } from "./logger.js";
 import { createRequire } from "node:module";
 
+/** Identifies this proxy to app-server during initialization. */
 export const CLIENT_NAME = "codex-openai-proxy";
 
+/** Resolves the bundled Codex executable when the default command is used. */
 export function resolveCodexExecutable(configuredPath: string): string {
   if (configuredPath !== "codex") return configuredPath;
   try {
@@ -19,12 +21,14 @@ export function resolveCodexExecutable(configuredPath: string): string {
   }
 }
 
+/** Owns the initialized app-server process and its JSON-RPC transport. */
 export interface AppServer {
   rpc: JsonRpcTransport;
   child: ChildProcessWithoutNullStreams;
   stop(): Promise<void>;
 }
 
+/** Configures app-server process startup and shutdown. */
 export interface StartAppServerOptions {
   codexPath: string;
   root: string;
@@ -34,6 +38,7 @@ export interface StartAppServerOptions {
   spawnProcess?: typeof spawn;
 }
 
+/** Starts, verifies, and initializes an app-server child process. */
 export async function startAppServer(
   options: StartAppServerOptions,
 ): Promise<AppServer> {
@@ -97,6 +102,7 @@ export async function startAppServer(
   };
 }
 
+/** Verifies that a configured executable identifies itself as Codex. */
 async function verifyCodex(
   path: string,
   cwd: string,
@@ -123,6 +129,7 @@ async function verifyCodex(
     );
 }
 
+/** Bounds an initialization request with an abortable deadline. */
 async function requestWithTimeout(
   rpc: JsonRpcTransport,
   method: string,
@@ -142,6 +149,7 @@ async function requestWithTimeout(
   }
 }
 
+/** Gracefully stops app-server, escalating to SIGKILL after the deadline. */
 async function stopChild(
   child: ChildProcessWithoutNullStreams,
   rpc: JsonRpcTransport,
@@ -157,6 +165,7 @@ async function stopChild(
   clearTimeout(timer);
 }
 
+/** Waits until a child either spawns successfully or reports an error. */
 async function waitForSpawn(child: ChildProcess): Promise<void> {
   if (child.pid !== undefined) return;
   await Promise.race([
@@ -165,6 +174,7 @@ async function waitForSpawn(child: ChildProcess): Promise<void> {
   ]);
 }
 
+/** Declines unsolicited app-server requests that the proxy cannot safely serve. */
 function failClosed(
   rpc: JsonRpcTransport,
   request: ServerRequest,
@@ -183,6 +193,7 @@ function failClosed(
   log("warn", "app_server_request_declined", { method: request.method });
 }
 
+/** Removes common URL and credential forms from app-server diagnostics. */
 function redact(value: string): string {
   return value
     .replace(/https?:\/\/\S+/gi, "[REDACTED_URL]")

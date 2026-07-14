@@ -7,8 +7,10 @@ import {
 } from "../src/continuation.js";
 import { HttpError } from "../src/errors.js";
 
+/** Repository root used to resolve protocol fixtures. */
 const root = new URL("../", import.meta.url);
 
+/** Expected status and code for one continuation rejection case. */
 interface ContinuationCase {
   case: string;
   code: string;

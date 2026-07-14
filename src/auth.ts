@@ -3,7 +3,9 @@ import { once } from "node:events";
 import type { JsonRpcTransport } from "./json-rpc.js";
 import type { Logger } from "./logger.js";
 
+/** Minimal account/read fields used by the authentication flow. */
 type AccountResponse = { account?: unknown; requiresOpenaiAuth?: boolean };
+/** Supported account/login/start response variants. */
 type LoginResponse =
   | { type: "chatgpt"; loginId: string; authUrl: string }
   | {
@@ -12,12 +14,14 @@ type LoginResponse =
       verificationUrl: string;
       userCode: string;
     };
+/** Minimal account/login/completed notification payload. */
 type LoginCompleted = {
   loginId?: string | null;
   success?: boolean;
   error?: string | null;
 };
 
+/** Dependencies and policy inputs for authentication. */
 export interface AuthenticationOptions {
   rpc: JsonRpcTransport;
   log: Logger;
@@ -28,6 +32,7 @@ export interface AuthenticationOptions {
   signal?: AbortSignal;
 }
 
+/** Ensures app-server has an authenticated OpenAI account. */
 export async function ensureAuthenticated(
   options: AuthenticationOptions,
 ): Promise<void> {
@@ -41,6 +46,7 @@ export async function ensureAuthenticated(
   await startAndWaitForLogin(options, useDeviceCode);
 }
 
+/** Starts a browser or device-code login and waits for its notification. */
 async function startAndWaitForLogin(
   options: AuthenticationOptions,
   useDeviceCode: boolean,
@@ -123,6 +129,7 @@ async function startAndWaitForLogin(
   }
 }
 
+/** Opens a login URL with the platform browser without invoking a shell. */
 export async function launchBrowser(url: string): Promise<boolean> {
   const command =
     process.platform === "darwin"

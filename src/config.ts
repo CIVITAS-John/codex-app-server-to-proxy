@@ -1,7 +1,9 @@
 import { isAbsolute, resolve } from "node:path";
 
+/** Default maximum accepted HTTP request-body size. */
 export const DEFAULT_BODY_LIMIT = 1024 * 1024;
 
+/** Fully validated configuration for the proxy server. */
 export interface ServeOptions {
   host: "127.0.0.1" | "::1";
   port: number;
@@ -16,8 +18,10 @@ export interface ServeOptions {
   stateDir: string;
 }
 
+/** Supported structured-log severity levels. */
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
+/** Normalizes accepted host spellings to validated loopback addresses. */
 export function normalizeLoopbackHost(value: string): ServeOptions["host"] {
   const host = value.trim().toLowerCase();
   if (host === "127.0.0.1") return "127.0.0.1";
@@ -28,6 +32,7 @@ export function normalizeLoopbackHost(value: string): ServeOptions["host"] {
   );
 }
 
+/** Parses a bounded integer CLI option. */
 function integer(
   name: string,
   value: string,
@@ -42,6 +47,7 @@ function integer(
   return parsed;
 }
 
+/** Parses a positive duration CLI option into milliseconds. */
 function duration(name: string, value: string): number {
   const match = /^(\d+)(ms|s|m)?$/.exec(value);
   if (!match)
@@ -54,6 +60,7 @@ function duration(name: string, value: string): number {
   return result;
 }
 
+/** Parses and validates all options for the serve command. */
 export function parseServeOptions(
   args: readonly string[],
   cwd = process.cwd(),

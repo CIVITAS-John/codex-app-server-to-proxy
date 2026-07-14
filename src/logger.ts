@@ -1,5 +1,6 @@
 import type { LogLevel } from "./config.js";
 
+/** Numeric severity ordering used for log filtering. */
 const priorities: Record<LogLevel, number> = {
   debug: 10,
   info: 20,
@@ -7,8 +8,10 @@ const priorities: Record<LogLevel, number> = {
   error: 40,
 };
 
+/** Receives one structured log entry. */
 export type LogWriter = (entry: Record<string, unknown>) => void;
 
+/** Creates a structured logger filtered at the configured level. */
 export function createLogger(
   level: LogLevel,
   write: LogWriter = defaultWriter,
@@ -28,8 +31,10 @@ export function createLogger(
   };
 }
 
+/** Writes structured logs to stderr as newline-delimited JSON. */
 function defaultWriter(entry: Record<string, unknown>): void {
   process.stderr.write(`${JSON.stringify(entry)}\n`);
 }
 
+/** Structured logger returned by createLogger. */
 export type Logger = ReturnType<typeof createLogger>;
