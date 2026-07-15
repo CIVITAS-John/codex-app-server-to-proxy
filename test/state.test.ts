@@ -195,6 +195,108 @@ test("pending tool_call_id values implicitly select exactly one response", async
   rpc.close();
 });
 
+test("implicit tool continuation preserves an expired restart tombstone", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-proxy-state-"));
+  const firstRpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
+  const first = new ContinuationCoordinator(
+    new ResponseStore(directory),
+    firstRpc,
+    60_000,
+  );
+  first.suspend("response_1", binding, [
+    {
+      request: { id: 1, method: "item/tool/call", params: {} },
+      callId: "call_1",
+      name: "lookup",
+      arguments: {},
+      threadId: "thread_1",
+      turnId: "turn_1",
+    },
+  ]);
+  firstRpc.close();
+  const secondRpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
+  const restarted = new ContinuationCoordinator(
+    new ResponseStore(directory),
+    secondRpc,
+    60_000,
+  );
+
+  assert.throws(
+    () => restarted.findPendingResponse(["call_1"]),
+    (error: unknown) =>
+      error instanceof HttpError &&
+      error.status === 410 &&
+      error.code === "expired_tool_continuation",
+  );
+  secondRpc.close();
+});
+
+test("implicit tool continuation rejects ambiguous expired tombstones", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-proxy-state-"));
+  const store = new ResponseStore(directory);
+  for (const [responseId, threadId] of [
+    ["response_1", "thread_1"],
+    ["response_2", "thread_2"],
+  ] as const)
+    store.put({
+      responseId,
+      threadId,
+      state: "expired",
+      ...binding,
+      callIds: ["call_shared"],
+    });
+  const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
+  const coordinator = new ContinuationCoordinator(store, rpc, 60_000);
+
+  assert.throws(
+    () => coordinator.findPendingResponse(["call_shared"]),
+    (error: unknown) =>
+      error instanceof HttpError &&
+      error.status === 409 &&
+      error.code === "ambiguous_tool_call_id",
+  );
+  rpc.close();
+});
+
+test("dynamic tool callbacks accept omitted namespace but reject non-null values", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-proxy-state-"));
+  const output = new PassThrough();
+  const written: Buffer[] = [];
+  output.on("data", (chunk: Buffer) => written.push(chunk));
+  const rpc = new JsonRpcTransport(new PassThrough(), output);
+  const coordinator = new ContinuationCoordinator(
+    new ResponseStore(directory),
+    rpc,
+    60_000,
+  );
+  const calls: string[] = [];
+  coordinator.setToolOwner("thread_1", (call) => calls.push(call.callId));
+  const base = {
+    threadId: "thread_1",
+    turnId: "turn_1",
+    tool: "lookup",
+    arguments: {},
+  };
+
+  rpc.emit("request", {
+    id: 1,
+    method: "item/tool/call",
+    params: { ...base, callId: "call_1" },
+  });
+  rpc.emit("request", {
+    id: 2,
+    method: "item/tool/call",
+    params: { ...base, callId: "call_2", namespace: "unsafe" },
+  });
+
+  assert.deepEqual(calls, ["call_1"]);
+  assert.deepEqual(JSON.parse(Buffer.concat(written).toString("utf8")), {
+    id: 2,
+    error: { code: -32602, message: "Invalid dynamic tool request" },
+  });
+  rpc.close();
+});
+
 test("resolving a suspension is consumed and cannot replay tool results", async () => {
   const directory = await mkdtemp(join(tmpdir(), "codex-proxy-state-"));
   const output = new PassThrough();

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import { once } from "node:events";
 import { test } from "vitest";
 import { JsonRpcTransport, RpcError } from "../src/json-rpc.js";
@@ -70,4 +70,19 @@ test("transport suppresses buffered server requests after logical close", async 
   await new Promise<void>((resolve) => setImmediate(resolve));
 
   assert.equal(requests, 0);
+});
+
+test("a synchronous output write failure removes its pending request", async () => {
+  const output = new Writable({
+    write(_chunk, _encoding, callback) {
+      callback();
+    },
+  });
+  output.write = (): boolean => {
+    throw new Error("synchronous write failure");
+  };
+  const rpc = new JsonRpcTransport(new PassThrough(), output, 1);
+
+  await assert.rejects(rpc.request("first", {}), /synchronous write failure/);
+  await assert.rejects(rpc.request("second", {}), /synchronous write failure/);
 });

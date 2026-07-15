@@ -47,6 +47,75 @@ test("health is live while readiness remains false", async () => {
   });
 });
 
+test("every route rejects missing, malformed, and non-loopback Host headers", async () => {
+  await withServer({}, async (origin) => {
+    const url = new URL(origin);
+    const request = (host: string | undefined): Promise<http.IncomingMessage> =>
+      new Promise((resolve, reject) => {
+        const headers = host === undefined ? {} : { host };
+        const pending = http.request(
+          {
+            hostname: url.hostname,
+            port: url.port,
+            path: "/health",
+            method: "GET",
+            headers,
+            setHost: false,
+          },
+          resolve,
+        );
+        pending.once("error", reject);
+        pending.end();
+      });
+
+    const socket = net.connect(Number(url.port), url.hostname);
+    await once(socket, "connect");
+    socket.end("GET /health HTTP/1.0\r\n\r\n");
+    let raw = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => (raw += chunk));
+    await once(socket, "close");
+    assert.match(raw, /^HTTP\/1\.1 403 /);
+    assert.equal(
+      (
+        JSON.parse(raw.slice(raw.indexOf("\r\n\r\n") + 4)) as {
+          error: { code: string };
+        }
+      ).error.code,
+      "invalid_host_header",
+    );
+
+    for (const host of [
+      "evil.example",
+      "127.0.0.2",
+      "localhost:0",
+      "localhost:65536",
+      "localhost:not-a-port",
+    ]) {
+      const response = await request(host);
+      assert.equal(response.statusCode, 403);
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk: string) => (body += chunk));
+      await once(response, "end");
+      assert.equal(
+        (JSON.parse(body) as { error: { code: string } }).error.code,
+        "invalid_host_header",
+      );
+    }
+
+    for (const host of [
+      "localhost",
+      `localhost:${url.port}`,
+      "127.0.0.1",
+      `127.0.0.1:${url.port}`,
+      "[::1]",
+      `[::1]:${url.port}`,
+    ])
+      assert.equal((await request(host)).statusCode, 200);
+  });
+});
+
 test("HTTP failures use OpenAI-shaped JSON and never leak warnings", async () => {
   await withServer({}, async (origin) => {
     const cases: Array<[Promise<Response>, number, string]> = [

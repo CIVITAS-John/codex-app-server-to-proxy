@@ -47,30 +47,45 @@ test("every claimed exposed app-server event has a synthetic fixture", async () 
   assert.deepEqual([...fixtureMethods].sort(), [...claimed].sort());
 });
 
-test("contract explicitly classifies every unsupported mapping", async () => {
+test("contract documents the implemented Stage 05 compatibility mappings", async () => {
   const contract = await readFile(
     new URL("protocol/CONTRACT.md", root),
     "utf8",
   );
-  const rejectedRow = contract
+  const ignoredRow = contract
     .split("\n")
-    .find((line) => line.includes("| Rejected |"));
-  assert(rejectedRow, "missing rejected-field classification");
-  const rejectedFields = [...rejectedRow.matchAll(/`([^`]+)`/g)].map(
+    .find(
+      (line) =>
+        line.includes("`temperature`") &&
+        line.includes("| Ignored with warning |"),
+    );
+  assert(ignoredRow, "missing ignored-field classification");
+  const ignoredFields = [...ignoredRow.matchAll(/`([^`]+)`/g)].map(
     (match) => match[1],
   );
-  assert(rejectedFields.length > 20, "rejected fields were not enumerated");
-  assert.match(rejectedRow, /`unsupported_parameter`/);
-  assert.match(contract, /Any unknown top-level field.*Ignored with warning/);
-  assert.match(contract, /`unsupported_field_ignored`/);
-  for (const code of [
+  assert(ignoredFields.length > 20, "ignored fields were not enumerated");
+  assert.match(
+    contract,
+    /Any other unknown top-level field.*Ignored with warning/,
+  );
+  assert.match(contract, /`unsupported_chat_fields_ignored`/);
+  assert.match(contract, /`none` is accepted/);
+  assert.match(contract, /`choices\[0\]\.delta\.reasoning`/);
+  assert.match(
+    contract,
+    /nonstandard direct compatibility field `tool_results`/,
+  );
+  assert.match(
+    contract,
+    /Supplies `model`, `ephemeral: false`, and `dynamicTools`/,
+  );
+  assert.match(contract, /HTTP 503 before headers/);
+  assert.match(contract, /closes without `\[DONE\]`/);
+  for (const unimplemented of [
     "unrepresentable_message_history",
-    "unsupported_tool_choice",
-    "unsupported_parameter",
-    "unsupported_web_search_mode",
     "continuation_history_mismatch",
-  ]) {
-    assert(contract.includes(code), `missing explicit error: ${code}`);
-  }
+    "unsupported_parameter",
+  ])
+    assert(!contract.includes(unimplemented), `stale error: ${unimplemented}`);
   assert.match(contract, /never falls back to `thread\/start`/);
 });

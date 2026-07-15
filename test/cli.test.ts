@@ -5,6 +5,14 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "vitest";
+import { APP_SERVER_RECOVERY_DELAYS_MS } from "../src/cli.js";
+
+test("CLI recovery uses the documented bounded retry schedule", () => {
+  assert.deepEqual(
+    APP_SERVER_RECOVERY_DELAYS_MS,
+    [1_000, 3_000, 5_000, 10_000],
+  );
+});
 
 test("CLI rejects unsafe binds before opening a socket", async () => {
   const child = spawn(

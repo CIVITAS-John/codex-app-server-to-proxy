@@ -7,28 +7,28 @@ This contract targets `codex-cli 0.144.0-alpha.4`. The checked-in TypeScript and
 | Field | Classification | Mapping |
 | --- | --- | --- |
 | `model` | Standard, required | `thread/start.model`; must match on continuation. |
-| `messages` | Standard, required | A new thread accepts exactly one user text message. On continuation, accept the omitted history or the canonical assistant tool-call plus matching tool results. Other history is rejected as `unrepresentable_message_history`; no role flattening occurs. |
+| `messages` | Standard, required | Text-only role history is validated. A new thread must end in a user message. A continuation may end in a tool message only when it resolves that response's pending dynamic calls; a ready continuation ending in a tool message is rejected with HTTP 409 `tool_results_without_pending_call` rather than flattened into user text. |
 | `tools` | Standard | Function tools become experimental `dynamicTools`. Their canonical JSON SHA-256 must match on continuation because the pinned protocol cannot replace tools on `thread/resume` or `turn/start`. |
-| `tool_choice` | Standard, restricted | Omitted or `auto` only. `none`, `required`, and named choices are rejected as `unsupported_tool_choice` because this app-server has no faithful per-turn equivalent. |
+| `tool_choice` | Standard, restricted | Omitted and `auto` expose the declared dynamic tools. `none` is accepted by omitting dynamic tools. `required` and named choices are rejected because this app-server has no faithful per-turn equivalent. |
 | `stream` | Standard | `true` streams SSE. `false` buffers the same event pipeline and emits one response. |
 | `stream_options.include_usage` | Standard | When true, an otherwise empty final choices array carries attributable usage before `[DONE]`. |
 | `previous_response_id` | Nonstandard continuation field | Resolves a durable local mapping and always preflights `thread/resume`; never falls back to `thread/start`. Tool results may omit it by default when their `tool_call_id` values uniquely identify one live suspension; server configuration can require it. |
-| `x_codex` | Nonstandard extension | Validated by `schemas/x-codex.schema.json`; contains `cwd`, sandbox, and web-search policy. |
-| `temperature`, `top_p`, `n`, `stop`, `max_tokens`, `max_completion_tokens`, `presence_penalty`, `frequency_penalty`, `logit_bias`, `logprobs`, `top_logprobs`, `seed`, `response_format`, `modalities`, `audio`, `prediction`, `service_tier`, `store`, `metadata`, `user`, `parallel_tool_calls` | Rejected | Each lacks an exact mapping in the pinned app-server. Return `unsupported_parameter`; never approximate. |
-| Any unknown top-level field | Ignored with warning | Emit one structured `unsupported_field_ignored` warning per request, not one per occurrence. Unknown fields under `messages`, `tools`, or `x_codex` are rejected as malformed/ambiguous. |
+| `x_codex` | Nonstandard extension | Reserved for request policy controls. Non-empty values are rejected until their enforcement is implemented. |
+| `temperature`, `top_p`, `n`, `stop`, `max_tokens`, `max_completion_tokens`, `presence_penalty`, `frequency_penalty`, `logit_bias`, `logprobs`, `top_logprobs`, `seed`, `response_format`, `modalities`, `audio`, `prediction`, `service_tier`, `store`, `metadata`, `user`, `parallel_tool_calls` | Ignored with warning | These harmless unsupported top-level fields are not forwarded. Emit one structured `unsupported_chat_fields_ignored` warning per request containing the sorted field names. |
+| Any other unknown top-level field | Ignored with warning | Apply the same single `unsupported_chat_fields_ignored` warning. Unknown fields within `messages`, `tools`, `stream_options`, or `x_codex` remain malformed or unsupported. |
 
 ## Protocol mapping
 
 | App-server method/event | Proxy behavior |
 | --- | --- |
 | `initialize`, `initialized` | Required once before other traffic. Experimental capabilities are enabled by the generated contract. |
-| `thread/start` | Creates a new thread only after validation succeeds. Supplies model, cwd, policy, `approvalsReviewer: auto_review`, and dynamic tools. |
+| `thread/start` | Creates a new thread only after validation succeeds. Supplies `model`, `ephemeral: false`, and `dynamicTools` when enabled. Request policy fields are not forwarded in this stage. |
 | `thread/resume` | Preflight for every mapped continuation. Restored token usage is ignored for new-response attribution. |
 | `turn/start` | Starts one turn on a non-busy thread. Input is user text or the tool result delivered to a pending dynamic request. |
 | `item/agentMessage/delta` | Standard `choices[0].delta.content`. |
-| `item/tool/call` request | Centrally routed by thread to exactly one active owner and exposed as standard function `tool_calls` fragments; request remains pending until continuation, timeout, disconnect, turn resolution, or shutdown. |
-| reasoning delta events | `choices[0].delta.x_codex.reasoning`; never standard `content`. |
-| command, file-change, MCP progress, approval state | `choices[0].delta.x_codex.activity`. Internal tools never produce standard client tool calls. |
+| `item/tool/call` request | Centrally routed by thread to exactly one active owner and exposed with the standard function-shaped `tool_calls` field; request remains pending until continuation, timeout, disconnect, turn resolution, or shutdown. |
+| reasoning delta events | Nonstandard direct compatibility field `choices[0].delta.reasoning`; never standard `content` and never a response-side `x_codex` field. |
+| command, file-change, MCP, web-search, collaboration, approval, and other supported internal activity | Function-shaped `tool_calls` plus the nonstandard direct compatibility field `tool_results`. These calls are observational, are not client-executable dynamic calls, and do not cause `finish_reason: "tool_calls"`. |
 | `thread/tokenUsage/updated` | Attribute only `last` usage observed after `turn/started`. Omit unavailable values and never subtract or estimate. Replayed resume usage is ignored. |
 | `turn/completed` | Finalize mapping. Standard finish reason is `stop`, or `tool_calls` when client dynamic calls remain pending. Internal activity does not change the finish reason. |
 | `error` or JSON-RPC error | OpenAI-shaped error; an SSE stream emits one error event and then closes without `[DONE]`. Overload `-32001` maps to retryable HTTP 503 before headers. |
@@ -41,13 +41,12 @@ Unknown app-server events are retained only in redacted diagnostics and are not 
 
 ## SSE mapping
 
-The first chunk has `delta.role: "assistant"`. Text uses `delta.content`. A client tool call first emits its index, id, type, and function name, then argument fragments at that same index. Nonstandard activity appears only below `delta.x_codex`. The final choice has an empty delta and `finish_reason` of `stop` or `tool_calls`. If requested and reported, usage follows in a chunk with `choices: []`. A successful stream ends with `data: [DONE]`.
+The first chunk has `delta.role: "assistant"`. Text uses `delta.content`. Exposed reasoning uses the nonstandard direct `delta.reasoning` field. Calls use function-shaped `delta.tool_calls`; internal progress and terminal output use the nonstandard direct `delta.tool_results` field and repeat the matching call so each result is self-correlating. The final choice has an empty delta and `finish_reason` of `stop` or `tool_calls`. If requested and reported, usage follows in a chunk with `choices: []`. A successful stream ends with `data: [DONE]`. An error stream emits one OpenAI-shaped SSE error event and closes without `[DONE]`.
 
-The extension shapes are:
+The nonstandard direct compatibility result shape is:
 
 ```json
-{"x_codex":{"reasoning":{"kind":"summary|text","item_id":"item","text":"fragment"}}}
-{"x_codex":{"activity":{"kind":"command|file_change|mcp_tool|web_search|approval|tool_result","item_id":"item","status":"in_progress|completed|failed","text":"optional redacted fragment"}}}
+{"tool_results":[{"id":"item","type":"function","function":{"name":"tool_name","arguments":"{}"},"result":{"status":"started|in_progress|completed|failed","content":"optional bounded value","error":{"message":"optional bounded error","code":"optional code"}}}]}
 ```
 
 ## Errors and continuation invariants
@@ -56,7 +55,9 @@ Errors use `{"error":{"message":"...","type":"invalid_request_error|conflict_err
 
 Response IDs are `chatcmpl_codex_` plus at least 128 bits of URL-safe cryptographic randomness. Version 1 mappings follow `schemas/response-mapping.schema.json`. The newest completed response ID is stored per thread; any older ID is superseded and branching is rejected. `thread/fork(lastTurnId)` remains unproven and is not a v1 feature.
 
-Continuation requires exact model, canonical tool set, canonical cwd, and effective-policy fingerprints. This includes completed-thread continuation: changing the tool set cannot be represented by the pinned app-server protocol, so the proxy returns `continuation_tools_mismatch` instead of starting a replacement thread. Inconsistent repeated messages return `continuation_history_mismatch`. A pending tool call is process-local, defaults to a five-minute deadline, and is registered before the originating HTTP response ends. Timeout answers the app-server request with failure and marks the mapping expired. One store instance remains authoritative for the server lifetime. Transport replacement and shutdown dispose the old coordinator generation, cancel its timers, reject suspended responders, expire pending mappings, reject callbacks until close, and close the old transport; buffered post-close frames are ignored and stale executions cannot record completed responses.
+Continuation requires exact model, canonical tool set, canonical cwd, and effective-policy fingerprints. This includes completed-thread continuation: changing the tool set cannot be represented by the pinned app-server protocol, so the proxy returns `continuation_tools_mismatch` instead of starting a replacement thread. A pending tool call is process-local, defaults to a five-minute deadline, and is registered before the originating HTTP response ends. Timeout answers the app-server request with failure and marks the mapping expired. One store instance remains authoritative for the server lifetime. Transport replacement and shutdown dispose the old coordinator generation, cancel its timers, reject suspended responders, expire pending mappings, reject callbacks until close, and close the old transport; buffered post-close frames are ignored and stale executions cannot record completed responses.
+
+A tool-ending continuation is valid only against a pending-tool mapping. A ready mapping has no pending call to receive that result and returns HTTP 409 `tool_results_without_pending_call` without resuming or starting a turn.
 
 ## Unproven live behavior
 

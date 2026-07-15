@@ -196,6 +196,14 @@ async function route(
   log: Logger,
   requestId: string,
 ): Promise<void> {
+  if (!isAllowedHost(request.headers.host))
+    throw new HttpError(
+      403,
+      "The Host header must identify a loopback address.",
+      "invalid_request_error",
+      "invalid_host_header",
+      "host",
+    );
   const url = new URL(request.url ?? "/", "http://loopback.invalid");
   if (request.method === "GET" && url.pathname === "/health") {
     writeJson(response, 200, { status: "ok" });
@@ -251,6 +259,16 @@ async function route(
     "not_found_error",
     "route_not_found",
   );
+}
+
+/** Accepts only explicit loopback HTTP authorities with an optional valid port. */
+function isAllowedHost(host: string | undefined): boolean {
+  if (host === undefined) return false;
+  const match = /^(localhost|127\.0\.0\.1|\[::1\])(?::([0-9]+))?$/i.exec(host);
+  if (!match) return false;
+  if (match[2] === undefined) return true;
+  const port = Number(match[2]);
+  return Number.isInteger(port) && port >= 1 && port <= 65_535;
 }
 
 /** Reads and parses a size-limited, abortable JSON request body. */

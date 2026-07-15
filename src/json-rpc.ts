@@ -86,7 +86,11 @@ export class JsonRpcTransport extends EventEmitter {
       };
       this.#pending.set(id, pending);
       signal?.addEventListener("abort", abort, { once: true });
-      this.#write({ id, method, params });
+      try {
+        this.#write({ id, method, params });
+      } catch (error) {
+        if (this.#pending.delete(id)) pending.reject(error);
+      }
     });
   }
 

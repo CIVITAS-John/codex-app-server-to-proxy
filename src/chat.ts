@@ -113,6 +113,12 @@ export interface ChatHandlerOptions {
   implicitToolContinuation: boolean;
 }
 
+/** One eagerly prepared execution with cleanup independent of generator startup. */
+interface ExecutionSession {
+  events: AsyncGenerator<NormalizedEvent>;
+  dispose(): Promise<void>;
+}
+
 /** Validates, executes, and serializes one Chat Completions request. */
 export async function handleChatCompletion(
   body: unknown,
@@ -137,102 +143,125 @@ export async function handleChatCompletion(
   }
   const responseId = `chatcmpl_codex_${randomUUID().replaceAll("-", "")}`;
   const created = Math.floor(Date.now() / 1_000);
-  const events = execute(request, options, responseId);
-  if (request.stream) {
-    response.writeHead(200, {
-      "content-type": "text/event-stream; charset=utf-8",
-      "cache-control": "no-cache, no-store",
-      connection: "keep-alive",
-      "x-accel-buffering": "no",
-    });
-    await writeSse(
-      response,
-      chunk(responseId, created, request.model, { role: "assistant" }, null),
-    );
-    for await (const event of events) {
-      if (event.error) {
-        await writeSse(response, {
-          error: {
-            message: event.error,
-            type: "server_error",
-            param: null,
-            code: "app_server_error",
-          },
-        });
-        break;
+  // Setup is eager so validation and RPC failures retain their HTTP status
+  // instead of committing an SSE response before the generator is advanced.
+  const execution = await execute(request, options, responseId);
+  const { events } = execution;
+  try {
+    if (request.stream) {
+      response.writeHead(200, {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache, no-store",
+        connection: "keep-alive",
+        "x-accel-buffering": "no",
+      });
+      await writeSse(
+        response,
+        chunk(responseId, created, request.model, { role: "assistant" }, null),
+      );
+      let streamFailed = false;
+      try {
+        for await (const event of events) {
+          if (event.error) {
+            await writeSseError(response, event.error);
+            streamFailed = true;
+            break;
+          }
+          if (event.delta)
+            await writeSse(
+              response,
+              chunk(responseId, created, request.model, event.delta, null),
+            );
+          if (event.finishReason)
+            await writeSse(
+              response,
+              chunk(responseId, created, request.model, {}, event.finishReason),
+            );
+          if (event.usage && request.includeUsage)
+            await writeSse(response, {
+              id: responseId,
+              object: "chat.completion.chunk",
+              created,
+              model: request.model,
+              choices: [],
+              usage: event.usage,
+            });
+        }
+      } catch (error) {
+        streamFailed = true;
+        if (!response.writableEnded && !response.destroyed)
+          await writeSseError(
+            response,
+            error instanceof Error
+              ? error.message
+              : "The app-server turn failed.",
+          );
       }
-      if (event.delta)
-        await writeSse(
-          response,
-          chunk(responseId, created, request.model, event.delta, null),
-        );
-      if (event.finishReason)
-        await writeSse(
-          response,
-          chunk(responseId, created, request.model, {}, event.finishReason),
-        );
-      if (event.usage && request.includeUsage)
-        await writeSse(response, {
-          id: responseId,
-          object: "chat.completion.chunk",
-          created,
-          model: request.model,
-          choices: [],
-          usage: event.usage,
-        });
+      if (!streamFailed) await writeFrame(response, "[DONE]");
+      response.end();
+      return;
     }
-    await writeFrame(response, "[DONE]");
-    response.end();
-    return;
-  }
 
-  let content = "";
-  let reasoning = "";
-  const toolCalls = new Map<number, NormalizedToolCall>();
-  const toolResults: NormalizedToolResult[] = [];
-  let finishReason: string | null = null;
-  let usage: Usage | undefined;
-  for await (const event of events) {
-    if (event.error)
-      throw new HttpError(502, event.error, "server_error", "app_server_error");
-    if (typeof event.delta?.content === "string")
-      content += event.delta.content;
-    if (typeof event.delta?.reasoning === "string")
-      reasoning += event.delta.reasoning;
-    for (const call of event.delta?.tool_calls ?? [])
-      toolCalls.set(call.index, call);
-    toolResults.push(...(event.delta?.tool_results ?? []));
-    if (event.finishReason) finishReason = event.finishReason;
-    if (event.usage) usage = event.usage;
+    let content = "";
+    let reasoning = "";
+    const toolCalls = new Map<number, NormalizedToolCall>();
+    const toolResults: NormalizedToolResult[] = [];
+    let finishReason: string | null = null;
+    let usage: Usage | undefined;
+    for await (const event of events) {
+      if (event.error)
+        throw new HttpError(
+          502,
+          event.error,
+          "server_error",
+          "app_server_error",
+        );
+      if (typeof event.delta?.content === "string")
+        content += event.delta.content;
+      if (typeof event.delta?.reasoning === "string")
+        reasoning += event.delta.reasoning;
+      for (const call of event.delta?.tool_calls ?? [])
+        toolCalls.set(call.index, call);
+      toolResults.push(...(event.delta?.tool_results ?? []));
+      if (event.finishReason) finishReason = event.finishReason;
+      if (event.usage) usage = event.usage;
+    }
+    const message: Record<string, unknown> = {
+      role: "assistant",
+      content: toolCalls.size && content === "" ? null : content,
+    };
+    if (reasoning) message.reasoning = reasoning;
+    if (toolCalls.size) {
+      message.tool_calls = [...toolCalls.entries()]
+        .sort(([a], [b]) => a - b)
+        .map(([, call]) => ({
+          id: call.id,
+          type: call.type,
+          function: call.function,
+        }));
+    }
+    if (toolResults.length) message.tool_results = toolResults;
+    writeJson(response, 200, {
+      id: responseId,
+      object: "chat.completion",
+      created,
+      model: request.model,
+      choices: [{ index: 0, message, finish_reason: finishReason ?? "stop" }],
+      ...(usage ? { usage } : {}),
+    });
+  } finally {
+    // This also covers writeHead/initial-role failures before the async
+    // generator has ever started, when its own finally block cannot run.
+    await execution.dispose();
   }
-  const message: Record<string, unknown> = { role: "assistant", content };
-  if (reasoning) message.reasoning = reasoning;
-  if (toolCalls.size) {
-    message.tool_calls = [...toolCalls.entries()]
-      .sort(([a], [b]) => a - b)
-      .map(([, call]) => ({
-        id: call.id,
-        type: call.type,
-        function: call.function,
-      }));
-  }
-  if (toolResults.length) message.tool_results = toolResults;
-  writeJson(response, 200, {
-    id: responseId,
-    object: "chat.completion",
-    created,
-    model: request.model,
-    choices: [{ index: 0, message, finish_reason: finishReason ?? "stop" }],
-    ...(usage ? { usage } : {}),
-  });
 }
 
 /** Runs or resumes a Codex thread and yields its normalized event stream. */
-async function* execute(
+async function execute(
   request: ChatRequest,
   options: ChatHandlerOptions,
   responseId: string,
-): AsyncGenerator<NormalizedEvent> {
+): Promise<ExecutionSession> {
   const ingress: IngressEvent[] = [];
   let wake: (() => void) | undefined;
   let transportError: Error | undefined;
@@ -276,6 +305,7 @@ async function* execute(
   let turnId: string | undefined;
   let terminal = false;
   let suspended = false;
+  let disposed = false;
   const normalizer = new EventNormalizer();
   let continuationResults: Array<{ call: PendingToolCall; content: string }> =
     [];
@@ -291,7 +321,27 @@ async function* execute(
         .request("turn/interrupt", { threadId, turnId })
         .catch(() => undefined);
   };
-  options.signal.addEventListener("abort", () => void abort(), { once: true });
+  const onAbort = (): void => {
+    // Interrupt is best-effort, but waking the consumer is mandatory: a wedged
+    // app-server may never emit the terminal event that previously released it.
+    wake?.();
+    void abort();
+  };
+  const cleanup = async (): Promise<void> => {
+    if (disposed) return;
+    disposed = true;
+    await abort();
+    options.signal.removeEventListener("abort", onAbort);
+    options.rpc.off("notification", onNotification);
+    options.rpc.off("close", onClose);
+    if (threadId) options.continuations.clearToolOwner(threadId, onToolRequest);
+    if (threadId && !suspended) options.continuations.release(threadId);
+    if (!suspended)
+      for (const event of ingress)
+        if (event.type === "dynamic_tool")
+          rejectDynamicCall(options, event.call);
+  };
+  options.signal.addEventListener("abort", onAbort, { once: true });
   try {
     if (request.previousResponseId) {
       const stored = options.continuations.store.get(
@@ -338,6 +388,8 @@ async function* execute(
           continuationFailure(409, "superseded_previous_response_id");
         if (stored.state !== "ready")
           continuationFailure(500, "corrupt_response_state");
+        if (request.messages.at(-1)?.role === "tool")
+          continuationFailure(409, "tool_results_without_pending_call");
         if (!options.continuations.claim(threadId))
           continuationFailure(409, "thread_busy");
         if (!options.continuations.setToolOwner(threadId, onToolRequest))
@@ -439,94 +491,147 @@ async function* execute(
       );
       turnId = stringAt(asRecord(turn.turn, "turn/start.turn"), "id");
     }
-    for (const result of continuationResults)
-      yield normalizer.dynamicToolResult(result.call, result.content);
-    while (!terminal) {
-      if (transportError) throw transportError;
-      if (queueError) throw queueError;
-      if (!ingress.length)
-        await new Promise<void>((resolve) => {
-          wake = resolve;
-          if (ingress.length || queueError || transportError) resolve();
-        });
-      wake = undefined;
-      if (transportError) throw transportError;
-      if (queueError) throw queueError;
-      if (ingress[0]?.type === "dynamic_tool") {
-        // Let parallel app-server requests arriving in this event-loop turn join the batch.
-        await new Promise<void>((resolve) => setImmediate(resolve));
-        if (queueError) throw queueError;
-        const captured = ingress.splice(0);
-        const calls = captured
-          .filter(
-            (event): event is Extract<IngressEvent, { type: "dynamic_tool" }> =>
-              event.type === "dynamic_tool",
-          )
-          .map((event) => event.call);
-        if (
-          calls.some(
-            (call) => call.threadId !== threadId || call.turnId !== turnId,
-          )
-        ) {
-          for (const call of calls)
-            options.rpc.respondError(call.request.id, {
-              code: -32602,
-              message: "Dynamic tool correlation mismatch",
+  } catch (error) {
+    // Setup failures occur before HTTP headers, but still must release any
+    // ownership acquired by an earlier setup step.
+    await cleanup();
+    throw error;
+  }
+
+  const events =
+    (async function* streamExecution(): AsyncGenerator<NormalizedEvent> {
+      let failed = false;
+      let pendingFinishReason: NormalizedEvent["finishReason"];
+      let pendingUsage: Usage | undefined;
+      try {
+        for (const result of continuationResults)
+          yield normalizer.dynamicToolResult(result.call, result.content);
+        while (!terminal) {
+          if (transportError) throw transportError;
+          if (queueError) throw queueError;
+          // Preserve all already-arrived events. Once they are drained, abort is a
+          // terminal wake source even if interrupt fails or the transport wedges.
+          if (!ingress.length && options.signal.aborted)
+            throw new HttpError(
+              408,
+              "The request timed out or was disconnected.",
+              "server_error",
+              "request_timeout",
+            );
+          if (!ingress.length)
+            await new Promise<void>((resolve) => {
+              wake = resolve;
+              if (
+                ingress.length ||
+                queueError ||
+                transportError ||
+                options.signal.aborted
+              )
+                resolve();
             });
-          throw new Error(
-            "Dynamic tool request did not match the active turn.",
-          );
-        }
-        options.continuations.suspend(responseId, binding, calls);
-        suspended = true;
-        for (const event of captured) {
-          if (event.type === "notification") {
-            if (!matchesTurn(event.params, threadId, turnId)) continue;
-            for (const normalized of normalizer.normalize(
-              event.method,
-              event.params,
-            ))
-              yield normalized;
+          wake = undefined;
+          if (transportError) throw transportError;
+          if (queueError) throw queueError;
+          if (ingress[0]?.type === "dynamic_tool") {
+            // Let parallel app-server requests arriving in this event-loop turn join the batch.
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            if (queueError) throw queueError;
+            const captured = ingress.splice(0);
+            const calls = captured
+              .filter(
+                (
+                  event,
+                ): event is Extract<IngressEvent, { type: "dynamic_tool" }> =>
+                  event.type === "dynamic_tool",
+              )
+              .map((event) => event.call);
+            if (
+              calls.some(
+                (call) => call.threadId !== threadId || call.turnId !== turnId,
+              )
+            ) {
+              for (const call of calls)
+                options.rpc.respondError(call.request.id, {
+                  code: -32602,
+                  message: "Dynamic tool correlation mismatch",
+                });
+              throw new Error(
+                "Dynamic tool request did not match the active turn.",
+              );
+            }
+            try {
+              options.continuations.suspend(responseId, binding, calls);
+            } catch (error) {
+              // Captured calls are no longer in ingress, so this handoff owns
+              // rejecting every responder if durable suspension fails.
+              for (const call of calls) rejectDynamicCall(options, call);
+              throw error;
+            }
+            suspended = true;
+            for (const event of captured) {
+              if (event.type === "notification") {
+                if (!matchesTurn(event.params, threadId, turnId)) continue;
+                for (const normalized of normalizer.normalize(
+                  event.method,
+                  event.params,
+                ))
+                  yield normalized;
+                continue;
+              }
+              const call = event.call;
+              yield normalizer.dynamicToolCall(call);
+            }
+            yield { finishReason: "tool_calls" };
+            terminal = true;
             continue;
           }
-          const call = event.call;
-          yield normalizer.dynamicToolCall(call);
+          const next = ingress.shift();
+          if (!next) continue;
+          if (next.type === "dynamic_tool") continue;
+          if (!matchesTurn(next.params, threadId, turnId)) continue;
+          for (const event of normalizer.normalize(next.method, next.params)) {
+            if (event.error) {
+              terminal = true;
+              failed = true;
+              yield event;
+            } else if (event.finishReason) {
+              // Persistence is part of successful completion. Do not expose a
+              // terminal success frame until the continuation can be recorded.
+              terminal = true;
+              pendingFinishReason = event.finishReason;
+            } else if (event.usage) {
+              pendingUsage = event.usage;
+            } else {
+              yield event;
+            }
+          }
         }
-        yield { finishReason: "tool_calls" };
+        if (
+          !suspended &&
+          !failed &&
+          threadId &&
+          !options.continuations.recordReady(responseId, threadId, binding)
+        )
+          throw new Error(
+            "App-server transport was replaced before completion.",
+          );
+        if (!failed) {
+          if (pendingFinishReason) yield { finishReason: pendingFinishReason };
+          if (pendingUsage) yield { usage: pendingUsage };
+        }
+      } catch (error) {
+        // Failures must interrupt the app-server turn before ownership is released;
+        // otherwise work could continue without an HTTP consumer.
+        await abort();
+        // The failed execution is terminal from the proxy's perspective. Mark it
+        // before cleanup so the same best-effort interrupt is not sent twice.
         terminal = true;
-        continue;
+        throw error;
+      } finally {
+        await cleanup();
       }
-      const next = ingress.shift();
-      if (!next) continue;
-      if (next.type === "dynamic_tool") continue;
-      if (!matchesTurn(next.params, threadId, turnId)) continue;
-      for (const event of normalizer.normalize(next.method, next.params)) {
-        if (event.finishReason || event.error) terminal = true;
-        yield event;
-      }
-    }
-    if (
-      !suspended &&
-      threadId &&
-      !options.continuations.recordReady(responseId, threadId, binding)
-    )
-      throw new Error("App-server transport was replaced before completion.");
-  } catch (error) {
-    // Failures must interrupt the app-server turn before ownership is released;
-    // otherwise work could continue without an HTTP consumer.
-    await abort();
-    throw error;
-  } finally {
-    options.rpc.off("notification", onNotification);
-    options.rpc.off("close", onClose);
-    if (threadId) options.continuations.clearToolOwner(threadId, onToolRequest);
-    if (threadId && !suspended) options.continuations.release(threadId);
-    if (!suspended)
-      for (const event of ingress)
-        if (event.type === "dynamic_tool")
-          rejectDynamicCall(options, event.call);
-    if (options.signal.aborted) await abort();
-  }
+    })();
+  return { events, dispose: cleanup };
 }
 
 /** Converts one app-server notification into zero or more public events. */
@@ -1104,13 +1209,36 @@ async function writeSse(
   await writeFrame(response, JSON.stringify(value));
 }
 
+/** Writes the single terminal OpenAI-shaped error allowed on an SSE stream. */
+async function writeSseError(
+  response: ServerResponse,
+  message: string,
+): Promise<void> {
+  await writeSse(response, {
+    error: {
+      message,
+      type: "server_error",
+      param: null,
+      code: "app_server_error",
+    },
+  });
+}
+
 /** Writes one SSE data frame and waits for drain when required. */
 async function writeFrame(
   response: ServerResponse,
   data: string,
 ): Promise<void> {
-  if (!response.write(`data: ${data}\n\n`))
+  if (response.destroyed || response.writableEnded)
+    throw new Error("The HTTP response closed before the SSE frame was sent.");
+  if (!response.write(`data: ${data}\n\n`)) {
+    // close may have fired synchronously during write, before once() attaches.
+    if (response.destroyed || response.writableEnded)
+      throw new Error("The HTTP response closed while sending an SSE frame.");
     await Promise.race([once(response, "drain"), once(response, "close")]);
+    if (response.destroyed && !response.writableFinished)
+      throw new Error("The HTTP response closed while sending an SSE frame.");
+  }
 }
 
 /** Validates a complete, single-use result set for a suspended tool batch. */

@@ -134,6 +134,7 @@ function post(
   previousResponseId: string,
   model = "m",
   tools?: unknown[],
+  stream = false,
 ): Promise<Response> {
   return fetch(`${origin}/v1/chat/completions`, {
     method: "POST",
@@ -142,6 +143,7 @@ function post(
       model,
       previous_response_id: previousResponseId,
       ...(tools ? { tools } : {}),
+      ...(stream ? { stream: true } : {}),
       messages: [{ role: "user", content: "continue" }],
     }),
   });
@@ -203,8 +205,8 @@ test("model, cwd, tool, and policy binding mismatches fail before thread/read", 
   }
 });
 
-test("expired and corrupt mappings fail without thread/read or thread/start", async () => {
-  for (const state of ["expired", "corrupt"] as const) {
+test("terminal mappings fail as JSON before streaming headers or thread work", async () => {
+  for (const state of ["expired", "superseded", "corrupt"] as const) {
     const directory = await mkdtemp(
       join(tmpdir(), `codex-continuation-${state}-`),
     );
@@ -220,19 +222,71 @@ test("expired and corrupt mappings fail without thread/read or thread/start", as
       policyHash: bindingHash({}),
     });
     try {
-      const response = await post(running.origin, responseId);
-      assert.equal(response.status, state === "expired" ? 410 : 500);
+      const response = await post(
+        running.origin,
+        responseId,
+        undefined,
+        undefined,
+        true,
+      );
+      assert.equal(
+        response.status,
+        state === "expired" ? 410 : state === "superseded" ? 409 : 500,
+      );
+      assert.equal(
+        response.headers.get("content-type"),
+        "application/json; charset=utf-8",
+      );
       assert.equal(
         await errorCode(response),
         state === "expired"
           ? "expired_previous_response_id"
-          : "corrupt_response_state",
+          : state === "superseded"
+            ? "superseded_previous_response_id"
+            : "corrupt_response_state",
       );
       assert.deepEqual(fake.methods, []);
     } finally {
       await running.proxy.close();
       await rm(directory, { recursive: true, force: true });
     }
+  }
+});
+
+test("ready continuation rejects trailing tool results before thread work", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-ready-tool-"));
+  const fake = new ContinuationAppServer();
+  const responseId = "response_ready_tool";
+  const running = await startProxy(directory, fake, {
+    responseId,
+    threadId: "thr_continuation",
+    state: "ready",
+    model: "m",
+    cwd: join(directory, "workspace"),
+    toolsHash: bindingHash([]),
+    policyHash: bindingHash({}),
+  });
+  try {
+    const response = await fetch(`${running.origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        previous_response_id: responseId,
+        messages: [
+          { role: "tool", tool_call_id: "call_stale", content: "result" },
+        ],
+      }),
+    });
+    assert.equal(response.status, 409);
+    assert.equal(
+      await errorCode(response),
+      "tool_results_without_pending_call",
+    );
+    assert.deepEqual(fake.methods, []);
+  } finally {
+    await running.proxy.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

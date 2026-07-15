@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "vitest";
 import { EventNormalizer, normalizeNotification } from "../src/chat.js";
 import { JsonRpcTransport } from "../src/json-rpc.js";
@@ -20,6 +22,7 @@ const silentLogger = createLogger("error", () => {});
 function fakeAppServer(
   complete = true,
   onInterrupt: () => void = () => {},
+  requestTool = false,
 ): JsonRpcTransport {
   const fromServer = new PassThrough();
   const toServer = new PassThrough();
@@ -44,6 +47,21 @@ function fakeAppServer(
       send({ id: message.id, result: {} });
     } else if (message.method === "turn/start") {
       send({ id: message.id, result: { turn: { id: "turn_test" } } });
+      if (requestTool) {
+        send({
+          id: 8_001,
+          method: "item/tool/call",
+          params: {
+            threadId: thread,
+            turnId: "turn_test",
+            callId: "call_lookup",
+            tool: "lookup",
+            namespace: null,
+            arguments: { key: "value" },
+          },
+        });
+        return;
+      }
       send(
         protocolNotification({
           method: "item/agentMessage/delta",
@@ -101,16 +119,16 @@ function fakeAppServer(
 }
 
 /** Creates a fake turn with queued tool requests followed by an ingress failure. */
-function failingIngressAppServer(mode: "overflow" | "mismatch"): {
+function failingIngressAppServer(mode: "overflow" | "mismatch" | "suspend"): {
   rpc: JsonRpcTransport;
   responderErrors: number[];
-  wasInterrupted(): boolean;
+  interruptCount(): number;
 } {
   const fromServer = new PassThrough();
   const toServer = new PassThrough();
   const rpc = new JsonRpcTransport(fromServer, toServer);
   const responderErrors: number[] = [];
-  let interrupted = false;
+  let interrupts = 0;
   const send = (value: unknown): void => {
     fromServer.write(`${JSON.stringify(value)}\n`);
   };
@@ -154,11 +172,106 @@ function failingIngressAppServer(mode: "overflow" | "mismatch"): {
             }),
           );
     } else if (message.method === "turn/interrupt") {
-      interrupted = true;
+      interrupts += 1;
       send({ id: message.id, result: {} });
     } else if (message.error !== undefined) responderErrors.push(message.id);
   });
-  return { rpc, responderErrors, wasInterrupted: () => interrupted };
+  return { rpc, responderErrors, interruptCount: () => interrupts };
+}
+
+/** Creates a turn that fails only after turn/start has committed successfully. */
+function lateFailureAppServer(mode: "transport" | "event"): JsonRpcTransport {
+  const fromServer = new PassThrough();
+  const toServer = new PassThrough();
+  const rpc = new JsonRpcTransport(fromServer, toServer);
+  const send = (value: unknown): void => {
+    fromServer.write(`${JSON.stringify(value)}\n`);
+  };
+  createInterface({ input: toServer }).on("line", (line) => {
+    const message = JSON.parse(line) as {
+      id: number;
+      method: string;
+      params: Record<string, unknown>;
+    };
+    if (message.method === "thread/start")
+      send({ id: message.id, result: { thread: { id: "thr_failure" } } });
+    else if (message.method === "turn/start") {
+      send({ id: message.id, result: { turn: { id: "turn_failure" } } });
+      send(
+        protocolNotification({
+          method: "item/agentMessage/delta",
+          params: {
+            threadId: "thr_failure",
+            turnId: "turn_failure",
+            itemId: "partial",
+            delta: "partial",
+          },
+        }),
+      );
+      if (mode === "transport")
+        setImmediate(() => rpc.close(new Error("transport lost")));
+      else
+        send(
+          protocolNotification({
+            method: "error",
+            params: {
+              threadId: "thr_failure",
+              turnId: "turn_failure",
+              willRetry: false,
+              error: {
+                message: "turn failed",
+                codexErrorInfo: null,
+                additionalDetails: null,
+              },
+            },
+          }),
+        );
+    } else if (message.method === "turn/interrupt")
+      send({ id: message.id, result: {} });
+  });
+  return rpc;
+}
+
+/** Creates a silent first turn and a successful second turn on one thread. */
+function recoverableAppServer(): {
+  rpc: JsonRpcTransport;
+  wasInterrupted(): boolean;
+} {
+  const fromServer = new PassThrough();
+  const toServer = new PassThrough();
+  const rpc = new JsonRpcTransport(fromServer, toServer);
+  let turns = 0;
+  let interrupted = false;
+  const send = (value: unknown): void => {
+    fromServer.write(`${JSON.stringify(value)}\n`);
+  };
+  createInterface({ input: toServer }).on("line", (line) => {
+    const message = JSON.parse(line) as {
+      id: number;
+      method: string;
+      params: Record<string, unknown>;
+    };
+    if (message.method === "thread/start")
+      send({ id: message.id, result: { thread: { id: "thr_recover" } } });
+    else if (message.method === "turn/start") {
+      const turnId = `turn_recover_${++turns}`;
+      send({ id: message.id, result: { turn: { id: turnId } } });
+      if (turns === 1) return;
+      send(
+        protocolNotification({
+          method: "turn/completed",
+          params: {
+            threadId: "thr_recover",
+            turn: protocolTurn(turnId, "completed"),
+          },
+        }),
+      );
+    } else if (message.method === "turn/interrupt") {
+      interrupted = true;
+      send({ id: message.id, result: {} });
+    }
+  });
+  return { rpc, wasInterrupted: () => interrupted };
 }
 
 /** Runs an HTTP assertion against an ephemeral, ready offline proxy. */
@@ -167,13 +280,17 @@ async function withChatServer(
     origin: string,
     proxy: ReturnType<typeof createProxyServer>,
   ) => Promise<void>,
+  requestTimeout = "30s",
+  stateDir = `${tmpdir()}/codex-proxy-chat-tests-${process.pid}`,
 ): Promise<void> {
   const proxy = createProxyServer(
     parseServeOptions([
       "--port",
       "0",
       "--state-dir",
-      `${tmpdir()}/codex-proxy-chat-tests-${process.pid}`,
+      stateDir,
+      "--request-timeout",
+      requestTimeout,
     ]),
     silentLogger,
   );
@@ -545,6 +662,161 @@ test("streaming and aggregate responses share content and exact usage", async ()
   });
 });
 
+test("aggregate tool-only responses use null content", async () => {
+  await withChatServer(async (origin, proxy) => {
+    proxy.setTransport(fakeAppServer(true, () => {}, true));
+    const response = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        tools: [
+          { type: "function", function: { name: "lookup", parameters: {} } },
+        ],
+        messages: [{ role: "user", content: "use lookup" }],
+      }),
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      choices: Array<{
+        message: { content: string | null; tool_calls: unknown[] };
+      }>;
+    };
+    assert.equal(body.choices[0]?.message.content, null);
+    assert.equal(body.choices[0]?.message.tool_calls.length, 1);
+  });
+});
+
+test("late streaming failures emit one error and close without DONE", async () => {
+  for (const mode of ["transport", "event"] as const)
+    await withChatServer(async (origin, proxy) => {
+      proxy.setTransport(lateFailureAppServer(mode));
+      const response = await fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "m",
+          stream: true,
+          messages: [{ role: "user", content: mode }],
+        }),
+      });
+      assert.equal(response.status, 200);
+      const frames = (await response.text())
+        .split("\n\n")
+        .filter(Boolean)
+        .map((frame) => frame.slice(6));
+      assert.equal(frames.includes("[DONE]"), false);
+      const errors = frames
+        .map((frame) => JSON.parse(frame) as Record<string, unknown>)
+        .filter((frame) => frame.error !== undefined);
+      assert.equal(errors.length, 1);
+      assert.equal(
+        (errors[0]!.error as { code: string }).code,
+        "app_server_error",
+      );
+      if (mode === "event") {
+        const first = JSON.parse(frames[0]!) as { id: string };
+        const continuation = await fetch(`${origin}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          signal: AbortSignal.timeout(500),
+          body: JSON.stringify({
+            model: "m",
+            previous_response_id: first.id,
+            messages: [{ role: "user", content: "must be unknown" }],
+          }),
+        });
+        assert.equal(continuation.status, 404);
+      }
+    });
+});
+
+test("initial SSE write failure disposes eager execution before generator startup", async () => {
+  await withChatServer(async (origin, proxy) => {
+    const fake = recoverableAppServer();
+    proxy.setTransport(fake.rpc);
+    proxy.server.prependOnceListener("request", (_request, response) => {
+      response.write = (() => {
+        throw new Error("initial SSE write failed");
+      }) as typeof response.write;
+    });
+    await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        stream: true,
+        messages: [{ role: "user", content: "first" }],
+      }),
+    }).catch(() => undefined);
+    for (let attempt = 0; attempt < 20 && !fake.wasInterrupted(); attempt += 1)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(fake.wasInterrupted(), true);
+
+    // Reusing the same thread proves the abandoned session released its claim
+    // and tool-owner callback rather than only interrupting the turn.
+    const recovered = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        messages: [{ role: "user", content: "second" }],
+      }),
+    });
+    assert.equal(recovered.status, 200);
+  });
+});
+
+test("persistence failure emits an SSE error before finish reason or usage", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-persist-failure-"));
+  try {
+    await withChatServer(
+      async (origin) => {
+        // Atomic rename cannot replace a directory, deterministically forcing
+        // recordReady persistence to fail after the app-server completes.
+        await mkdir(join(directory, "continuations.json"));
+        const response = await fetch(`${origin}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: "m",
+            stream: true,
+            stream_options: { include_usage: true },
+            messages: [{ role: "user", content: "persist" }],
+          }),
+        });
+        const body = await response.text();
+        assert.match(body, /"code":"app_server_error"/);
+        assert.doesNotMatch(body, /"finish_reason":"stop"/);
+        assert.doesNotMatch(body, /"usage":/);
+        assert.doesNotMatch(body, /\[DONE\]/);
+      },
+      "30s",
+      directory,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("request timeout wakes a silent turn and closes its SSE stream", async () => {
+  await withChatServer(async (origin, proxy) => {
+    proxy.setTransport(fakeAppServer(false));
+    const response = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        stream: true,
+        messages: [{ role: "user", content: "wait forever" }],
+      }),
+    });
+    const body = await response.text();
+    assert.match(body, /"code":"app_server_error"/);
+    assert.doesNotMatch(body, /\[DONE\]/);
+  }, "50ms");
+});
+
 test("rejects ambiguous history and unknown continuation before app-server work", async () => {
   await withChatServer(async (origin) => {
     for (const body of [
@@ -570,11 +842,16 @@ test("rejects ambiguous history and unknown continuation before app-server work"
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         model: "m",
+        stream: true,
         messages: [{ role: "user", content: "x" }],
         previous_response_id: "chatcmpl_old",
       }),
     });
     assert.equal(unknown.status, 404);
+    assert.equal(
+      unknown.headers.get("content-type"),
+      "application/json; charset=utf-8",
+    );
     assert.equal(
       ((await unknown.json()) as { error: { code: string } }).error.code,
       "unknown_previous_response_id",
@@ -627,7 +904,7 @@ test("ingress overflow interrupts the turn and rejects every queued tool respond
       }),
     });
     assert.equal(response.status, 500);
-    assert.equal(fake.wasInterrupted(), true);
+    assert.equal(fake.interruptCount(), 1);
     assert.deepEqual(
       fake.responderErrors.sort((a, b) => a - b),
       [7001, 7002],
@@ -651,10 +928,58 @@ test("dynamic correlation failure rejects every captured responder", async () =>
       }),
     });
     assert.equal(response.status, 500);
-    assert.equal(fake.wasInterrupted(), true);
+    assert.equal(fake.interruptCount(), 1);
     assert.deepEqual(
       fake.responderErrors.sort((a, b) => a - b),
       [7001, 7002],
     );
   });
+});
+
+test("suspension persistence failure rejects every captured responder", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-suspend-failure-"));
+  try {
+    await withChatServer(
+      async (origin, proxy) => {
+        const fake = failingIngressAppServer("suspend");
+        proxy.setTransport(fake.rpc);
+        await mkdir(join(directory, "continuations.json"));
+        const request = {
+          model: "m",
+          tools: [
+            { type: "function", function: { name: "lookup", parameters: {} } },
+          ],
+          messages: [{ role: "user", content: "suspend" }],
+        };
+        const failed = await fetch(`${origin}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(request),
+        });
+        assert.equal(failed.status, 500);
+        assert.equal(fake.interruptCount(), 1);
+        assert.deepEqual(
+          fake.responderErrors.sort((a, b) => a - b),
+          [7001, 7002],
+        );
+
+        // A successful retry on the same thread proves failure cleanup also
+        // released the request claim and tool-owner callback.
+        await rm(join(directory, "continuations.json"), {
+          recursive: true,
+          force: true,
+        });
+        const retried = await fetch(`${origin}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(request),
+        });
+        assert.equal(retried.status, 200);
+      },
+      "30s",
+      directory,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

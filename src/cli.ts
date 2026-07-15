@@ -5,6 +5,11 @@ import { createProxyServer } from "./server.js";
 import { startAppServer, type AppServer } from "./app-server.js";
 import { ensureAuthenticated } from "./auth.js";
 
+/** Delays before bounded app-server restart attempts after an unexpected exit. */
+export const APP_SERVER_RECOVERY_DELAYS_MS = [
+  1_000, 3_000, 5_000, 10_000,
+] as const;
+
 /** Documents the CLI's supported command and options. */
 export const usage = `Usage: codex-openai-proxy serve [options]
 
@@ -77,10 +82,10 @@ export async function run(argv: readonly string[]): Promise<number> {
     if (recovering || lifecycleStopping) return;
     recovering = true;
     proxy.setReady(false);
-    for (let attempt = 1; attempt <= 3 && !lifecycleStopping; attempt += 1) {
-      await new Promise((resolve) =>
-        setTimeout(resolve, 100 * 2 ** (attempt - 1)),
-      );
+    for (const [index, delayMs] of APP_SERVER_RECOVERY_DELAYS_MS.entries()) {
+      if (lifecycleStopping) break;
+      const attempt = index + 1;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
       try {
         appServer = await initializeAppServer();
         proxy.setTransport(appServer.rpc);

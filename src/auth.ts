@@ -41,6 +41,10 @@ export async function ensureAuthenticated(
     { refreshToken: false },
     options.signal,
   )) as AccountResponse;
+  if (typeof account.requiresOpenaiAuth !== "boolean")
+    throw new Error(
+      "account/read returned an invalid requiresOpenaiAuth value.",
+    );
   if (!account.requiresOpenaiAuth || account.account != null) return;
   const useDeviceCode = !options.interactive;
   await startAndWaitForLogin(options, useDeviceCode);

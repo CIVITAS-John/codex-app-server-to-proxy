@@ -8,7 +8,14 @@ import { protocolNotification } from "./support/protocol-fixtures.js";
 
 /** Authentication scenario simulated by fakeRpc. */
 type LoginKind =
-  "logged-in" | "browser" | "early" | "device" | "failure" | "timeout";
+  | "logged-in"
+  | "missing-requirement"
+  | "malformed-requirement"
+  | "browser"
+  | "early"
+  | "device"
+  | "failure"
+  | "timeout";
 
 /** Creates an in-memory app-server authentication transport. */
 function fakeRpc(kind: LoginKind): JsonRpcTransport {
@@ -29,9 +36,13 @@ function fakeRpc(kind: LoginKind): JsonRpcTransport {
       buffered = buffered.slice(newline + 1);
       if (message.method === "account/read") {
         const result =
-          kind === "logged-in"
-            ? { account: { type: "chatgpt" }, requiresOpenaiAuth: true }
-            : { account: null, requiresOpenaiAuth: true };
+          kind === "missing-requirement"
+            ? { account: null }
+            : kind === "malformed-requirement"
+              ? { account: null, requiresOpenaiAuth: "yes" }
+              : kind === "logged-in"
+                ? { account: { type: "chatgpt" }, requiresOpenaiAuth: true }
+                : { account: null, requiresOpenaiAuth: true };
         input.write(`${JSON.stringify({ id: message.id, result })}\n`);
       } else if (message.method === "account/login/start") {
         const device = message.params.type === "chatgptDeviceCode";
@@ -75,6 +86,20 @@ test("authentication accepts an existing account", async () => {
     interactive: true,
     terminal: () => assert.fail("unexpected terminal output"),
   });
+});
+
+test("authentication fails closed when the auth requirement is missing", async () => {
+  for (const kind of ["missing-requirement", "malformed-requirement"] as const)
+    await assert.rejects(
+      ensureAuthenticated({
+        rpc: fakeRpc(kind),
+        log: silent,
+        timeoutMs: 100,
+        interactive: false,
+        terminal: () => {},
+      }),
+      /invalid requiresOpenaiAuth/,
+    );
 });
 
 test("browser login launches without printing the authorization URL", async () => {

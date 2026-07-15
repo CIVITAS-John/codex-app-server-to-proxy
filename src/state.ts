@@ -115,6 +115,16 @@ export class ResponseStore {
     return updated;
   }
 
+  /** Finds durable records containing every requested dynamic-tool call ID. */
+  findByCallIds(callIds: readonly string[]): ResponseRecord[] {
+    const requested = new Set(callIds);
+    return [...this.#records.values()].filter(
+      (record) =>
+        record.callIds !== undefined &&
+        [...requested].every((id) => record.callIds!.includes(id)),
+    );
+  }
+
   /** Loads valid records and quarantines an unreadable store logically as empty. */
   #load(): void {
     try {
@@ -236,7 +246,7 @@ export class ContinuationCoordinator {
       typeof params.turnId !== "string" ||
       typeof params.callId !== "string" ||
       typeof params.tool !== "string" ||
-      params.namespace !== null
+      (params.namespace !== undefined && params.namespace !== null)
     ) {
       this.rpc.respondError(request.id, {
         code: -32602,
@@ -351,8 +361,16 @@ export class ContinuationCoordinator {
         entry.calls.some((call) => call.callId === id),
       ),
     );
-    if (matches.length === 0)
+    if (matches.length === 0) {
+      const tombstones = this.store
+        .findByCallIds(callIds)
+        .filter((record) => record.state === "expired");
+      if (tombstones.length === 1)
+        throw toolLookupFailure(410, "expired_tool_continuation");
+      if (tombstones.length > 1)
+        throw toolLookupFailure(409, "ambiguous_tool_call_id");
       throw toolLookupFailure(404, "unknown_tool_call_id");
+    }
     if (matches.length > 1)
       throw toolLookupFailure(409, "ambiguous_tool_call_id");
     return matches[0]![0];
