@@ -1,174 +1,163 @@
 # codex-openai-proxy
 
-`codex-openai-proxy` is an npm/TypeScript CLI under staged development that exposes a deliberately small, OpenAI-compatible Chat Completions API backed by a local `codex app-server` child process and ChatGPT login.
+`codex-openai-proxy` lets software written for the OpenAI Chat Completions API talk to Codex through a local HTTP endpoint. It runs `codex app-server`, uses your ChatGPT login, and keeps the listener on your machine.
 
-## Development CLI
+The project is under active development. Text completions, streaming, function tools, usage metadata, and thread continuation are implemented. Per-request Codex policy selection is planned but not yet available.
 
-Build and start the Stage 05 server:
+## Start the proxy
+
+Node.js 20 or newer is required. Until the package is published, run it from this repository:
 
 ```sh
 npm install
 npm start
 ```
 
-The listener defaults to `127.0.0.1:8787`. The proxy installs and uses its own `@openai/codex` runtime dependency by default. `--codex-path` can override that executable, and `PATH` is only a compatibility fallback when the package is unavailable. The proxy validates the executable and owns one `codex app-server` child. `GET /health` reports proxy liveness. `GET /ready` remains HTTP 503 until app-server initialization and usable ChatGPT authentication complete, and becomes unavailable again during bounded crash recovery.
-
-Fresh text-only Chat Completions are translated in both streaming and non-streaming modes. Prior system, developer, user, and assistant messages are injected as role-preserving Responses API history; the final user message starts the Codex turn. Standard assistant text remains usable by generic clients, while exposed reasoning and internal activity use `x_codex` extensions. Exact last-turn usage is returned when app-server reports it. Stage 05 adds function-tool round trips and completed-thread continuation through `previous_response_id`. Request policy selection remains unavailable until Stage 06 and is rejected rather than approximated.
-
-On first use, an interactive CLI attempts to open the ChatGPT authorization URL without a shell. If that fails, it prints the URL once to the interactive terminal; structured logs contain only a redacted event. A non-interactive CLI uses the device-code flow. Shutdown closes pending transport requests and terminates app-server after the configured grace period.
-
-Run `node dist/bin.js --help` for loopback host, port, root, Codex path, state directory, timeout, request limit, and log-level options. Logs are structured JSON written only to stderr.
-
-## Live contract tests
-
-The opt-in suite runs a focused subset of the offline Chat Completions contract against a real app-server. It covers streaming with role history, a two-request function-tool round trip, and completed-thread continuation after restarting both the proxy and app-server. The suite runs serially, attempts at most four model calls, bounds captured diagnostics, and always uses `gpt-5.4-mini`:
-
-```sh
-npm run test:live
-```
-
-Running the dedicated command is the live-test opt-in. It uses the existing ChatGPT login when available; otherwise it starts the normal interactive or device-code login flow. Set `CODEX_PATH` to test a specific Codex executable; the CLI's equivalent runtime option is `--codex-path`. The default `npm test` configuration excludes all `*.live.test.ts` files and runs the shared contract against only the deterministic fake backend. Transport framing and fault-injection cases remain fake-only because a live app-server cannot safely provide deterministic malformed frames or process failures.
-
-## Intended scope
-
-The proxy will:
-
-- serve `POST /v1/chat/completions` on loopback only;
-- start and supervise `codex app-server` over stdio;
-- guide the user through ChatGPT login on first start by opening a browser when possible and printing a URL/instructions as a fallback;
-- stream assistant text, exposed reasoning, tool calls, tool results, and lifecycle information where the pinned app-server exposes them;
-- support client-defined function tools across requests by keeping app-server calls pending for a short client round trip;
-- reuse persisted Codex threads through an additive `previous_response_id` request field;
-- allow per-request working directory and sandbox selection, plus each web-search mode app-server can enforce for that request;
-- return prompt, completion, total, cached-input, and reasoning token usage when app-server provides them;
-- ignore harmless unsupported Chat Completions fields and log a warning; and
-- provide mocked tests plus a small opt-in live suite that uses only `gpt-5.4-mini`.
-
-It will not initially provide the Responses API, embeddings, images, audio, remote network serving, a programmatic library API, thread-management endpoints, or broad compatibility with every Chat Completions field.
-
-## Proposed CLI
-
-The package name is `codex-openai-proxy` and its only public interface is a CLI:
+Once published, the CLI will also be available through:
 
 ```sh
 npx codex-openai-proxy serve
 ```
 
-Proposed defaults:
+The proxy listens at `http://127.0.0.1:8787` by default. On first use it starts the ChatGPT login flow. Interactive terminals open the authorization page when possible; non-interactive terminals use device-code login.
 
-- listen address: `127.0.0.1`;
-- port: `8787`;
-- model: supplied by each request (live development tests are pinned to `gpt-5.4-mini`);
-- Codex process: package-owned Codex executable by default, with an explicit `--codex-path` override and `PATH` compatibility fallback;
-- root directory: the proxy's launch directory, configurable with `--root`;
-- local proxy authentication: none;
-- unsupported request fields: ignored with structured warnings.
+Check that the HTTP process is alive and that Codex is ready:
 
-The host will be validated as loopback. Values other than `127.0.0.1`, `::1`, or `localhost` will be rejected rather than silently exposed.
-
-## Proposed HTTP contract
-
-The primary endpoint is:
-
-```text
-POST /v1/chat/completions
-Content-Type: application/json
+```sh
+curl http://127.0.0.1:8787/health
+curl http://127.0.0.1:8787/ready
 ```
 
-Ordinary Chat Completions fields remain conventional, including `model`, `messages`, `tools`, `tool_choice`, `stream`, and `stream_options.include_usage`.
+`/health` reports proxy liveness. `/ready` returns HTTP 503 until app-server initialization and authentication finish, and while the proxy is recovering from an app-server failure.
 
-The minimum extension is additive:
+## Use an OpenAI client
+
+Point an OpenAI-compatible client at the local `/v1` base URL. The proxy does not require a local API key, although some client libraries require a non-empty placeholder value.
+
+```js
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: "http://127.0.0.1:8787/v1",
+  apiKey: "local",
+});
+
+const completion = await client.chat.completions.create({
+  model: "gpt-5.4-mini",
+  messages: [{ role: "user", content: "Summarize this project." }],
+});
+
+console.log(completion.choices[0].message.content);
+```
+
+The equivalent request with `curl` is:
+
+```sh
+curl http://127.0.0.1:8787/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "gpt-5.4-mini",
+    "messages": [{"role": "user", "content": "Summarize this project."}]
+  }'
+```
+
+## OpenAI-compatible behavior
+
+The proxy intentionally implements a focused subset of Chat Completions rather than every OpenAI API endpoint.
+
+Standard behavior includes:
+
+- `POST /v1/chat/completions` with text-only `system`, `developer`, `user`, `assistant`, and `tool` messages;
+- streaming and non-streaming responses;
+- Chat Completions SSE framing ending with `data: [DONE]`;
+- assistant text in `choices[].message.content` or `choices[].delta.content`;
+- client-defined function tools, `tool_calls`, and `finish_reason: "tool_calls"`;
+- `stream_options.include_usage`; and
+- OpenAI-shaped JSON errors.
+
+The proxy ignores harmless unsupported top-level Chat Completions fields and writes one structured warning for the request. It rejects malformed, ambiguous, or unsafe input instead of approximating it.
+
+This is not a general OpenAI API server. It does not provide the Responses API, embeddings, images, audio, model management, or remote network serving. Message content is currently text-only, and `tool_choice` currently supports only `"auto"` and `"none"`.
+
+## Streaming
+
+Set `stream: true` as with a standard Chat Completions request:
+
+```sh
+curl -N http://127.0.0.1:8787/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "gpt-5.4-mini",
+    "messages": [{"role": "user", "content": "Describe this repository."}],
+    "stream": true,
+    "stream_options": {"include_usage": true}
+  }'
+```
+
+Standard clients can consume assistant text, function calls, the final finish reason, and the optional usage chunk without understanding Codex-specific data.
+
+## Function tools
+
+Function tools use the normal multi-request Chat Completions flow:
+
+1. Send the function definitions in `tools`.
+2. Receive an assistant response containing `tool_calls`.
+3. Execute the requested functions in your client.
+4. Send the assistant tool-call message followed by matching `role: "tool"` messages, repeating the same `tools` definition.
+
+By default, the proxy associates tool results with the one pending Codex turn through their `tool_call_id` values. Start it with `--implicit-tool-continuation false` if every tool-result request should instead supply the Codex continuation field described below.
+
+Pending tool calls are held in memory for five minutes by default. They cannot survive a proxy restart; completed threads can.
+
+## Codex extensions
+
+Codex-specific behavior is additive. Clients that only need standard Chat Completions fields can ignore it.
+
+### Continue a Codex thread
+
+`previous_response_id` is an `x_codex` extension to the request contract, not a standard Chat Completions field. Pass the `id` from the newest completed response to continue its persisted Codex thread:
 
 ```json
 {
   "model": "gpt-5.4-mini",
-  "messages": [{ "role": "user", "content": "Inspect this project" }],
-  "stream": true,
-  "previous_response_id": "chatcmpl_codex_...",
-  "x_codex": {
-    "cwd": "/absolute/path/to/project",
-    "sandbox": "workspace-write",
-    "web_search": "live"
-  }
+  "messages": [{ "role": "user", "content": "Now explain the test strategy." }],
+  "previous_response_id": "chatcmpl_codex_..."
 }
 ```
 
-`previous_response_id` is not a standard Chat Completions field. The proxy uses it to locate and resume the persisted Codex thread associated with an earlier response. Before accepting the request, the proxy verifies both its durable response mapping and the thread's current app-server state. An unknown, expired, superseded, busy, archived, deleted, policy-incompatible, or otherwise non-resumable continuation is rejected; the proxy never silently creates a replacement thread. A superseded reference (one that is no longer the newest response on its thread) is rejected rather than treated as a branch, because resuming would silently include the later turns. Clients may omit prior message history when continuing through this extension.
+A continuation must use the same model and function-tool definitions as the original thread. The proxy rejects unknown, expired, superseded, busy, or incompatible response IDs and never silently starts a replacement thread. Only the newest response can be continued; branching from an older response is not supported.
 
-Pending tool results are the one implicit-continuation case. By default, one or more `role: "tool"` messages without `previous_response_id` select the unique live suspension containing their `tool_call_id` values. Unknown, duplicate, ambiguous, expired, or replayed call IDs are rejected and never create a thread. Start the server with `--implicit-tool-continuation false` to require `previous_response_id` for tool results as well.
+### Receive Codex activity
 
-Initial `x_codex` values are:
+Codex events without a standard Chat Completions representation appear under `x_codex`:
 
-- `sandbox`: `read-only`, `workspace-write`, or `danger-full-access`;
-- `cwd`: an existing directory that resolves to the configured root or one of its descendants;
-- `web_search`: any enforceable value among `disabled`, `cached`, or `live`; unsupported values return an error.
+- streaming responses use `choices[].delta.x_codex`;
+- non-streaming responses use `choices[].message.x_codex.events`.
 
-Sandbox choice controls approval behavior. `danger-full-access` is never inferred. The request must select it explicitly, and the implementation must preserve any stricter machine or organization policy enforced by Codex.
+These events can include exposed reasoning, command or file-operation progress, web-search activity, tool results, and other internal lifecycle events. They are `x_codex` extensions and are not portable Chat Completions fields.
 
-## Streaming and tools
+### Select Codex policy
 
-Streaming uses standard Chat Completions SSE framing:
-
-```text
-data: {"object":"chat.completion.chunk",...}
-
-data: [DONE]
-```
-
-Standard clients receive assistant text in `choices[].delta.content`, function calls in `choices[].delta.tool_calls`, a final `finish_reason`, and usage in the final usage-bearing chunk when requested.
-
-Additional Codex events that have no standard Chat Completions representation are carried under `choices[].delta.x_codex`. This may include exposed reasoning summaries/text, internal shell or file-operation progress, web-search activity, tool results, and approval state. Consumers that do not understand the extension can ignore it.
-
-Client-defined tools follow the normal multi-request Chat Completions pattern:
-
-1. Send `tools` with the user request.
-2. Receive streamed `tool_calls` and a completion with `finish_reason: "tool_calls"`.
-3. Send a new request with the returned assistant tool-call message and corresponding `role: "tool"` messages. The proxy correlates their `tool_call_id` values to the unique live suspension. Supplying the prior response's `previous_response_id` remains supported and is required when implicit tool continuation is disabled.
-4. The proxy delivers those results to the pending app-server dynamic-tool calls and continues the same Codex thread.
-
-Pending dynamic calls are process-local in the first release. Their deadline is configurable and defaults to five minutes. The state store keeps only call IDs in its non-secret tombstone; tool arguments and results are not persisted. Persisted, completed threads can resume after a proxy restart, but a tool call awaiting a client result returns the non-retryable `expired_tool_continuation` error after restart.
-
-Repeat the same `tools` definition when sending tool results and on later `previous_response_id` continuations. The pinned app-server protocol defines dynamic tools only when a thread starts, so it cannot faithfully change a resumed thread from, for example, three tools to two. The proxy returns `continuation_tools_mismatch` for that request and never silently starts a replacement thread.
+Per-request working directory, sandbox, and web-search selection are planned `x_codex` request extensions. The current build rejects non-empty request `x_codex` values rather than pretending to apply them. The CLI-wide `--root` option remains the effective working-directory boundary.
 
 ## Usage metadata
 
-The proxy will populate standard Chat Completions usage fields:
+When app-server reports exact counts, the proxy returns standard `prompt_tokens`, `completion_tokens`, and `total_tokens`. It also returns cached-input and reasoning-token detail when available. Missing counts are omitted and are never estimated.
 
-```json
-{
-  "prompt_tokens": 120,
-  "completion_tokens": 35,
-  "total_tokens": 155,
-  "prompt_tokens_details": { "cached_tokens": 80 },
-  "completion_tokens_details": { "reasoning_tokens": 12 }
-}
+## Safety and local operation
+
+The listener accepts only `127.0.0.1`, `::1`, or `localhost`; non-loopback hosts are rejected. There is no proxy bearer-token check, so any process running as your local user may be able to call it.
+
+The launch directory is the default root for Codex work. Set a narrower boundary when needed:
+
+```sh
+npx codex-openai-proxy serve --root /absolute/path/to/project
 ```
 
-Fields unavailable from app-server are omitted rather than estimated.
+The proxy writes structured JSON logs to stderr. Run `npx codex-openai-proxy --help` for all server, timeout, capacity, logging, state, and Codex executable options.
 
-## Development constraints
+## Project documentation
 
-- Runtime baseline: Node.js 20+ on macOS, Linux, and Windows.
-- Language: strict TypeScript.
-- Public surface: CLI only.
-- Offline unit, protocol, and shared contract tests use fixtures/mocks and make no paid model calls.
-- Live contract tests are opt-in, attempt at most four calls per run, and use `gpt-5.4-mini` exclusively.
-- Documentation and implementation must distinguish standard Chat Completions behavior from `x_codex` extensions.
-
-## Design status
-
-See the staged plan:
-
-1. [Contract and spikes](plans/01-contract-and-spikes.md)
-2. [Package and CLI foundation](plans/02-package-and-cli.md)
-3. [App-server process and authentication](plans/03-app-server-and-auth.md)
-4. [Chat Completions translation and streaming](plans/04-chat-streaming.md)
-5. [Dynamic tools and thread reuse](plans/05-tools-and-threads.md)
-6. [Sandbox, working directory, and web search](plans/06-policies.md)
-7. [Quality, security, compatibility, and CI](plans/07-quality-and-ci.md)
-8. [Packaging and release](plans/08-packaging-and-release.md)
-
-## Source material
-
-- [`docs/codex-app-server.md`](docs/codex-app-server.md) is the checked-in app-server protocol reference.
-- OpenAI Chat Completions compatibility should be checked against the current official API reference during implementation.
+- [Repository guide](docs/development.md) explains the source layout, development commands, tests, and generated protocol files.
+- [Implementation plan](plans/README.md) tracks product decisions, completed stages, and remaining work.
+- [App-server protocol reference](docs/codex-app-server.md) is the checked-in upstream protocol reference used during implementation.

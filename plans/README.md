@@ -2,6 +2,8 @@
 
 The work is split into gated stages. Complete stages in order unless a stage explicitly calls for a parallel spike. Each stage must leave the repository testable and document unresolved protocol risk.
 
+This directory is the source of truth for product decisions, implementation status, and stage gates. User-facing setup and API behavior live in the [root README](../README.md); repository structure and contributor workflows live in the [repository guide](../docs/development.md).
+
 ## Product decisions
 
 - Provide only `POST /v1/chat/completions` to generic HTTP clients.
