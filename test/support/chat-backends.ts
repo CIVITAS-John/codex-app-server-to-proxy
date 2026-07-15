@@ -67,10 +67,7 @@ function createScriptedTransport(): ScriptedTransport {
     { threadId: string; timer?: NodeJS.Timeout }
   >();
   const injected = new Map<string, unknown[]>();
-  const pendingTools = new Map<
-    number,
-    { threadId: string; turnId: string }
-  >();
+  const pendingTools = new Map<number, { threadId: string; turnId: string }>();
   const send = (value: unknown): void => {
     const frame = `${JSON.stringify(value)}\n`;
     const middle = Math.max(1, Math.floor(frame.length / 2));
@@ -146,9 +143,7 @@ function createScriptedTransport(): ScriptedTransport {
     }
     if (message.method === "thread/inject_items") {
       const threadId = String(params.threadId);
-      const items = Array.isArray(params.items)
-        ? params.items
-        : [];
+      const items = Array.isArray(params.items) ? params.items : [];
       injected.set(threadId, items);
       send({ id: message.id, result: {} });
       return;

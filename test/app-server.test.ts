@@ -3,10 +3,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { test } from "vitest";
-import {
-  resolveCodexExecutable,
-  startAppServer,
-} from "../src/app-server.js";
+import { resolveCodexExecutable, startAppServer } from "../src/app-server.js";
 import { createLogger } from "../src/logger.js";
 
 test("default Codex resolution uses the package-owned executable", () => {
@@ -16,7 +13,10 @@ test("default Codex resolution uses the package-owned executable", () => {
 });
 
 test("explicit Codex paths override package resolution", () => {
-  assert.equal(resolveCodexExecutable("/tmp/custom-codex"), "/tmp/custom-codex");
+  assert.equal(
+    resolveCodexExecutable("/tmp/custom-codex"),
+    "/tmp/custom-codex",
+  );
 });
 
 test("app-server initializes in order and declines elicitation without advertising it", async () => {
