@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import type { JsonRpcTransport } from "./json-rpc.js";
-import type { Logger } from "./logger.js";
+import type { Logger } from "../core/logger.js";
 
 /** Minimal account/read fields used by the authentication flow. */
 type AccountResponse = { account?: unknown; requiresOpenaiAuth?: boolean };

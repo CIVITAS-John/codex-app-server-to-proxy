@@ -1,15 +1,15 @@
 import { once } from "node:events";
 import type { ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import type { JsonRpcTransport } from "./json-rpc.js";
+import type { JsonRpcTransport } from "../app-server/json-rpc.js";
 import { HttpError, writeJson } from "./errors.js";
-import type { Logger } from "./logger.js";
+import type { Logger } from "../core/logger.js";
 import {
   bindingHash,
   type ContinuationCoordinator,
   type PendingToolCall,
   type ThreadBinding,
-} from "./state.js";
+} from "../continuation/state.js";
 
 /** A validated text-only Chat Completions message. */
 interface ChatMessage {

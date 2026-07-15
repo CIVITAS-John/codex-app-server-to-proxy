@@ -5,7 +5,7 @@ import {
 } from "node:child_process";
 import { once } from "node:events";
 import { JsonRpcTransport, type ServerRequest } from "./json-rpc.js";
-import type { Logger } from "./logger.js";
+import type { Logger } from "../core/logger.js";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";

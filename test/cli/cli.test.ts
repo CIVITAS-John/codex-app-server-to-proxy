@@ -5,7 +5,8 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "vitest";
-import { APP_SERVER_RECOVERY_DELAYS_MS } from "../src/cli.js";
+import { APP_SERVER_RECOVERY_DELAYS_MS } from "../../src/cli/cli.js";
+import { repoRootPath } from "../support/repo-root.js";
 
 test("CLI recovery uses the documented bounded retry schedule", () => {
   assert.deepEqual(
@@ -18,7 +19,7 @@ test("CLI rejects unsafe binds before opening a socket", async () => {
   const child = spawn(
     process.execPath,
     ["dist/bin.js", "serve", "--host", "0.0.0.0"],
-    { cwd: new URL("..", import.meta.url), stdio: ["ignore", "pipe", "pipe"] },
+    { cwd: repoRootPath, stdio: ["ignore", "pipe", "pipe"] },
   );
   let stderr = "";
   child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
@@ -51,7 +52,7 @@ test("CLI exits cleanly after a termination signal", async () => {
       "--codex-path",
       fake,
     ],
-    { cwd: new URL("..", import.meta.url), stdio: ["ignore", "pipe", "pipe"] },
+    { cwd: repoRootPath, stdio: ["ignore", "pipe", "pipe"] },
   );
   let stderr = "";
   child.stderr.setEncoding("utf8").on("data", (chunk: string) => {

@@ -5,15 +5,15 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
 import { test } from "vitest";
-import { parseServeOptions } from "../src/config.js";
-import { JsonRpcTransport } from "../src/json-rpc.js";
-import { createLogger } from "../src/logger.js";
-import { createProxyServer, type ProxyServer } from "../src/server.js";
-import { bindingHash, ResponseStore } from "../src/state.js";
+import { parseServeOptions } from "../../src/core/config.js";
+import { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
+import { createLogger } from "../../src/core/logger.js";
+import { createProxyServer, type ProxyServer } from "../../src/http/server.js";
+import { bindingHash, ResponseStore } from "../../src/continuation/state.js";
 import {
   protocolNotification,
   protocolTurn,
-} from "./support/protocol-fixtures.js";
+} from "../support/protocol-fixtures.js";
 
 /** Suppresses expected diagnostics from rejected continuation requests. */
 const silentLogger = createLogger("error", () => {});

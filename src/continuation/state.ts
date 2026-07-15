@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { JsonRpcTransport, ServerRequest } from "./json-rpc.js";
-import { HttpError } from "./errors.js";
+import type {
+  JsonRpcTransport,
+  ServerRequest,
+} from "../app-server/json-rpc.js";
+import { HttpError } from "../http/errors.js";
 
 /** Current on-disk continuation-store schema. */
 const SCHEMA_VERSION = 1;

@@ -7,11 +7,14 @@ import {
 } from "node:http";
 import type { Socket } from "node:net";
 import { HttpError, writeError, writeJson } from "./errors.js";
-import type { ServeOptions } from "./config.js";
-import type { Logger } from "./logger.js";
-import type { JsonRpcTransport } from "./json-rpc.js";
+import type { ServeOptions } from "../core/config.js";
+import type { Logger } from "../core/logger.js";
+import type { JsonRpcTransport } from "../app-server/json-rpc.js";
 import { handleChatCompletion } from "./chat.js";
-import { ContinuationCoordinator, ResponseStore } from "./state.js";
+import {
+  ContinuationCoordinator,
+  ResponseStore,
+} from "../continuation/state.js";
 
 /** Controls the proxy HTTP listener and readiness state. */
 export interface ProxyServer {

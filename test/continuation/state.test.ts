@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
 import { PassThrough } from "node:stream";
-import { JsonRpcTransport } from "../src/json-rpc.js";
+import { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
 import {
   bindingHash,
   ContinuationCoordinator,
   ResponseStore,
-} from "../src/state.js";
-import { HttpError } from "../src/errors.js";
+} from "../../src/continuation/state.js";
+import { HttpError } from "../../src/http/errors.js";
 
 /** Common immutable binding used by persistence tests. */
 const binding = {

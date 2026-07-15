@@ -1,9 +1,9 @@
 import { access, constants, stat } from "node:fs/promises";
-import { parseServeOptions } from "./config.js";
-import { createLogger } from "./logger.js";
-import { createProxyServer } from "./server.js";
-import { startAppServer, type AppServer } from "./app-server.js";
-import { ensureAuthenticated } from "./auth.js";
+import { parseServeOptions } from "../core/config.js";
+import { createLogger } from "../core/logger.js";
+import { createProxyServer } from "../http/server.js";
+import { startAppServer, type AppServer } from "../app-server/app-server.js";
+import { ensureAuthenticated } from "../app-server/auth.js";
 
 /** Delays before bounded app-server restart attempts after an unexpected exit. */
 export const APP_SERVER_RECOVERY_DELAYS_MS = [

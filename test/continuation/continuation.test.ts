@@ -4,11 +4,12 @@ import { test } from "vitest";
 import {
   type ContinuationMapping,
   preflightContinuation,
-} from "../src/continuation.js";
-import { HttpError } from "../src/errors.js";
+} from "../../src/continuation/continuation.js";
+import { HttpError } from "../../src/http/errors.js";
+import { repoRootUrl } from "../support/repo-root.js";
 
 /** Repository root used to resolve protocol fixtures. */
-const root = new URL("../", import.meta.url);
+const root = repoRootUrl;
 
 /** Expected status and code for one continuation rejection case. */
 interface ContinuationCase {

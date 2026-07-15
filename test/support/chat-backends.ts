@@ -1,12 +1,15 @@
 import { PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
 import { tmpdir } from "node:os";
-import { startAppServer, type AppServer } from "../../src/app-server.js";
-import { ensureAuthenticated } from "../../src/auth.js";
-import { parseServeOptions } from "../../src/config.js";
-import { JsonRpcTransport } from "../../src/json-rpc.js";
-import { createLogger } from "../../src/logger.js";
-import { createProxyServer, type ProxyServer } from "../../src/server.js";
+import {
+  startAppServer,
+  type AppServer,
+} from "../../src/app-server/app-server.js";
+import { ensureAuthenticated } from "../../src/app-server/auth.js";
+import { parseServeOptions } from "../../src/core/config.js";
+import { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
+import { createLogger } from "../../src/core/logger.js";
+import { createProxyServer, type ProxyServer } from "../../src/http/server.js";
 import type { ChatContractBackend } from "./chat-contract.js";
 import { protocolNotification, protocolTurn } from "./protocol-fixtures.js";
 

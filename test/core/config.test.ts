@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { normalizeLoopbackHost, parseServeOptions } from "../src/config.js";
+import {
+  normalizeLoopbackHost,
+  parseServeOptions,
+} from "../../src/core/config.js";
 
 test("loopback validation accepts only exact safe forms", () => {
   assert.equal(normalizeLoopbackHost("127.0.0.1"), "127.0.0.1");

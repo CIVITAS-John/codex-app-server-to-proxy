@@ -1,4 +1,4 @@
-import { HttpError } from "./errors.js";
+import { HttpError } from "../http/errors.js";
 
 /** Classifies whether a prior response can resume its Codex thread. */
 export type ContinuationState =

@@ -3,9 +3,9 @@ import http from "node:http";
 import net from "node:net";
 import { once } from "node:events";
 import { test } from "vitest";
-import { parseServeOptions, type ServeOptions } from "../src/config.js";
-import { createLogger } from "../src/logger.js";
-import { createProxyServer, type ProxyServer } from "../src/server.js";
+import { parseServeOptions, type ServeOptions } from "../../src/core/config.js";
+import { createLogger } from "../../src/core/logger.js";
+import { createProxyServer, type ProxyServer } from "../../src/http/server.js";
 
 /** Suppresses expected request logs during server tests. */
 const silentLogger = createLogger("error", () => {});

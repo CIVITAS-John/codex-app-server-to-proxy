@@ -5,15 +5,15 @@ import { createInterface } from "node:readline";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
-import { EventNormalizer, normalizeNotification } from "../src/chat.js";
-import { JsonRpcTransport } from "../src/json-rpc.js";
-import { createLogger } from "../src/logger.js";
-import { parseServeOptions } from "../src/config.js";
-import { createProxyServer } from "../src/server.js";
+import { EventNormalizer, normalizeNotification } from "../../src/http/chat.js";
+import { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
+import { createLogger } from "../../src/core/logger.js";
+import { parseServeOptions } from "../../src/core/config.js";
+import { createProxyServer } from "../../src/http/server.js";
 import {
   protocolNotification,
   protocolTurn,
-} from "./support/protocol-fixtures.js";
+} from "../support/protocol-fixtures.js";
 
 /** Suppresses expected HTTP diagnostics in Chat Completions tests. */
 const silentLogger = createLogger("error", () => {});

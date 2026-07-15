@@ -17,24 +17,18 @@ npm run check
 
 ## Source layout
 
-The maintained TypeScript modules separate the public HTTP contract from app-server details:
+The maintained TypeScript modules are grouped by domain so the public HTTP contract remains separate from app-server details:
 
 | Path | Responsibility |
 | --- | --- |
-| `src/bin.ts` | Executable entry point and startup failure reporting |
-| `src/cli.ts` | CLI lifecycle, authentication, app-server recovery, and shutdown |
-| `src/config.ts` | CLI option parsing and loopback/path validation |
-| `src/server.ts` | HTTP routing, limits, readiness, and disconnect handling |
-| `src/chat.ts` | Chat Completions validation, translation, aggregation, and SSE output |
-| `src/app-server.ts` | Child-process ownership and app-server initialization |
-| `src/json-rpc.ts` | Newline-delimited JSON-RPC transport |
-| `src/auth.ts` | ChatGPT browser and device-code authentication flows |
-| `src/state.ts` | Durable response mapping and pending tool coordination |
-| `src/continuation.ts` | Continuation-state validation helpers |
-| `src/errors.ts` | OpenAI-shaped HTTP errors |
-| `src/logger.ts` | Structured stderr logging |
+| `src/bin.ts` | Root executable shim that preserves the published `dist/bin.js` entry point |
+| `src/cli/` | CLI lifecycle, authentication, app-server recovery, and shutdown |
+| `src/core/` | CLI configuration, loopback/path validation, and structured logging |
+| `src/app-server/` | Child-process ownership, authentication flows, and JSON-RPC transport |
+| `src/http/` | HTTP routing, Chat Completions translation, SSE output, and OpenAI-shaped errors |
+| `src/continuation/` | Durable response mapping, pending tool coordination, and continuation validation |
 
-`test/` contains deterministic unit, protocol, HTTP, lifecycle, tool, and continuation coverage. Shared fake backends and typed protocol fixture builders live under `test/support/`.
+`test/` mirrors the maintained source domains under `test/cli/`, `test/core/`, `test/app-server/`, `test/http/`, and `test/continuation/`. Cross-domain protocol contract and offline spike coverage lives under `test/contract/` and `test/spike/`. Shared fake backends, repository-path helpers, and typed protocol fixture builders live under `test/support/`.
 
 `protocol/` contains the generated app-server protocol structures consumed by maintained code and tests. Regenerate them with `npm run generate:protocol`; do not hand-edit generated output.
 

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { test } from "vitest";
-import { ensureAuthenticated } from "../src/auth.js";
-import { JsonRpcTransport } from "../src/json-rpc.js";
-import { createLogger } from "../src/logger.js";
-import { protocolNotification } from "./support/protocol-fixtures.js";
+import { ensureAuthenticated } from "../../src/app-server/auth.js";
+import { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
+import { createLogger } from "../../src/core/logger.js";
+import { protocolNotification } from "../support/protocol-fixtures.js";
 
 /** Authentication scenario simulated by fakeRpc. */
 type LoginKind =

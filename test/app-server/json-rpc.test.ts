@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { PassThrough, Writable } from "node:stream";
 import { once } from "node:events";
 import { test } from "vitest";
-import { JsonRpcTransport, RpcError } from "../src/json-rpc.js";
+import { JsonRpcTransport, RpcError } from "../../src/app-server/json-rpc.js";
 
 test("transport correlates interleaved notifications and responses without jsonrpc", async () => {
   const input = new PassThrough();

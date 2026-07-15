@@ -24,6 +24,8 @@ This directory is the source of truth for product decisions, implementation stat
 - Reject any request value the proxy cannot apply exactly. During v1 development, prefer a clear error over fallback or approximation.
 - Ignore harmless unsupported fields and log structured warnings.
 - Use TypeScript and Vitest for unit, integration, HTTP/SSE, and packed-CLI tests. Organize test files by responsibility rather than implementation stage, and keep the default Vitest configuration deterministic and offline.
+- Group maintained source by CLI, core, app-server, HTTP, and continuation domains, and mirror those domains under `test/` alongside contract, spike, and shared-support folders.
+    - Keep `src/bin.ts` as the root executable shim so compilation continues to publish the CLI at `dist/bin.js`; the restructure changes contributor-facing paths but not the package bin contract.
 - Use mocks by default and only `gpt-5.4-mini` for opt-in live development tests.
 
 ## Stage map

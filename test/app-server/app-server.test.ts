@@ -3,8 +3,11 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { test } from "vitest";
-import { resolveCodexExecutable, startAppServer } from "../src/app-server.js";
-import { createLogger } from "../src/logger.js";
+import {
+  resolveCodexExecutable,
+  startAppServer,
+} from "../../src/app-server/app-server.js";
+import { createLogger } from "../../src/core/logger.js";
 
 test("default Codex resolution uses the package-owned executable", () => {
   const executable = resolveCodexExecutable("codex");
