@@ -2,6 +2,8 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "allowJs": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "noEmit": true,
     "rootDir": ".",
     "types": ["node", "vitest"]

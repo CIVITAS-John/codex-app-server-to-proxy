@@ -199,8 +199,16 @@ async function* execute(
       const next = queued.shift();
       if (!next) continue;
       const params = record(next.params);
-      if (params && (params.threadId !== threadId || params.turnId !== turnId))
-        continue;
+      if (params) {
+        const notificationTurnId =
+          typeof params.turnId === "string"
+            ? params.turnId
+            : record(params.turn)?.id;
+        // Turn lifecycle notifications carry the id inside `turn`; item and
+        // delta notifications carry a top-level `turnId`.
+        if (params.threadId !== threadId || notificationTurnId !== turnId)
+          continue;
+      }
       for (const event of normalizer.normalize(next.method, next.params)) {
         if (event.finishReason || event.error) terminal = true;
         yield event;

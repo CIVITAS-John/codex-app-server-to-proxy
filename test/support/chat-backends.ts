@@ -7,6 +7,7 @@ import { JsonRpcTransport } from "../../src/json-rpc.js";
 import { createLogger } from "../../src/logger.js";
 import { createProxyServer, type ProxyServer } from "../../src/server.js";
 import type { ChatContractBackend } from "./chat-contract.js";
+import { protocolNotification, protocolTurn } from "./protocol-fixtures.js";
 
 /** Silent logger used by both contract backends. */
 const silentLogger = createLogger("error", () => {});
@@ -71,20 +72,38 @@ function createScriptedTransport(): ScriptedTransport {
     fromServer.write(frame.slice(middle));
   };
   const complete = (threadId: string, turnId: string): void => {
-    send({
-      method: "thread/tokenUsage/updated",
-      params: {
-        threadId,
-        turnId,
-        tokenUsage: {
-          last: { inputTokens: 4, outputTokens: 2, totalTokens: 6 },
+    send(
+      protocolNotification({
+        method: "thread/tokenUsage/updated",
+        params: {
+          threadId,
+          turnId,
+          tokenUsage: {
+            total: {
+              inputTokens: 4,
+              cachedInputTokens: 0,
+              outputTokens: 2,
+              reasoningOutputTokens: 0,
+              totalTokens: 6,
+            },
+            last: {
+              inputTokens: 4,
+              cachedInputTokens: 0,
+              outputTokens: 2,
+              reasoningOutputTokens: 0,
+              totalTokens: 6,
+            },
+            modelContextWindow: null,
+          },
         },
-      },
-    });
-    send({
-      method: "turn/completed",
-      params: { threadId, turnId, turn: { status: "completed" } },
-    });
+      }),
+    );
+    send(
+      protocolNotification({
+        method: "turn/completed",
+        params: { threadId, turn: protocolTurn(turnId, "completed") },
+      }),
+    );
     active.delete(turnId);
   };
   const lines = createInterface({ input: toServer });
@@ -119,15 +138,17 @@ function createScriptedTransport(): ScriptedTransport {
       )
         throw new Error("role history was not injected before the turn");
       send({ id: message.id, result: { turn: { id: turnId } } });
-      send({
-        method: "item/agentMessage/delta",
-        params: {
-          threadId,
-          turnId,
-          itemId: "message",
-          delta: prompt.includes("10000") ? "1\n2\n" : "Hello",
-        },
-      });
+      send(
+        protocolNotification({
+          method: "item/agentMessage/delta",
+          params: {
+            threadId,
+            turnId,
+            itemId: "message",
+            delta: prompt.includes("10000") ? "1\n2\n" : "Hello",
+          },
+        }),
+      );
       active.set(turnId, { threadId });
       if (prompt.includes("10000")) return;
       const timer = setTimeout(() => complete(threadId, turnId), 1);
@@ -140,14 +161,15 @@ function createScriptedTransport(): ScriptedTransport {
       if (pending?.timer) clearTimeout(pending.timer);
       send({ id: message.id, result: {} });
       if (pending) {
-        send({
-          method: "turn/completed",
-          params: {
-            threadId: pending.threadId,
-            turnId,
-            turn: { status: "interrupted" },
-          },
-        });
+        send(
+          protocolNotification({
+            method: "turn/completed",
+            params: {
+              threadId: pending.threadId,
+              turn: protocolTurn(turnId, "interrupted"),
+            },
+          }),
+        );
       }
       active.delete(turnId);
     }

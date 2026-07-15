@@ -4,6 +4,7 @@ import { test } from "vitest";
 import { ensureAuthenticated } from "../src/auth.js";
 import { JsonRpcTransport } from "../src/json-rpc.js";
 import { createLogger } from "../src/logger.js";
+import { protocolNotification } from "./support/protocol-fixtures.js";
 
 /** Authentication scenario simulated by fakeRpc. */
 type LoginKind =
@@ -49,12 +50,12 @@ function fakeRpc(kind: LoginKind): JsonRpcTransport {
         input.write(`${JSON.stringify({ id: message.id, result })}\n`);
         if (kind === "early")
           input.write(
-            `${JSON.stringify({ method: "account/login/completed", params: { loginId: "login", success: true, error: null } })}\n`,
+            `${JSON.stringify(protocolNotification({ method: "account/login/completed", params: { loginId: "login", success: true, error: null } }))}\n`,
           );
         else if (kind !== "timeout")
           setImmediate(() =>
             input.write(
-              `${JSON.stringify({ method: "account/login/completed", params: { loginId: "login", success: kind !== "failure", error: kind === "failure" ? "denied" : null } })}\n`,
+              `${JSON.stringify(protocolNotification({ method: "account/login/completed", params: { loginId: "login", success: kind !== "failure", error: kind === "failure" ? "denied" : null } }))}\n`,
             ),
           );
       }

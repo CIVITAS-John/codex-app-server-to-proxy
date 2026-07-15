@@ -7,6 +7,10 @@ import { JsonRpcTransport } from "../src/json-rpc.js";
 import { createLogger } from "../src/logger.js";
 import { parseServeOptions } from "../src/config.js";
 import { createProxyServer } from "../src/server.js";
+import {
+  protocolNotification,
+  protocolTurn,
+} from "./support/protocol-fixtures.js";
 
 /** Suppresses expected HTTP diagnostics in Chat Completions tests. */
 const silentLogger = createLogger("error", () => {});
@@ -39,34 +43,53 @@ function fakeAppServer(
       send({ id: message.id, result: {} });
     } else if (message.method === "turn/start") {
       send({ id: message.id, result: { turn: { id: "turn_test" } } });
-      send({
-        method: "item/agentMessage/delta",
-        params: {
-          threadId: thread,
-          turnId: "turn_test",
-          itemId: "text",
-          delta: "Hello",
-        },
-      });
+      send(
+        protocolNotification({
+          method: "item/agentMessage/delta",
+          params: {
+            threadId: thread,
+            turnId: "turn_test",
+            itemId: "text",
+            delta: "Hello",
+          },
+        }),
+      );
       if (complete) {
-        send({
-          method: "thread/tokenUsage/updated",
-          params: {
-            threadId: thread,
-            turnId: "turn_test",
-            tokenUsage: {
-              last: { inputTokens: 4, outputTokens: 2, totalTokens: 6 },
+        send(
+          protocolNotification({
+            method: "thread/tokenUsage/updated",
+            params: {
+              threadId: thread,
+              turnId: "turn_test",
+              tokenUsage: {
+                total: {
+                  inputTokens: 4,
+                  cachedInputTokens: 0,
+                  outputTokens: 2,
+                  reasoningOutputTokens: 0,
+                  totalTokens: 6,
+                },
+                last: {
+                  inputTokens: 4,
+                  cachedInputTokens: 0,
+                  outputTokens: 2,
+                  reasoningOutputTokens: 0,
+                  totalTokens: 6,
+                },
+                modelContextWindow: null,
+              },
             },
-          },
-        });
-        send({
-          method: "turn/completed",
-          params: {
-            threadId: thread,
-            turnId: "turn_test",
-            turn: { status: "completed" },
-          },
-        });
+          }),
+        );
+        send(
+          protocolNotification({
+            method: "turn/completed",
+            params: {
+              threadId: thread,
+              turn: protocolTurn("turn_test", "completed"),
+            },
+          }),
+        );
       }
     } else if (message.method === "turn/interrupt") {
       onInterrupt();
@@ -102,34 +125,64 @@ async function withChatServer(
 
 test("normalizes interleaved text, reasoning, internal items, tools, usage, and terminal states", () => {
   const normalizer = new EventNormalizer();
-  assert.deepEqual(
-    normalizer.normalize("item/agentMessage/delta", { delta: "a" }),
-    [{ delta: { content: "a" } }],
-  );
-  assert.equal(
-    normalizer.normalize("item/reasoning/summaryTextDelta", {
+  const agentDelta = protocolNotification({
+    method: "item/agentMessage/delta",
+    params: {
+      threadId: "thread",
+      turnId: "turn",
+      itemId: "message",
+      delta: "a",
+    },
+  });
+  assert.deepEqual(normalizer.normalize(agentDelta.method, agentDelta.params), [
+    { delta: { content: "a" } },
+  ]);
+  const reasoningDelta = protocolNotification({
+    method: "item/reasoning/summaryTextDelta",
+    params: {
+      threadId: "thread",
+      turnId: "turn",
       itemId: "r",
       summaryIndex: 1,
       delta: "why",
-    })[0]?.delta?.x_codex !== undefined,
+    },
+  });
+  assert.equal(
+    normalizer.normalize(reasoningDelta.method, reasoningDelta.params)[0]?.delta
+      ?.x_codex !== undefined,
     true,
   );
-  const first = normalizer.normalize("item/started", {
-    item: {
-      type: "dynamicToolCall",
-      id: "call_a",
-      tool: "lookup",
-      arguments: { id: 1 },
-    },
-  });
-  const second = normalizer.normalize("item/started", {
-    item: {
-      type: "dynamicToolCall",
-      id: "call_b",
-      tool: "other",
-      arguments: {},
-    },
-  });
+  /** Builds a generated-protocol dynamic tool start notification. */
+  const dynamicTool = (id: string, tool: string) =>
+    protocolNotification({
+      method: "item/started",
+      params: {
+        threadId: "thread",
+        turnId: "turn",
+        startedAtMs: 0,
+        item: {
+          type: "dynamicToolCall",
+          id,
+          namespace: null,
+          tool,
+          arguments: tool === "lookup" ? { id: 1 } : {},
+          status: "inProgress",
+          contentItems: null,
+          success: null,
+          durationMs: null,
+        },
+      },
+    });
+  const firstNotification = dynamicTool("call_a", "lookup");
+  const first = normalizer.normalize(
+    firstNotification.method,
+    firstNotification.params,
+  );
+  const secondNotification = dynamicTool("call_b", "other");
+  const second = normalizer.normalize(
+    secondNotification.method,
+    secondNotification.params,
+  );
   assert.equal(
     (first[0]?.delta?.tool_calls as Array<{ index: number }>)[0]?.index,
     0,
@@ -138,15 +191,29 @@ test("normalizes interleaved text, reasoning, internal items, tools, usage, and 
     (second[0]?.delta?.tool_calls as Array<{ index: number }>)[0]?.index,
     1,
   );
-  assert.deepEqual(
-    normalizer.normalize("turn/completed", {
-      turn: { status: "completed" },
-    }),
-    [{ finishReason: "tool_calls" }],
-  );
-  assert.deepEqual(
-    normalizer.normalize("thread/tokenUsage/updated", {
+  const completed = protocolNotification({
+    method: "turn/completed",
+    params: {
+      threadId: "thread",
+      turn: protocolTurn("turn", "completed"),
+    },
+  });
+  assert.deepEqual(normalizer.normalize(completed.method, completed.params), [
+    { finishReason: "tool_calls" },
+  ]);
+  const tokenUsage = protocolNotification({
+    method: "thread/tokenUsage/updated",
+    params: {
+      threadId: "thread",
+      turnId: "turn",
       tokenUsage: {
+        total: {
+          inputTokens: 10,
+          outputTokens: 5,
+          totalTokens: 15,
+          cachedInputTokens: 2,
+          reasoningOutputTokens: 1,
+        },
         last: {
           inputTokens: 10,
           outputTokens: 5,
@@ -154,28 +221,47 @@ test("normalizes interleaved text, reasoning, internal items, tools, usage, and 
           cachedInputTokens: 2,
           reasoningOutputTokens: 1,
         },
+        modelContextWindow: null,
       },
-    }),
-    [
-      {
-        usage: {
-          prompt_tokens: 10,
-          completion_tokens: 5,
-          total_tokens: 15,
-          prompt_tokens_details: { cached_tokens: 2 },
-          completion_tokens_details: { reasoning_tokens: 1 },
-        },
+    },
+  });
+  assert.deepEqual(normalizer.normalize(tokenUsage.method, tokenUsage.params), [
+    {
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        total_tokens: 15,
+        prompt_tokens_details: { cached_tokens: 2 },
+        completion_tokens_details: { reasoning_tokens: 1 },
       },
-    ],
-  );
+    },
+  ]);
+  const interrupted = protocolNotification({
+    method: "turn/completed",
+    params: {
+      threadId: "thread",
+      turn: protocolTurn("turn", "interrupted"),
+    },
+  });
   assert.deepEqual(
-    normalizeNotification("turn/completed", {
-      turn: { status: "interrupted" },
-    }),
+    normalizeNotification(interrupted.method, interrupted.params),
     [{ finishReason: "length" }],
   );
+  const error = protocolNotification({
+    method: "error",
+    params: {
+      threadId: "thread",
+      turnId: "turn",
+      willRetry: false,
+      error: {
+        message: "failed",
+        codexErrorInfo: null,
+        additionalDetails: null,
+      },
+    },
+  });
   assert.equal(
-    normalizeNotification("error", { error: { message: "failed" } })[0]?.error,
+    normalizeNotification(error.method, error.params)[0]?.error,
     "failed",
   );
 });
