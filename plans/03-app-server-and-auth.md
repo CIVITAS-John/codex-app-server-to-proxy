@@ -43,7 +43,7 @@ Reliably own one initialized app-server child process and complete ChatGPT login
 
 ## Cost guard
 
-The implemented live HTTP contract attempts at most four calls: aggregate output, streaming history, an interrupted stream, and its successful follow-up. All use `gpt-5.4-mini`. The pending tool and persisted-restart protocol spike requires a separate explicit budget before it is implemented.
+The implemented live HTTP contract attempts at most four model turns: streaming role history, a dynamic-tool turn, its tool-result continuation, and a completed-thread continuation after restart. All use `gpt-5.4-mini`, small output limits, bounded diagnostics, and unconditional cleanup.
 
 ## Implementation status
 
@@ -53,4 +53,4 @@ The CLI starts app-server before becoming ready and may initiate ChatGPT login. 
 
 The proxy declares `@openai/codex` as a runtime dependency and resolves the package's declared `codex` binary. This makes a normal local install self-contained; existing deployments that rely on a global PATH installation continue to work only as a compatibility fallback, while `--codex-path` remains the explicit override.
 
-The unified aggregate, streaming-history, disconnect, and follow-up contract passed through the real HTTP proxy on 2026-07-14 with exactly four `gpt-5.4-mini` model-call attempts. Dynamic-tool round trip, policy enforcement, and persisted restart/resume remain pending.
+Stage 03 is complete. The focused live contract passed through the real HTTP proxy on 2026-07-14 with two scenarios under the four-turn guard. It observed role-history streaming, a two-request dynamic-tool round trip, and completed-thread continuation after restarting both the proxy and app-server while retaining only the state directory and `previous_response_id`. Policy fields remain rejected until Stage 06 implements and verifies their full enforcement matrix; this preserves the Stage 03 fail-closed compatibility decision.

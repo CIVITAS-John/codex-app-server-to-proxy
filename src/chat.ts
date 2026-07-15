@@ -237,7 +237,17 @@ async function* execute(
       if (stored.policyHash !== binding.policyHash)
         continuationFailure(409, "continuation_policy_mismatch");
       threadId = stored.threadId;
+      if (
+        stored.state === "expired" &&
+        stored.callIds?.length &&
+        request.messages.some((message) => message.role === "tool")
+      )
+        continuationFailure(410, "expired_tool_continuation");
       if (stored.state === "pending_tool") {
+        // A pending response owns the thread. Only a request that actually
+        // carries tool results may enter the exact-suspension validation path.
+        if (!request.messages.some((message) => message.role === "tool"))
+          continuationFailure(409, "tool_results_required");
         const pending = options.continuations.pending(
           request.previousResponseId,
         );
@@ -271,7 +281,9 @@ async function* execute(
           const readThread = asRecord(read.thread, "thread/read.thread");
           const status = record(readThread.status)?.type;
           if (status === "active") continuationFailure(409, "thread_busy");
-          if (status === "systemError")
+          // Only protocol states that can safely enter thread/resume are
+          // accepted. Missing, malformed, and future status values fail closed.
+          if (status !== "idle" && status !== "notLoaded")
             continuationFailure(409, "thread_not_resumable");
           resumed = asRecord(
             await options.rpc.request(
@@ -285,10 +297,14 @@ async function* execute(
           if (error instanceof HttpError) throw error;
           continuationFailure(409, "thread_not_resumable");
         }
-        threadId = stringAt(
+        const resumedThreadId = stringAt(
           asRecord(resumed.thread, "thread/resume.thread"),
           "id",
         );
+        // The durable mapping is authoritative. A mismatched resume result must
+        // never transfer ownership to, or start work on, an unexpected thread.
+        if (resumedThreadId !== threadId)
+          continuationFailure(409, "thread_not_resumable");
         const last = request.messages.at(-1)!;
         const turn = asRecord(
           await options.rpc.request(

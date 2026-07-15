@@ -25,10 +25,10 @@ export interface ResponseRecord extends ThreadBinding {
   callIds?: string[];
 }
 
-/** JSON representation written atomically to the state directory. */
-interface StateFile {
-  version: number;
-  records: ResponseRecord[];
+/** Legacy schema migrated in place when first opened by the current proxy. */
+interface LegacyStateFile {
+  version: 0;
+  mappings: ResponseRecord[];
 }
 
 /** Canonicalizes JSON values so equivalent tool definitions hash equally. */
@@ -70,8 +70,9 @@ export class ResponseStore {
       record.expiresAt <= Date.now() &&
       record.state !== "expired"
     ) {
-      record.state = "expired";
-      this.#save();
+      this.#mutateAndSave(() => {
+        record.state = "expired";
+      });
     }
     return record;
   }
@@ -79,18 +80,19 @@ export class ResponseStore {
   /** Inserts a record and supersedes the prior completed response for its thread. */
   put(record: Omit<ResponseRecord, "createdAt" | "expiresAt">): ResponseRecord {
     const now = Date.now();
-    for (const prior of this.#records.values()) {
-      if (prior.threadId === record.threadId && prior.state === "ready")
-        prior.state = "superseded";
-    }
     const stored = {
       ...record,
       createdAt: now,
       expiresAt: now + this.retentionMs,
     };
-    this.#records.set(stored.responseId, stored);
-    this.#prune(now);
-    this.#save();
+    this.#mutateAndSave(() => {
+      for (const prior of this.#records.values()) {
+        if (prior.threadId === record.threadId && prior.state === "ready")
+          prior.state = "superseded";
+      }
+      this.#records.set(stored.responseId, stored);
+      this.#prune(now);
+    });
     return stored;
   }
 
@@ -107,25 +109,29 @@ export class ResponseStore {
       responseId: current.responseId,
       threadId: current.threadId,
     };
-    this.#records.set(responseId, updated);
-    this.#save();
+    this.#mutateAndSave(() => {
+      this.#records.set(responseId, updated);
+    });
     return updated;
   }
 
   /** Loads valid records and quarantines an unreadable store logically as empty. */
   #load(): void {
     try {
-      const parsed = JSON.parse(readFileSync(this.#path, "utf8")) as StateFile;
-      if (parsed.version !== SCHEMA_VERSION || !Array.isArray(parsed.records))
-        return;
-      for (const record of parsed.records) {
-        if (
-          record &&
-          typeof record.responseId === "string" &&
-          typeof record.threadId === "string"
-        )
-          this.#records.set(record.responseId, record);
-      }
+      const input = JSON.parse(readFileSync(this.#path, "utf8")) as unknown;
+      const parsed = asRecord(input);
+      if (!parsed) return;
+      const records =
+        parsed.version === SCHEMA_VERSION && Array.isArray(parsed.records)
+          ? parsed.records
+          : parsed.version === 0 && Array.isArray(parsed.mappings)
+            ? (input as LegacyStateFile).mappings
+            : undefined;
+      // Unknown future schemas are left untouched and treated as untrusted.
+      if (!records) return;
+      for (const record of records)
+        if (isResponseRecord(record))
+          this.#records.set(record.responseId, { ...record });
       // A responder cannot survive process restart; retain only its safe tombstone.
       for (const record of this.#records.values())
         if (record.state === "pending_tool") record.state = "expired";
@@ -157,6 +163,21 @@ export class ResponseStore {
       },
     );
     renameSync(temporary, this.#path);
+  }
+
+  /** Commits a mutation durably or restores the exact prior in-memory view. */
+  #mutateAndSave(mutate: () => void): void {
+    const snapshot = new Map(
+      [...this.#records].map(([id, record]) => [id, { ...record }]),
+    );
+    try {
+      mutate();
+      this.#save();
+    } catch (error) {
+      this.#records.clear();
+      for (const [id, record] of snapshot) this.#records.set(id, record);
+      throw error;
+    }
   }
 }
 
@@ -344,14 +365,27 @@ export class ContinuationCoordinator {
   ): PendingToolCall[] | undefined {
     const entry = this.#pending.get(responseId);
     if (!entry) return undefined;
-    clearTimeout(entry.timer);
-    for (const call of entry.calls) {
-      this.rpc.respond(call.request.id, {
-        contentItems: [{ type: "inputText", text: results.get(call.callId)! }],
-        success: true,
-      });
-    }
+    const threadId = entry.calls[0]!.threadId;
+    // Consume before writing any response so a partial transport failure cannot
+    // leave a timerless suspension that may replay already-written results.
     this.#pending.delete(responseId);
+    clearTimeout(entry.timer);
+    try {
+      for (const call of entry.calls) {
+        this.rpc.respond(call.request.id, {
+          contentItems: [
+            { type: "inputText", text: results.get(call.callId)! },
+          ],
+          success: true,
+        });
+      }
+    } catch (error) {
+      // Some earlier responses may already be on the wire. Expire the whole
+      // batch and release ownership; retrying it could duplicate those results.
+      this.#busy.delete(threadId);
+      this.store.update(responseId, { state: "expired" });
+      throw error;
+    }
     this.store.update(responseId, { state: "superseded" });
     return entry.calls;
   }
@@ -397,6 +431,36 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+/** Validates every persisted field before a record can influence continuation. */
+function isResponseRecord(value: unknown): value is ResponseRecord {
+  const record = asRecord(value);
+  if (!record) return false;
+  const validStates = new Set([
+    "ready",
+    "pending_tool",
+    "expired",
+    "superseded",
+    "corrupt",
+  ]);
+  return (
+    typeof record.responseId === "string" &&
+    typeof record.threadId === "string" &&
+    typeof record.model === "string" &&
+    typeof record.cwd === "string" &&
+    typeof record.toolsHash === "string" &&
+    typeof record.policyHash === "string" &&
+    typeof record.state === "string" &&
+    validStates.has(record.state) &&
+    typeof record.createdAt === "number" &&
+    Number.isFinite(record.createdAt) &&
+    typeof record.expiresAt === "number" &&
+    Number.isFinite(record.expiresAt) &&
+    (record.callIds === undefined ||
+      (Array.isArray(record.callIds) &&
+        record.callIds.every((id) => typeof id === "string")))
+  );
 }
 
 /** Builds an OpenAI-shaped failure for implicit tool-call correlation. */

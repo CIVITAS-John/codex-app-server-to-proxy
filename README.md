@@ -21,7 +21,7 @@ Run `node dist/bin.js --help` for loopback host, port, root, Codex path, state d
 
 ## Live contract tests
 
-The opt-in suite runs the same Chat Completions HTTP contract used by the offline fake backend against a real app-server. It covers aggregate output, streaming with role history, invalid-input preflight, disconnect interruption, and a successful follow-up. The suite runs serially, attempts at most four model calls, bounds captured diagnostics, and always uses `gpt-5.4-mini`:
+The opt-in suite runs a focused subset of the offline Chat Completions contract against a real app-server. It covers streaming with role history, a two-request function-tool round trip, and completed-thread continuation after restarting both the proxy and app-server. The suite runs serially, attempts at most four model calls, bounds captured diagnostics, and always uses `gpt-5.4-mini`:
 
 ```sh
 npm run test:live

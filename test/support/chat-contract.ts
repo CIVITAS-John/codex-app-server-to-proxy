@@ -4,8 +4,11 @@ import { afterAll, beforeAll, describe, test } from "vitest";
 /** Model fixed by the repository's live-test cost policy. */
 export const CONTRACT_MODEL = "gpt-5.4-mini";
 
-/** Maximum number of requests in this suite that may start a model turn. */
-const MAX_MODEL_CALLS = 5;
+/** Maximum model turns allowed by the focused Stage 03 live suite. */
+const MAX_LIVE_MODEL_CALLS = 4;
+
+/** Maximum model turns allowed by the comprehensive offline contract. */
+const MAX_OFFLINE_MODEL_CALLS = 8;
 
 /** Maximum model turns allowed for the complete tool round trip. */
 const MAX_TOOL_MODEL_CALLS = 2;
@@ -18,19 +21,29 @@ export interface ChatContractBackend {
   origin: string;
   modelCalls(): number;
   waitForInterrupt(): Promise<void>;
+  restart(): Promise<void>;
   close(): Promise<void>;
 }
 
 /** Starts one backend shared by every scenario in a contract run. */
 export type ChatContractBackendFactory = () => Promise<ChatContractBackend>;
 
+/** Selects the comprehensive offline contract or focused Stage 03 live proof. */
+export interface ChatContractOptions {
+  stage03Live?: boolean;
+}
+
 /** Registers the backend-independent Chat Completions HTTP contract. */
 export function registerChatContract(
   name: string,
   startBackend: ChatContractBackendFactory,
+  options: ChatContractOptions = {},
 ): void {
   describe.sequential(`Chat Completions contract (${name})`, () => {
     let backend: ChatContractBackend | undefined;
+    const maxModelCalls = options.stage03Live
+      ? MAX_LIVE_MODEL_CALLS
+      : MAX_OFFLINE_MODEL_CALLS;
 
     beforeAll(async () => {
       backend = await startBackend();
@@ -41,8 +54,8 @@ export function registerChatContract(
       const modelCalls = backend.modelCalls();
       await backend.close();
       assert.ok(
-        modelCalls <= MAX_MODEL_CALLS,
-        `contract exceeded ${MAX_MODEL_CALLS} model calls`,
+        modelCalls <= maxModelCalls,
+        `contract exceeded ${maxModelCalls} model calls`,
       );
     }, 20_000);
 
@@ -52,8 +65,8 @@ export function registerChatContract(
       signal?: AbortSignal,
     ): Promise<Response> => {
       assert.ok(
-        (backend?.modelCalls() ?? 0) < MAX_MODEL_CALLS,
-        `contract attempted more than ${MAX_MODEL_CALLS} model calls`,
+        (backend?.modelCalls() ?? 0) < maxModelCalls,
+        `contract attempted more than ${maxModelCalls} model calls`,
       );
       return fetch(`${backend!.origin}/v1/chat/completions`, {
         method: "POST",
@@ -63,38 +76,39 @@ export function registerChatContract(
       });
     };
 
-    test("returns an OpenAI-shaped aggregate completion", async () => {
-      const response = await chat({
-        model: CONTRACT_MODEL,
-        messages: [
-          {
-            role: "user",
-            content: "Reply with one short greeting and no explanation.",
-          },
-        ],
-      });
-      const raw = await response.text();
-      assert.equal(response.status, 200, diagnostic(raw));
-      const body = JSON.parse(raw) as {
-        id?: string;
-        object?: string;
-        model?: string;
-        choices?: Array<{
-          index?: number;
-          finish_reason?: string | null;
-          message?: { role?: string; content?: string };
-        }>;
-        usage?: Usage;
-      };
-      assert.match(body.id ?? "", /^chatcmpl_codex_/);
-      assert.equal(body.object, "chat.completion");
-      assert.equal(body.model, CONTRACT_MODEL);
-      assert.equal(body.choices?.[0]?.index, 0);
-      assert.equal(body.choices?.[0]?.message?.role, "assistant");
-      assert.ok((body.choices?.[0]?.message?.content?.length ?? 0) > 0);
-      assert.equal(body.choices?.[0]?.finish_reason, "stop");
-      if (body.usage) assertUsage(body.usage);
-    }, 130_000);
+    if (!options.stage03Live)
+      test("returns an OpenAI-shaped aggregate completion", async () => {
+        const response = await chat({
+          model: CONTRACT_MODEL,
+          messages: [
+            {
+              role: "user",
+              content: "Reply with one short greeting and no explanation.",
+            },
+          ],
+        });
+        const raw = await response.text();
+        assert.equal(response.status, 200, diagnostic(raw));
+        const body = JSON.parse(raw) as {
+          id?: string;
+          object?: string;
+          model?: string;
+          choices?: Array<{
+            index?: number;
+            finish_reason?: string | null;
+            message?: { role?: string; content?: string };
+          }>;
+          usage?: Usage;
+        };
+        assert.match(body.id ?? "", /^chatcmpl_codex_/);
+        assert.equal(body.object, "chat.completion");
+        assert.equal(body.model, CONTRACT_MODEL);
+        assert.equal(body.choices?.[0]?.index, 0);
+        assert.equal(body.choices?.[0]?.message?.role, "assistant");
+        assert.ok((body.choices?.[0]?.message?.content?.length ?? 0) > 0);
+        assert.equal(body.choices?.[0]?.finish_reason, "stop");
+        if (body.usage) assertUsage(body.usage);
+      }, 130_000);
 
     test("streams role-preserving history as valid SSE", async () => {
       const response = await chat({
@@ -138,7 +152,7 @@ export function registerChatContract(
       if (usage) assertUsage(usage);
     }, 130_000);
 
-    test("completes a client function-tool round trip", async () => {
+    test("completes a client function-tool round trip and resumes after restart", async () => {
       const callsBefore = backend!.modelCalls();
       const tools = [
         {
@@ -211,87 +225,117 @@ export function registerChatContract(
         backend!.modelCalls() - callsBefore <= MAX_TOOL_MODEL_CALLS,
         `tool round trip exceeded ${MAX_TOOL_MODEL_CALLS} model calls`,
       );
-    }, 130_000);
 
-    test("rejects invalid requests before starting model work", async () => {
-      const callsBefore = backend!.modelCalls();
-      for (const body of [
-        {
-          model: CONTRACT_MODEL,
-          messages: [{ role: "assistant", content: "not a user turn" }],
-        },
-        {
-          model: CONTRACT_MODEL,
-          messages: [{ role: "tool", content: "x" }],
-        },
-      ]) {
-        const response = await fetch(`${backend!.origin}/v1/chat/completions`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        const raw = await response.text();
-        assert.equal(response.status, 400, diagnostic(raw));
-        const error = JSON.parse(raw) as { error?: { code?: string } };
-        assert.equal(error.error?.code, "invalid_request");
-      }
-      const unknown = await fetch(`${backend!.origin}/v1/chat/completions`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          model: CONTRACT_MODEL,
-          messages: [{ role: "user", content: "x" }],
-          previous_response_id: "chatcmpl_old",
-        }),
-      });
-      assert.equal(unknown.status, 404);
-      assert.equal(
-        ((await unknown.json()) as { error?: { code?: string } }).error?.code,
-        "unknown_previous_response_id",
-      );
-      assert.equal(
-        backend!.modelCalls(),
-        callsBefore,
-        "invalid requests started app-server turns",
-      );
-    });
-
-    test("interrupts a disconnected stream and remains usable", async () => {
-      const response = await chat({
+      await backend!.restart();
+      const continued = await chat({
         model: CONTRACT_MODEL,
+        previous_response_id: secondBody.id,
         messages: [
           {
             role: "user",
-            content:
-              "Write the integers from 1 through 10000, one per line, without commentary.",
+            content: "Reply exactly with contract-resume-ok.",
           },
         ],
-        stream: true,
+        tools,
       });
-      assert.equal(response.status, 200);
-      const reader = response.body?.getReader();
-      assert.ok(reader);
-      while (true) {
-        const part: ReadableStreamReadResult<Uint8Array> = await reader.read();
-        assert.equal(part.done, false, "stream ended before assistant output");
-        if (Buffer.from(part.value).includes("content")) break;
-      }
-      await reader.cancel();
-      await backend!.waitForInterrupt();
-
-      const followup = await chat({
-        model: CONTRACT_MODEL,
-        messages: [
-          { role: "user", content: "Reply with one short acknowledgment." },
-        ],
-      });
-      const raw = await followup.text();
-      assert.equal(followup.status, 200, diagnostic(raw));
-      const body = JSON.parse(raw) as {
-        choices?: Array<{ message?: { content?: string } }>;
-      };
-      assert.ok((body.choices?.[0]?.message?.content?.length ?? 0) > 0);
+      const continuedRaw = await continued.text();
+      assert.equal(continued.status, 200, diagnostic(continuedRaw));
+      const continuedBody = JSON.parse(continuedRaw) as ToolCompletion;
+      assert.match(
+        continuedBody.choices?.[0]?.message?.content ?? "",
+        /contract-resume-ok/i,
+      );
     }, 130_000);
+
+    if (!options.stage03Live)
+      test("rejects invalid requests before starting model work", async () => {
+        const callsBefore = backend!.modelCalls();
+        for (const body of [
+          {
+            model: CONTRACT_MODEL,
+            messages: [{ role: "assistant", content: "not a user turn" }],
+          },
+          {
+            model: CONTRACT_MODEL,
+            messages: [{ role: "tool", content: "x" }],
+          },
+        ]) {
+          const response = await fetch(
+            `${backend!.origin}/v1/chat/completions`,
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(body),
+            },
+          );
+          const raw = await response.text();
+          assert.equal(response.status, 400, diagnostic(raw));
+          const error = JSON.parse(raw) as { error?: { code?: string } };
+          assert.equal(error.error?.code, "invalid_request");
+        }
+        const unknown = await fetch(`${backend!.origin}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: CONTRACT_MODEL,
+            messages: [{ role: "user", content: "x" }],
+            previous_response_id: "chatcmpl_old",
+          }),
+        });
+        assert.equal(unknown.status, 404);
+        assert.equal(
+          ((await unknown.json()) as { error?: { code?: string } }).error?.code,
+          "unknown_previous_response_id",
+        );
+        assert.equal(
+          backend!.modelCalls(),
+          callsBefore,
+          "invalid requests started app-server turns",
+        );
+      });
+
+    if (!options.stage03Live)
+      test("interrupts a disconnected stream and remains usable", async () => {
+        const response = await chat({
+          model: CONTRACT_MODEL,
+          messages: [
+            {
+              role: "user",
+              content:
+                "Write the integers from 1 through 10000, one per line, without commentary.",
+            },
+          ],
+          stream: true,
+        });
+        assert.equal(response.status, 200);
+        const reader = response.body?.getReader();
+        assert.ok(reader);
+        while (true) {
+          const part: ReadableStreamReadResult<Uint8Array> =
+            await reader.read();
+          assert.equal(
+            part.done,
+            false,
+            "stream ended before assistant output",
+          );
+          if (Buffer.from(part.value).includes("content")) break;
+        }
+        await reader.cancel();
+        await backend!.waitForInterrupt();
+
+        const followup = await chat({
+          model: CONTRACT_MODEL,
+          messages: [
+            { role: "user", content: "Reply with one short acknowledgment." },
+          ],
+        });
+        const raw = await followup.text();
+        assert.equal(followup.status, 200, diagnostic(raw));
+        const body = JSON.parse(raw) as {
+          choices?: Array<{ message?: { content?: string } }>;
+        };
+        assert.ok((body.choices?.[0]?.message?.content?.length ?? 0) > 0);
+      }, 130_000);
   });
 }
 

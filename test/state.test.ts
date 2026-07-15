@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
@@ -64,17 +64,103 @@ test("restart converts pending-tool responder records to expired tombstones", as
     callIds: ["call_1"],
     ...binding,
   });
+  const tombstone = new ResponseStore(directory).get("response_pending");
+  assert.equal(tombstone?.state, "expired");
+  assert.deepEqual(tombstone?.callIds, ["call_1"]);
+});
+
+test("legacy mappings migrate to the current schema and expire pending responders", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-proxy-state-"));
+  const now = Date.now();
+  await writeFile(
+    join(directory, "continuations.json"),
+    JSON.stringify({
+      version: 0,
+      mappings: [
+        {
+          responseId: "response_legacy",
+          threadId: "thread_1",
+          state: "pending_tool",
+          createdAt: now,
+          expiresAt: now + 60_000,
+          callIds: ["call_1"],
+          ...binding,
+        },
+      ],
+    }),
+  );
+
   assert.equal(
-    new ResponseStore(directory).get("response_pending")?.state,
+    new ResponseStore(directory).get("response_legacy")?.state,
     "expired",
   );
+  const migrated = JSON.parse(
+    await readFile(join(directory, "continuations.json"), "utf8"),
+  ) as { version: number; records: unknown[] };
+  assert.equal(migrated.version, 1);
+  assert.equal(migrated.records.length, 1);
+});
+
+test("an unknown future schema remains untouched and is never trusted", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-proxy-state-"));
+  const path = join(directory, "continuations.json");
+  const future = JSON.stringify({
+    version: 999,
+    records: [{ responseId: "unsafe" }],
+  });
+  await writeFile(path, future);
+
+  assert.equal(new ResponseStore(directory).get("unsafe"), undefined);
+  assert.equal(await readFile(path, "utf8"), future);
 });
 
 test("a corrupt store is recovered as empty without inventing mappings", async () => {
   const directory = await mkdtemp(join(tmpdir(), "codex-proxy-state-"));
-  const { writeFile } = await import("node:fs/promises");
   await writeFile(join(directory, "continuations.json"), "not json");
   assert.equal(new ResponseStore(directory).get("missing"), undefined);
+});
+
+test("leftover atomic-write temporary files cannot replace valid records", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-proxy-state-"));
+  const store = new ResponseStore(directory);
+  store.put({
+    responseId: "response_1",
+    threadId: "thread_1",
+    state: "ready",
+    ...binding,
+  });
+  await writeFile(
+    join(directory, `continuations.json.${process.pid}.tmp`),
+    "abruptly truncated",
+  );
+
+  assert.equal(new ResponseStore(directory).get("response_1")?.state, "ready");
+});
+
+test("a failed atomic write preserves disk and rolls back in-memory records", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-proxy-state-"));
+  const store = new ResponseStore(directory);
+  store.put({
+    responseId: "response_1",
+    threadId: "thread_1",
+    state: "ready",
+    ...binding,
+  });
+  const temporary = join(directory, `continuations.json.${process.pid}.tmp`);
+  await mkdir(temporary);
+
+  assert.throws(() =>
+    store.put({
+      responseId: "response_2",
+      threadId: "thread_1",
+      state: "ready",
+      ...binding,
+    }),
+  );
+  assert.equal(store.get("response_1")?.state, "ready");
+  assert.equal(store.get("response_2"), undefined);
+  assert.equal(new ResponseStore(directory).get("response_1")?.state, "ready");
+  await rm(temporary, { recursive: true });
 });
 
 test("pending tool_call_id values implicitly select exactly one response", async () => {
@@ -106,6 +192,79 @@ test("pending tool_call_id values implicitly select exactly one response", async
     (error: unknown) =>
       error instanceof HttpError && error.code === "duplicate_tool_call_id",
   );
+  rpc.close();
+});
+
+test("resolving a suspension is consumed and cannot replay tool results", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-proxy-state-"));
+  const output = new PassThrough();
+  const rpc = new JsonRpcTransport(new PassThrough(), output);
+  const coordinator = new ContinuationCoordinator(
+    new ResponseStore(directory),
+    rpc,
+    60_000,
+  );
+  coordinator.suspend("response_1", binding, [
+    {
+      request: { id: 1, method: "item/tool/call", params: {} },
+      callId: "call_1",
+      name: "lookup",
+      arguments: {},
+      threadId: "thread_1",
+      turnId: "turn_1",
+    },
+  ]);
+
+  assert.equal(
+    coordinator.resolve("response_1", new Map([["call_1", "done"]]))?.length,
+    1,
+  );
+  assert.equal(
+    coordinator.resolve("response_1", new Map([["call_1", "replay"]])),
+    undefined,
+  );
+  assert.equal(coordinator.store.get("response_1")?.state, "superseded");
+  rpc.close();
+});
+
+test("a response failure expires and consumes the entire suspended batch", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-proxy-state-"));
+  const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
+  const store = new ResponseStore(directory);
+  const coordinator = new ContinuationCoordinator(store, rpc, 60_000);
+  const calls = ["call_1", "call_2"].map((callId, index) => ({
+    request: { id: index + 1, method: "item/tool/call", params: {} },
+    callId,
+    name: "lookup",
+    arguments: {},
+    threadId: "thread_1",
+    turnId: "turn_1",
+  }));
+  coordinator.suspend("response_1", binding, calls);
+  const originalRespond = rpc.respond.bind(rpc);
+  let responses = 0;
+  rpc.respond = (id, result): void => {
+    responses += 1;
+    if (responses === 2) throw new Error("transport write failed");
+    originalRespond(id, result);
+  };
+
+  assert.throws(
+    () =>
+      coordinator.resolve(
+        "response_1",
+        new Map([
+          ["call_1", "one"],
+          ["call_2", "two"],
+        ]),
+      ),
+    /transport write failed/,
+  );
+  assert.equal(coordinator.pending("response_1"), undefined);
+  assert.equal(store.get("response_1")?.state, "expired");
+  assert.equal(coordinator.resolve("response_1", new Map()), undefined);
+  assert.equal(responses, 2);
+  assert.equal(coordinator.claim("thread_1"), true);
   rpc.close();
 });
 

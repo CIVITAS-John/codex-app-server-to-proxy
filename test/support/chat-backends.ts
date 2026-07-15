@@ -15,12 +15,19 @@ const silentLogger = createLogger("error", () => {});
 
 /** Starts the deterministic scripted app-server contract backend. */
 export async function startFakeChatBackend(): Promise<ChatContractBackend> {
-  const scripted = createScriptedTransport();
-  return startProxy(scripted.rpc, async () => scripted.close());
+  return startRestartableBackend(async () => {
+    const scripted = createScriptedTransport();
+    return startProxy(scripted.rpc, async () => scripted.close());
+  });
 }
 
 /** Starts the authenticated package-owned Codex contract backend. */
 export async function startLiveChatBackend(): Promise<ChatContractBackend> {
+  return startRestartableBackend(startLiveChatBackendOnce);
+}
+
+/** Starts one replaceable authenticated app-server and proxy pair. */
+async function startLiveChatBackendOnce(): Promise<ChatContractBackend> {
   const root = process.cwd();
   let appServer: AppServer | undefined;
   try {
@@ -46,6 +53,29 @@ export async function startLiveChatBackend(): Promise<ChatContractBackend> {
       { cause: error },
     );
   }
+}
+
+/** Wraps replaceable proxy/app-server pairs while retaining their shared state path. */
+async function startRestartableBackend(
+  startOnce: () => Promise<ChatContractBackend>,
+): Promise<ChatContractBackend> {
+  let current = await startOnce();
+  let priorModelCalls = 0;
+  return {
+    get origin() {
+      return current.origin;
+    },
+    modelCalls: () => priorModelCalls + current.modelCalls(),
+    waitForInterrupt: () => current.waitForInterrupt(),
+    async restart() {
+      priorModelCalls += current.modelCalls();
+      await current.close();
+      current = await startOnce();
+    },
+    async close() {
+      await current.close();
+    },
+  };
 }
 
 /** A scripted transport and its cleanup hook. */
@@ -141,6 +171,22 @@ function createScriptedTransport(): ScriptedTransport {
       send({ id: message.id, result: { thread: { id: threadId } } });
       return;
     }
+    if (message.method === "thread/read") {
+      send({
+        id: message.id,
+        result: {
+          thread: { id: String(params.threadId), status: { type: "idle" } },
+        },
+      });
+      return;
+    }
+    if (message.method === "thread/resume") {
+      send({
+        id: message.id,
+        result: { thread: { id: String(params.threadId) } },
+      });
+      return;
+    }
     if (message.method === "thread/inject_items") {
       const threadId = String(params.threadId);
       const items = Array.isArray(params.items) ? params.items : [];
@@ -184,7 +230,11 @@ function createScriptedTransport(): ScriptedTransport {
             threadId,
             turnId,
             itemId: "message",
-            delta: prompt.includes("10000") ? "1\n2\n" : "Hello",
+            delta: prompt.includes("10000")
+              ? "1\n2\n"
+              : prompt.includes("contract-resume-ok")
+                ? "contract-resume-ok"
+                : "Hello",
           },
         }),
       );
@@ -244,7 +294,10 @@ async function startProxy(
     }
     return request(method, params, signal);
   };
-  try {
+  const stateDir = `${tmpdir()}/codex-proxy-contract-tests-${process.pid}`;
+  let origin = "";
+  /** Starts one proxy process view over the retained transport and state directory. */
+  const listen = async (): Promise<void> => {
     proxy = createProxyServer(
       parseServeOptions([
         "--port",
@@ -254,7 +307,7 @@ async function startProxy(
         "--shutdown-timeout",
         "10s",
         "--state-dir",
-        `${tmpdir()}/codex-proxy-contract-tests-${process.pid}`,
+        stateDir,
       ]),
       silentLogger,
     );
@@ -264,8 +317,14 @@ async function startProxy(
     const host = address.address.includes(":")
       ? `[${address.address}]`
       : address.address;
+    origin = `http://${host}:${address.port}`;
+  };
+  try {
+    await listen();
     return {
-      origin: `http://${host}:${address.port}`,
+      get origin() {
+        return origin;
+      },
       modelCalls: () => modelCalls,
       async waitForInterrupt() {
         if (interrupts > 0) return;
@@ -282,6 +341,9 @@ async function startProxy(
           };
           interruptWaiters.add(onInterrupt);
         });
+      },
+      async restart() {
+        throw new Error("restart must be coordinated with the app-server");
       },
       async close() {
         proxy?.setReady(false);
