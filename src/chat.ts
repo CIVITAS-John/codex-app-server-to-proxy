@@ -38,13 +38,69 @@ interface Usage {
   completion_tokens_details?: { reasoning_tokens: number };
 }
 
+/** Function metadata shared by normalized calls and their correlated results. */
+interface NormalizedFunction {
+  name: string;
+  arguments: string;
+}
+
+/** One function-shaped call with its stable streaming index. */
+interface NormalizedToolCall {
+  index: number;
+  id: string;
+  type: "function";
+  function: NormalizedFunction;
+}
+
+/** Bounded lifecycle data attached to one normalized tool result. */
+interface NormalizedToolResultData {
+  status: string;
+  content?: unknown;
+  exit_code?: unknown;
+  error?: NormalizedError;
+  progress_type?: string;
+  stream?: string;
+  message?: string;
+  patch?: unknown;
+}
+
+/** One self-correlating result for a normalized function-shaped call. */
+interface NormalizedToolResult {
+  id: string;
+  type: "function";
+  function: NormalizedFunction;
+  result: NormalizedToolResultData;
+}
+
+/** Public fields emitted by one normalized lifecycle event. */
+interface NormalizedDelta {
+  content?: string;
+  reasoning?: string;
+  tool_calls?: NormalizedToolCall[];
+  tool_results?: NormalizedToolResult[];
+}
+
+/** Structured public subset of an app-server tool error. */
+interface NormalizedError {
+  message?: string;
+  code?: string;
+}
+
 /** One normalized delta shared by streaming and aggregate output. */
 export interface NormalizedEvent {
-  delta?: Record<string, unknown>;
+  delta?: NormalizedDelta;
   finishReason?: "stop" | "length" | "tool_calls" | "content_filter";
   usage?: Usage;
   error?: string;
 }
+
+/** Maximum buffered app-server activity retained for one HTTP response. */
+const MAX_INGRESS_EVENTS = 1_024;
+
+/** One arrival-ordered app-server notification or dynamic tool request. */
+type IngressEvent =
+  | { type: "notification"; method: string; params: unknown }
+  | { type: "dynamic_tool"; call: PendingToolCall };
 
 /** Dependencies used by one Chat Completions request. */
 export interface ChatHandlerOptions {
@@ -131,30 +187,27 @@ export async function handleChatCompletion(
   }
 
   let content = "";
-  const toolCalls = new Map<number, Record<string, unknown>>();
+  let reasoning = "";
+  const toolCalls = new Map<number, NormalizedToolCall>();
+  const toolResults: NormalizedToolResult[] = [];
   let finishReason: string | null = null;
   let usage: Usage | undefined;
-  const extensions: unknown[] = [];
   for await (const event of events) {
     if (event.error)
       throw new HttpError(502, event.error, "server_error", "app_server_error");
     if (typeof event.delta?.content === "string")
       content += event.delta.content;
-    if (Array.isArray(event.delta?.tool_calls)) {
-      for (const raw of event.delta.tool_calls) {
-        const call = record(raw);
-        if (call && typeof call.index === "number")
-          toolCalls.set(call.index, call);
-      }
-    }
-    if (event.delta?.x_codex !== undefined)
-      extensions.push(event.delta.x_codex);
+    if (typeof event.delta?.reasoning === "string")
+      reasoning += event.delta.reasoning;
+    for (const call of event.delta?.tool_calls ?? [])
+      toolCalls.set(call.index, call);
+    toolResults.push(...(event.delta?.tool_results ?? []));
     if (event.finishReason) finishReason = event.finishReason;
     if (event.usage) usage = event.usage;
   }
   const message: Record<string, unknown> = { role: "assistant", content };
+  if (reasoning) message.reasoning = reasoning;
   if (toolCalls.size) {
-    message.content = null;
     message.tool_calls = [...toolCalls.entries()]
       .sort(([a], [b]) => a - b)
       .map(([, call]) => ({
@@ -163,7 +216,7 @@ export async function handleChatCompletion(
         function: call.function,
       }));
   }
-  if (extensions.length > 0) message.x_codex = { events: extensions };
+  if (toolResults.length) message.tool_results = toolResults;
   writeJson(response, 200, {
     id: responseId,
     object: "chat.completion",
@@ -180,23 +233,38 @@ async function* execute(
   options: ChatHandlerOptions,
   responseId: string,
 ): AsyncGenerator<NormalizedEvent> {
-  const queued: Array<{ method: string; params: unknown }> = [];
-  const toolRequests: PendingToolCall[] = [];
+  const ingress: IngressEvent[] = [];
   let wake: (() => void) | undefined;
   let transportError: Error | undefined;
-  const onNotification = (method: string, params: unknown): void => {
-    const item = record(record(params)?.item);
-    if (method === "item/started" && item?.type === "dynamicToolCall") {
-      // The server request is authoritative and carries the responder ID; using
-      // both messages would expose the same call twice.
+  let queueError: Error | undefined;
+  const enqueue = (event: IngressEvent): void => {
+    if (queueError) {
+      if (event.type === "dynamic_tool") rejectDynamicCall(options, event.call);
       return;
     }
-    queued.push({ method, params });
+    if (ingress.length >= MAX_INGRESS_EVENTS) {
+      queueError = new Error("App-server activity queue overflowed.");
+      if (event.type === "dynamic_tool") rejectDynamicCall(options, event.call);
+      wake?.();
+      return;
+    }
+    ingress.push(event);
     wake?.();
   };
+  const onNotification = (method: string, params: unknown): void => {
+    const item = record(record(params)?.item);
+    if (
+      (method === "item/started" || method === "item/completed") &&
+      item?.type === "dynamicToolCall"
+    ) {
+      // The server request is authoritative and carries the responder ID; using
+      // notification lifecycle messages would expose the same call twice.
+      return;
+    }
+    enqueue({ type: "notification", method, params });
+  };
   const onToolRequest = (toolRequest: PendingToolCall): void => {
-    toolRequests.push(toolRequest);
-    wake?.();
+    enqueue({ type: "dynamic_tool", call: toolRequest });
   };
   const onClose = (error: Error): void => {
     transportError = error;
@@ -209,6 +277,8 @@ async function* execute(
   let terminal = false;
   let suspended = false;
   const normalizer = new EventNormalizer();
+  let continuationResults: Array<{ call: PendingToolCall; content: string }> =
+    [];
   const binding: ThreadBinding = {
     model: request.model,
     cwd: options.root,
@@ -256,6 +326,10 @@ async function* execute(
         turnId = pending[0]!.turnId;
         if (!options.continuations.setToolOwner(threadId, onToolRequest))
           continuationFailure(409, "thread_busy");
+        continuationResults = pending.map((call) => ({
+          call,
+          content: results.get(call.callId)!,
+        }));
         options.continuations.resolve(request.previousResponseId, results);
       } else {
         if (stored.state === "expired")
@@ -365,21 +439,30 @@ async function* execute(
       );
       turnId = stringAt(asRecord(turn.turn, "turn/start.turn"), "id");
     }
+    for (const result of continuationResults)
+      yield normalizer.dynamicToolResult(result.call, result.content);
     while (!terminal) {
       if (transportError) throw transportError;
-      if (!queued.length && !toolRequests.length)
+      if (queueError) throw queueError;
+      if (!ingress.length)
         await new Promise<void>((resolve) => {
           wake = resolve;
-          if (queued.length || toolRequests.length) resolve();
+          if (ingress.length || queueError || transportError) resolve();
         });
       wake = undefined;
       if (transportError) throw transportError;
-      if (toolRequests.length) {
+      if (queueError) throw queueError;
+      if (ingress[0]?.type === "dynamic_tool") {
         // Let parallel app-server requests arriving in this event-loop turn join the batch.
         await new Promise<void>((resolve) => setImmediate(resolve));
-        const calls = toolRequests
-          .splice(0)
-          .sort((a, b) => a.callId.localeCompare(b.callId));
+        if (queueError) throw queueError;
+        const captured = ingress.splice(0);
+        const calls = captured
+          .filter(
+            (event): event is Extract<IngressEvent, { type: "dynamic_tool" }> =>
+              event.type === "dynamic_tool",
+          )
+          .map((event) => event.call);
         if (
           calls.some(
             (call) => call.threadId !== threadId || call.turnId !== turnId,
@@ -396,39 +479,27 @@ async function* execute(
         }
         options.continuations.suspend(responseId, binding, calls);
         suspended = true;
-        for (const [index, call] of calls.entries())
-          yield {
-            delta: {
-              tool_calls: [
-                {
-                  index,
-                  id: call.callId,
-                  type: "function",
-                  function: {
-                    name: call.name,
-                    arguments: JSON.stringify(call.arguments ?? {}),
-                  },
-                },
-              ],
-            },
-          };
+        for (const event of captured) {
+          if (event.type === "notification") {
+            if (!matchesTurn(event.params, threadId, turnId)) continue;
+            for (const normalized of normalizer.normalize(
+              event.method,
+              event.params,
+            ))
+              yield normalized;
+            continue;
+          }
+          const call = event.call;
+          yield normalizer.dynamicToolCall(call);
+        }
         yield { finishReason: "tool_calls" };
         terminal = true;
         continue;
       }
-      const next = queued.shift();
+      const next = ingress.shift();
       if (!next) continue;
-      const params = record(next.params);
-      if (params) {
-        const notificationTurnId =
-          typeof params.turnId === "string"
-            ? params.turnId
-            : record(params.turn)?.id;
-        // Turn lifecycle notifications carry the id inside `turn`; item and
-        // delta notifications carry a top-level `turnId`.
-        if (params.threadId !== threadId || notificationTurnId !== turnId)
-          continue;
-      }
+      if (next.type === "dynamic_tool") continue;
+      if (!matchesTurn(next.params, threadId, turnId)) continue;
       for (const event of normalizer.normalize(next.method, next.params)) {
         if (event.finishReason || event.error) terminal = true;
         yield event;
@@ -440,11 +511,20 @@ async function* execute(
       !options.continuations.recordReady(responseId, threadId, binding)
     )
       throw new Error("App-server transport was replaced before completion.");
+  } catch (error) {
+    // Failures must interrupt the app-server turn before ownership is released;
+    // otherwise work could continue without an HTTP consumer.
+    await abort();
+    throw error;
   } finally {
     options.rpc.off("notification", onNotification);
     options.rpc.off("close", onClose);
     if (threadId) options.continuations.clearToolOwner(threadId, onToolRequest);
     if (threadId && !suspended) options.continuations.release(threadId);
+    if (!suspended)
+      for (const event of ingress)
+        if (event.type === "dynamic_tool")
+          rejectDynamicCall(options, event.call);
     if (options.signal.aborted) await abort();
   }
 }
@@ -459,8 +539,42 @@ export function normalizeNotification(
 
 /** Maintains stable item-to-choice indexes while normalizing interleaved events. */
 export class EventNormalizer {
-  readonly #toolIndexes = new Map<string, number>();
+  readonly #toolCalls = new Map<string, NormalizedToolCall>();
+  #nextToolIndex = 0;
   #sawClientTool = false;
+
+  /** Converts one authoritative dynamic request to a function tool call. */
+  dynamicToolCall(call: PendingToolCall): NormalizedEvent {
+    const argumentsJson = JSON.stringify(call.arguments ?? {});
+    const publicCall = this.#allocateToolCall(
+      call.callId,
+      call.name,
+      argumentsJson,
+    );
+    return { delta: { tool_calls: [publicCall] } };
+  }
+
+  /** Emits an accepted dynamic result together with its matching call. */
+  dynamicToolResult(call: PendingToolCall, content: string): NormalizedEvent {
+    const publicCall = this.#allocateToolCall(
+      call.callId,
+      call.name,
+      JSON.stringify(call.arguments ?? {}),
+    );
+    return {
+      delta: {
+        tool_calls: [publicCall],
+        tool_results: [
+          {
+            id: call.callId,
+            type: "function",
+            function: publicCall.function,
+            result: { status: "completed", content },
+          },
+        ],
+      },
+    };
+  }
 
   /** Converts one app-server notification into zero or more public events. */
   normalize(method: string, value: unknown): NormalizedEvent[] {
@@ -471,50 +585,17 @@ export class EventNormalizer {
       typeof params.delta === "string"
     )
       return [{ delta: { content: params.delta } }];
-    if (method === "item/reasoning/summaryPartAdded")
-      return [
-        {
-          delta: {
-            x_codex: {
-              type: "reasoning_summary_part",
-              item_id: params.itemId,
-              index: params.summaryIndex,
-            },
-          },
-        },
-      ];
+    if (method === "item/reasoning/summaryPartAdded") return [];
     if (
       method === "item/reasoning/summaryTextDelta" &&
       typeof params.delta === "string"
     )
-      return [
-        {
-          delta: {
-            x_codex: {
-              type: "reasoning_summary_delta",
-              item_id: params.itemId,
-              index: params.summaryIndex,
-              text: params.delta,
-            },
-          },
-        },
-      ];
+      return [{ delta: { reasoning: params.delta } }];
     if (
       method === "item/reasoning/textDelta" &&
       typeof params.delta === "string"
     )
-      return [
-        {
-          delta: {
-            x_codex: {
-              type: "reasoning_delta",
-              item_id: params.itemId,
-              index: params.contentIndex,
-              text: params.delta,
-            },
-          },
-        },
-      ];
+      return [{ delta: { reasoning: params.delta } }];
     if (method === "thread/tokenUsage/updated") {
       const usage = record(record(params.tokenUsage)?.last);
       if (!usage) return [];
@@ -552,25 +633,12 @@ export class EventNormalizer {
       if (method === "item/started" && item?.type === "dynamicToolCall") {
         this.#sawClientTool = true;
         const itemId = String(item.id);
-        const index = this.#toolIndexes.get(itemId) ?? this.#toolIndexes.size;
-        this.#toolIndexes.set(itemId, index);
-        return [
-          {
-            delta: {
-              tool_calls: [
-                {
-                  index,
-                  id: itemId,
-                  type: "function",
-                  function: {
-                    name: item.tool,
-                    arguments: JSON.stringify(item.arguments ?? {}),
-                  },
-                },
-              ],
-            },
-          },
-        ];
+        const publicCall = this.#allocateToolCall(
+          itemId,
+          String(item.tool),
+          JSON.stringify(item.arguments ?? {}),
+        );
+        return [{ delta: { tool_calls: [publicCall] } }];
       }
       if (
         !item ||
@@ -580,27 +648,209 @@ export class EventNormalizer {
       )
         return [];
       return [
-        {
-          delta: {
-            x_codex: {
-              type: "internal_item",
-              lifecycle: method === "item/started" ? "started" : "completed",
-              item,
-            },
-          },
-        },
+        this.#internalItem(
+          method === "item/started" ? "started" : "completed",
+          item,
+        ),
       ];
     }
     if (method.startsWith("item/") && method !== "item/agentMessage/delta")
-      return [
-        {
-          delta: {
-            x_codex: { type: "internal_delta", event: method, data: params },
-          },
-        },
-      ];
+      return [this.#internalProgress(method, params)];
     return [];
   }
+
+  /** Emits an internal call, or a self-correlating call/result pair. */
+  #internalItem(
+    lifecycle: "started" | "completed",
+    item: Record<string, unknown>,
+  ): NormalizedEvent {
+    const id = String(item.id);
+    const existing = this.#toolCalls.get(id);
+    let call = existing;
+    if (!call) {
+      const shape = internalToolShape(item);
+      call = this.#allocateToolCall(id, shape.name, shape.arguments);
+    }
+    if (lifecycle === "started") return { delta: { tool_calls: [call] } };
+    return {
+      delta: {
+        // Streaming clients concatenate function arguments by call index, so a
+        // previously announced call must not repeat its complete arguments.
+        ...(!existing ? { tool_calls: [call] } : {}),
+        tool_results: [internalToolResult(item, call)],
+      },
+    };
+  }
+
+  /** Emits bounded progress as a self-correlating tool result. */
+  #internalProgress(
+    method: string,
+    params: Record<string, unknown>,
+  ): NormalizedEvent {
+    const id = String(params.itemId);
+    const existing = this.#toolCalls.get(id);
+    const call =
+      existing ??
+      this.#allocateToolCall(
+        id,
+        safeToolName(method.slice("item/".length)),
+        "{}",
+      );
+    return {
+      delta: {
+        // Orphan progress still introduces a reconstructable call, while later
+        // progress carries only the nonstandard self-correlating result.
+        ...(!existing ? { tool_calls: [call] } : {}),
+        tool_results: [progressToolResult(method, params, call)],
+      },
+    };
+  }
+
+  /** Allocates one monotonically increasing index for each call or item ID. */
+  #allocateToolCall(
+    id: string,
+    name: string,
+    argumentsJson: string,
+  ): NormalizedToolCall {
+    const existing = this.#toolCalls.get(id);
+    if (existing) return existing;
+    const call: NormalizedToolCall = {
+      index: this.#nextToolIndex++,
+      id,
+      type: "function",
+      function: { name: safeToolName(name), arguments: argumentsJson },
+    };
+    this.#toolCalls.set(id, call);
+    return call;
+  }
+}
+
+/** Checks notification correlation without exposing foreign-thread activity. */
+function matchesTurn(
+  value: unknown,
+  threadId: string | undefined,
+  turnId: string | undefined,
+): boolean {
+  const params = record(value);
+  if (!params) return true;
+  const notificationTurnId =
+    typeof params.turnId === "string" ? params.turnId : record(params.turn)?.id;
+  return params.threadId === threadId && notificationTurnId === turnId;
+}
+
+/** Rejects a dynamic request that cannot be safely retained or suspended. */
+function rejectDynamicCall(
+  options: ChatHandlerOptions,
+  call: PendingToolCall,
+): void {
+  try {
+    options.rpc.respondError(call.request.id, {
+      code: -32000,
+      message: "Active turn ended before dynamic tool suspension",
+    });
+  } catch {
+    // A closed transport has already made the request unanswerable.
+  }
+}
+
+/** Maps a pinned internal ThreadItem to a function-shaped call. */
+function internalToolShape(item: Record<string, unknown>): {
+  name: string;
+  arguments: string;
+} {
+  const kind = typeof item.type === "string" ? item.type : "unknown";
+  const details: Record<string, unknown> = {};
+  for (const key of [
+    "command",
+    "changes",
+    "server",
+    "tool",
+    "arguments",
+    "query",
+    "action",
+    "prompt",
+  ])
+    if (item[key] !== undefined) details[key] = item[key];
+  return {
+    name: typeof item.tool === "string" ? item.tool : kind,
+    arguments: JSON.stringify(details),
+  };
+}
+
+/** Produces a valid function name from an app-server method or item kind. */
+function safeToolName(value: string): string {
+  const normalized = value.replaceAll(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128);
+  return normalized || "unknown_tool";
+}
+
+/** Maps a terminal internal ThreadItem to a self-contained tool result. */
+function internalToolResult(
+  item: Record<string, unknown>,
+  call: NormalizedToolCall,
+): NormalizedToolResult {
+  const result = item.result ?? item.aggregatedOutput ?? item.action;
+  return {
+    id: String(item.id),
+    type: "function",
+    function: call.function,
+    result: {
+      status: typeof item.status === "string" ? item.status : "completed",
+      ...(result !== undefined ? { content: boundValue(result) } : {}),
+      ...(item.exitCode !== undefined ? { exit_code: item.exitCode } : {}),
+      ...(item.error !== undefined
+        ? { error: normalizeError(item.error) }
+        : {}),
+    },
+  };
+}
+
+/** Maps correlated item deltas to a bounded in-progress tool result. */
+function progressToolResult(
+  method: string,
+  params: Record<string, unknown>,
+  call: NormalizedToolCall,
+): NormalizedToolResult {
+  const subtype = method.slice("item/".length).split("/")[1] ?? "update";
+  const output =
+    typeof params.delta === "string"
+      ? params.delta.slice(0, 64 * 1024)
+      : undefined;
+  const message =
+    typeof params.message === "string"
+      ? params.message.slice(0, 8 * 1024)
+      : undefined;
+  return {
+    id: String(params.itemId),
+    type: "function",
+    function: call.function,
+    result: {
+      status: "in_progress",
+      progress_type: subtype,
+      ...(typeof params.stream === "string" ? { stream: params.stream } : {}),
+      ...(output !== undefined ? { content: output } : {}),
+      ...(message !== undefined ? { message } : {}),
+      ...(params.patch !== undefined
+        ? { patch: boundValue(params.patch) }
+        : {}),
+    },
+  };
+}
+
+/** Bounds structured tool payloads without changing primitive values. */
+function boundValue(value: unknown): unknown {
+  if (typeof value === "string") return value.slice(0, 64 * 1024);
+  const encoded = JSON.stringify(value);
+  return encoded.length <= 64 * 1024 ? value : encoded.slice(0, 64 * 1024);
+}
+
+/** Reduces an app-server error to its documented structured public fields. */
+function normalizeError(value: unknown): NormalizedError {
+  const error = record(value);
+  if (!error) return { message: String(value) };
+  return {
+    ...(typeof error.message === "string" ? { message: error.message } : {}),
+    ...(typeof error.code === "string" ? { code: error.code } : {}),
+  };
 }
 
 /** Validates the deliberately narrow request surface implemented in Stage 04. */
@@ -834,7 +1084,7 @@ function chunk(
   id: string,
   created: number,
   model: string,
-  delta: Record<string, unknown>,
+  delta: NormalizedDelta | { role: "assistant" },
   finishReason: string | null,
 ): Record<string, unknown> {
   return {

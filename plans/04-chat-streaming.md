@@ -13,31 +13,35 @@ Translate the supported Chat Completions subset to app-server threads/turns and 
 4. Create a single event-normalization layer for app-server item lifecycle and delta notifications.
     - Treat `item/*` notifications as the canonical item stream.
     - `turn/completed` currently carries an empty `items` array and must not be relied on for content.
-5. Translate assistant text to `choices[0].delta.content` and exposed reasoning to documented `choices[0].delta.x_codex.reasoning` parts.
-6. Translate internal shell, file, MCP, web-search, approval, and tool-result activity to typed `x_codex` deltas. Do not disguise internal activity as a client-defined function call.
+5. Translate assistant text to the standard `choices[0].delta.content` shape and exposed reasoning text to the nonstandard direct compatibility field `choices[0].delta.reasoning`; do not expose the app-server `reasoning_summary` naming.
+6. Normalize internal command, file, MCP, web-search, collaboration, approval, and other supported tool-like activity into the standard function-shaped `tool_calls` shape and the nonstandard direct compatibility field `tool_results`.
+    - Correlate lifecycle events directly through the matching `id` repeated in `tool_calls` and `tool_results`; expose only a stable tool name, bounded arguments/output or progress, terminal status, and structured error.
+    - When correlated `item/*` progress arrives without an observed start, synthesize a bounded generic function-shaped call from its `itemId` and a safe method-derived name, then emit that call with its result. Do not expose unknown global notifications.
 7. Produce stable response, choice, and tool-call IDs; preserve event ordering per item while allowing interleaved items.
 8. Emit standard finish reasons where applicable: `stop`, `length`, `tool_calls`, and `content_filter`; map other terminal states to an error or documented extension.
     - A mid-turn `error` notification may precede `turn/completed` with `status: "failed"` carrying the same payload; deduplicate into one client-visible error.
 9. For `stream_options.include_usage`, emit a final usage-bearing chunk with empty choices before `[DONE]`.
     - Include cached and reasoning details only when reported.
     - `thread/resume` replays restored `thread/tokenUsage/updated` notifications before any turn starts; usage attribution must ignore these pre-turn replays per the Stage 01 attribution decision.
-10. Implement `stream: false` by aggregating the same normalized event stream, avoiding a second translation path.
+10. Implement `stream: false` by aggregating the same normalized event stream into `content`, `reasoning`, `tool_calls`, and `tool_results`. Preserve concatenated text when tool calls also exist.
 11. Propagate client disconnect to turn interruption unless a documented pending-tool suspension owns the turn.
 
 ## Acceptance criteria
 
 - Golden fixtures cover text, reasoning summary/text, multiple interleaved items, internal tools, usage, empty output, interruption, error, and disconnect.
 - SSE frames are valid under arbitrary JSON-RPC chunk boundaries and HTTP backpressure.
-- A generic SSE parser can ignore every `x_codex` field and still reconstruct standard text/tool calls.
+- Streaming chunk order faithfully reconstructs text, reasoning, calls, and results.
 - Missing usage detail is omitted and never synthesized.
 - Non-streaming output matches the aggregation of streaming output.
 
 ## Implemented decisions
 
 - A fresh request must end in one text-only user message. Earlier system, developer, user, and assistant messages are passed to `thread/inject_items` as role-preserving raw Responses API message items; they are never flattened into user text.
-- One stateful event normalizer owns item indexes and maps both streaming and non-streaming output. Assistant text uses standard `delta.content`; reasoning and internal app-server activity use typed `x_codex` extensions. Dynamic tool-call starts use standard `delta.tool_calls`, while the pending-result lifecycle remains Stage 05 work.
+- One stateful event normalizer maps both streaming and non-streaming output. Streaming order is chunk order.
+- Reasoning uses `reasoning`, and internal app-server tools use function-shaped `tool_calls` plus self-correlating `tool_results`. Internal tools remain observational and never produce `finish_reason: "tool_calls"`.
+- Non-streaming output aggregates the identical direct fields. Pre-tool text remains in `message.content`, which may coexist with calls and results.
 - Usage attribution begins only after `turn/start` returns and accepts only matching thread and turn notifications. The exact `tokenUsage.last` values are mapped; unavailable details are omitted.
 - Client abort requests `turn/interrupt` for an active turn. Streaming writes wait for HTTP drain before consuming another normalized event.
-- `previous_response_id`, tool-result messages, and nonempty policy `x_codex` objects are rejected until Stages 05 and 06 can enforce their full state and policy contracts.
+- Stage 05 implements `previous_response_id` and tool-result continuation. Nonempty policy `x_codex` objects remain rejected until Stage 06 can enforce their full contract.
 
-These decisions add working fresh-completion compatibility without changing the planned continuation or policy contracts. Clients relying on later-stage extensions receive an explicit validation error instead of fallback behavior.
+These decisions expose exact reasoning, text, tool, result, and later-output order without a response-side `x_codex` activity transcript. Clients relying on unsupported policy extensions receive an explicit validation error instead of fallback behavior.

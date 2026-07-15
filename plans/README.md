@@ -48,7 +48,7 @@ Stage 01 and Stage 02 coverage now runs as type-checked TypeScript through Vites
 ## Cross-stage rules
 
 - Standard Chat Completions fields take precedence over extensions where a faithful mapping exists.
-- All additions live under `x_codex` except the agreed continuation field `previous_response_id`.
+- Request-side additions live under `x_codex` except the agreed continuation field `previous_response_id`. Response-side `reasoning` and `tool_results` are explicitly allowed direct compatibility fields; they are nonstandard Chat Completions fields and must be documented as such.
 - A response ID maps to a Codex thread ID in a durable, versioned local store; raw thread IDs are not exposed.
 - Supplying `previous_response_id` requires continuation.
     - The proxy must validate the local mapping and confirm that app-server can resume the mapped thread.

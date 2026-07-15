@@ -28,6 +28,8 @@ interface CompletionBody {
         id: string;
         function: { name: string; arguments: string };
       }>;
+      tool_results?: Array<Record<string, unknown>>;
+      reasoning?: string;
     };
   }>;
 }
@@ -92,7 +94,18 @@ class ToolAppServer {
         const turnId = `turn_${this.#turn}`;
         this.#send({ id, result: { turn: { id: turnId } } });
         if (this.toolsOnFirstTurn && this.#turn === 1) {
-          // Deliberately issue call_b first; the proxy must expose call_a first.
+          this.#send(
+            protocolNotification({
+              method: "item/agentMessage/delta",
+              params: {
+                threadId: this.#thread,
+                turnId,
+                itemId: "pre_tool_text",
+                delta: "before tools",
+              },
+            }),
+          );
+          // Deliberately issue call_b first; the proxy must preserve arrival order.
           this.#send({
             id: 902,
             method: "item/tool/call",
@@ -126,8 +139,25 @@ class ToolAppServer {
     const result = message.result as { contentItems: Array<{ text: string }> };
     this.results.push({ id, text: result.contentItems[0]!.text });
     this.#toolRequestIds.delete(id);
-    if (this.#toolRequestIds.size === 0)
+    if (this.#toolRequestIds.size === 0) {
+      this.#send(
+        protocolNotification({
+          method: "item/started",
+          params: {
+            threadId: this.#thread,
+            turnId: "turn_1",
+            startedAtMs: 0,
+            item: {
+              type: "webSearch",
+              id: "internal_after_results",
+              query: "forecast",
+              action: { type: "search", query: "forecast", queries: null },
+            },
+          },
+        }),
+      );
       this.#complete("turn_1", "after tools");
+    }
   }
 
   /** Emits a typed assistant delta and successful turn completion. */
@@ -239,15 +269,17 @@ test("parallel fragmented tool calls accept out-of-order large results and answe
     });
     assert.equal(firstResponse.status, 200);
     const first = (await firstResponse.json()) as CompletionBody;
+    assert.equal(first.choices[0]!.message.content, "before tools");
     const calls = first.choices[0]!.message.tool_calls;
     assert.deepEqual(
       calls?.map((call) => call.id),
-      ["call_a", "call_b"],
+      ["call_b", "call_a"],
     );
     assert.deepEqual(
       calls?.map((call) => call.function.arguments),
-      ['{"fragment":"a"}', '{"fragment":"b"}'],
+      ['{"fragment":"b"}', '{"fragment":"a"}'],
     );
+    assert.equal(first.choices[0]!.message.tool_results, undefined);
 
     const busy = await post(origin, {
       model: "m",
@@ -274,11 +306,36 @@ test("parallel fragmented tool calls accept out-of-order large results and answe
     const continued = (await continuedResponse.json()) as CompletionBody;
     assert.equal(continued.choices[0]!.message.content, "after tools");
     assert.deepEqual(
+      continued.choices[0]!.message.tool_results?.map((result) => result.id),
+      ["call_b", "call_a"],
+    );
+    assert.deepEqual(
+      continued.choices[0]!.message.tool_calls?.map((call) => call.id),
+      ["call_b", "call_a", "internal_after_results"],
+    );
+    assert.deepEqual(
       fake.results.map((result) => result.id),
-      [901, 902],
+      [902, 901],
     );
     assert.equal(fake.results[0]!.text, "ok");
     assert.equal(fake.results[1]!.text.length, 256 * 1024);
+
+    const resumedResponse = await post(origin, {
+      model: "m",
+      tools: [
+        { type: "function", function: { name: "first", parameters: {} } },
+        { type: "function", function: { name: "second", parameters: {} } },
+      ],
+      previous_response_id: continued.id,
+      messages: [{ role: "user", content: "continue after observed results" }],
+    });
+    assert.equal(resumedResponse.status, 200);
+    const resumed = (await resumedResponse.json()) as CompletionBody;
+    assert.equal(resumed.choices[0]!.message.content, "continued");
+    assert.equal(
+      fake.methods.filter((method) => method === "thread/resume").length,
+      1,
+    );
 
     const replay = await post(origin, {
       model: "m",

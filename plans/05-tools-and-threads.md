@@ -12,7 +12,7 @@ Support client-defined tools across requests while preserving safe Codex thread 
     - Validate function names against the app-server constraints (`^[a-zA-Z0-9_-]+$`, 1 to 128 characters) with OpenAI-shaped errors.
 2. When app-server issues `item/tool/call`, correlate name, call ID, arguments, thread, turn, and pending JSON-RPC response.
     - Route callbacks centrally by thread to exactly one active owner; per-request event listeners and listener-count inference are not ownership mechanisms.
-3. Stream standard `delta.tool_calls` argument fragments, register the pending continuation with the configured deadline, and end the HTTP response with `finish_reason: "tool_calls"` while keeping the app-server call pending.
+3. Stream standard `delta.tool_calls`, register the pending continuation with the configured deadline, and end the HTTP response with `finish_reason: "tool_calls"` while keeping the app-server call pending.
     - Default the deadline to five minutes.
     - This registered dynamic-tool suspension is the only server-initiated request allowed to outlive its originating HTTP request.
 4. Persist a non-secret tombstone for pending calls but keep the actual responder in memory.
@@ -21,10 +21,13 @@ Support client-defined tools across requests while preserving safe Codex thread 
 5. On the next request, locate the pending calls per the Stage 01 correlation decision (by `previous_response_id`, or by `tool_call_id` alone if that proves safe for unmodified clients).
     - Require the assistant tool-call message plus exactly one matching `role: "tool"` result per required call.
     - Reject missing, duplicate, foreign, or already-consumed IDs.
-6. Respond to each pending app-server request, resume event streaming, and associate the resulting completion with the same Codex thread.
+6. Respond to each pending app-server request, begin the continuation response with each accepted `tool_calls` and `tool_results` pair, resume later activity from the same Codex turn, and associate the resulting completion with the same Codex thread.
     - Translate each accepted `role: "tool"` string result to `inputText` content items in the documented `contentItems`/`success` response shape.
     - Document that v1 always reports `success: true` because Chat Completions has no tool-failure signal.
-7. Support multiple parallel tool calls and out-of-order result messages while responding to app-server in deterministic call order.
+7. Support multiple parallel tool calls and out-of-order result messages while responding to app-server in observed arrival order.
+    - Feed notifications and dynamic server requests through one bounded FIFO ingress stream so requests cannot overtake preceding reasoning, text, or internal-tool activity.
+    - When the first dynamic request reaches the head, capture one event-loop batching window, process that window in arrival order, and suspend with every dynamic request captured in it. Reject and clean up later requests instead of dropping them.
+    - On queue overflow or transport failure, abort the active turn and reject every queued server responder.
 8. Store opaque response-to-thread mappings atomically in the state directory.
     - For every completed-response continuation, first require a valid, unexpired mapping.
     - Then inspect the mapped thread through app-server (`thread/read` returns stored status without resuming) and verify that its status and effective policy are resumable.
@@ -60,6 +63,9 @@ Support client-defined tools across requests while preserving safe Codex thread 
 - One response store lives for the proxy server lifetime. Replacing or removing app-server disposes the old continuation generation, cancels deadlines, rejects suspended responders and late callbacks, expires their mappings, and then closes the old transport so active executions wake without writing stale mappings. Buffered frames are ignored after logical transport close.
 - The pinned protocol accepts `dynamicTools` only on `thread/start`, not `thread/resume` or `turn/start`. Consequently a pending tool-result request and every later completed-thread continuation must repeat the original canonical tool set. A 3-tool thread cannot resume in place with 2 tools; v1 rejects that request rather than silently creating a different thread.
 - Implicit tool continuation is enabled by default: `tool_call_id` values must jointly identify exactly one live in-memory suspension. `--implicit-tool-continuation false` disables this compatibility mode and requires `previous_response_id`; unknown or ambiguous IDs never fall back to a new thread.
+- Dynamic calls use `tool_calls`. The first response drains all preceding activity before `finish_reason: "tool_calls"`; the result response starts with self-correlating `tool_calls` plus `tool_results` pairs and then exposes later text, reasoning, or internal tools.
+- Parallel dynamic calls are batched and answered in observed arrival order, replacing the earlier lexicographic call-ID ordering. This is a compatibility change for clients that inferred an order from call IDs; clients must correlate by `call_id` instead.
+- Internal Codex tools are emitted as function-shaped calls/results but remain observational. They neither enter the suspension store nor become client-executable dynamic calls.
 
 ## Implementation status
 

@@ -94,7 +94,7 @@ curl -N http://127.0.0.1:8787/v1/chat/completions \
   }'
 ```
 
-Standard clients can consume assistant text, function calls, the final finish reason, and the optional usage chunk without understanding Codex-specific data.
+Standard clients can consume assistant text, client-defined function calls, the final finish reason, and the optional usage chunk without understanding Codex-specific data. Internal activity requires clients that tolerate the direct compatibility fields described below.
 
 ## Function tools
 
@@ -129,12 +129,11 @@ A continuation must use the same model and function-tool definitions as the orig
 
 ### Receive Codex activity
 
-Codex events without a standard Chat Completions representation appear under `x_codex`:
+The proxy sends Codex activity directly on the assistant delta/message. Text uses the standard `content` shape and calls use the standard `tool_calls` shape. Exposed reasoning uses `reasoning` (never `reasoning_summary`) and results use `tool_results`; these two direct compatibility fields are **not standard Chat Completions fields**. Streaming order is SSE chunk order; non-streaming responses aggregate those fields while preserving text that appeared before a call.
 
-- streaming responses use `choices[].delta.x_codex`;
-- non-streaming responses use `choices[].message.x_codex.events`.
+Internal app-server commands, file changes, MCP calls, web searches, collaboration calls, and other supported tool-like items are represented as function-shaped calls. A progress or terminal result repeats the matching call in `tool_calls` and places its bounded status/content in `tool_results`, making each result chunk self-correlating. These calls are observational and are already executed by app-server; clients must not execute them. They do not cause `finish_reason: "tool_calls"`.
 
-These events can include exposed reasoning, command or file-operation progress, web-search activity, tool results, and other internal lifecycle events. They are `x_codex` extensions and are not portable Chat Completions fields.
+Client-defined dynamic functions still suspend with `finish_reason: "tool_calls"` and require the normal follow-up `role: "tool"` messages. The continuation response begins with the accepted calls and `tool_results` together, then streams later reasoning, text, or internal activity from the same turn. `tool_results` and `reasoning` are nonstandard direct compatibility fields, not `x_codex` response extensions; clients requiring strict standard Chat Completions response objects must ignore or strip them. Request-side `previous_response_id` and policy settings remain explicitly documented `x_codex` extensions where applicable.
 
 ### Select Codex policy
 
