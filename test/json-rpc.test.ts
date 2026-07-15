@@ -54,3 +54,20 @@ test("transport immediately exposes server requests and supports cancellation", 
   controller.abort(new Error("cancelled"));
   await assert.rejects(pending, /cancelled/);
 });
+
+test("transport suppresses buffered server requests after logical close", async () => {
+  const input = new PassThrough();
+  const rpc = new JsonRpcTransport(input, new PassThrough());
+  let requests = 0;
+  rpc.on("request", () => {
+    requests += 1;
+  });
+
+  rpc.close();
+  input.write(
+    `${JSON.stringify({ id: 7, method: "item/tool/call", params: {} })}\n`,
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(requests, 0);
+});

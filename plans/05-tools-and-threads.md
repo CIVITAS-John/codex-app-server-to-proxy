@@ -11,6 +11,7 @@ Support client-defined tools across requests while preserving safe Codex thread 
     - Register only top-level functions so `item/tool/call` correlation never depends on `namespace`.
     - Validate function names against the app-server constraints (`^[a-zA-Z0-9_-]+$`, 1 to 128 characters) with OpenAI-shaped errors.
 2. When app-server issues `item/tool/call`, correlate name, call ID, arguments, thread, turn, and pending JSON-RPC response.
+    - Route callbacks centrally by thread to exactly one active owner; per-request event listeners and listener-count inference are not ownership mechanisms.
 3. Stream standard `delta.tool_calls` argument fragments, register the pending continuation with the configured deadline, and end the HTTP response with `finish_reason: "tool_calls"` while keeping the app-server call pending.
     - Default the deadline to five minutes.
     - This registered dynamic-tool suspension is the only server-initiated request allowed to outlive its originating HTTP request.
@@ -48,3 +49,14 @@ Support client-defined tools across requests while preserving safe Codex thread 
 - A pending tool continuation returns a clear non-retryable error after restart.
 - Mapping writes survive abrupt termination without corrupting other records.
 - One opt-in live scenario completes a tool round trip with `gpt-5.4-mini` using at most two model calls.
+
+## Implemented decisions
+
+- The versioned state file is `continuations.json` under `--state-dir`. Writes use same-directory temporary files followed by atomic rename; corrupt files recover as an empty, untrusted store.
+- Mapping retention defaults to 30 days. An older completed response becomes `superseded` as soon as a newer response is recorded for the same thread.
+- Tool definitions are recursively key-sorted and SHA-256 hashed. Continuations bind that hash together with model, root working directory, and the effective-policy hash.
+- Pending-tool tombstones contain call IDs but no arguments or results. Reload converts them to expired tombstones because the JSON-RPC responders are process-local; the compatibility consequence is a non-retryable `expired_tool_continuation` response after restart.
+- Dynamic tool results always use app-server `inputText` content with `success: true`; Chat Completions has no standard tool-failure bit.
+- One response store lives for the proxy server lifetime. Replacing or removing app-server disposes the old continuation generation, cancels deadlines, rejects suspended responders and late callbacks, expires their mappings, and then closes the old transport so active executions wake without writing stale mappings. Buffered frames are ignored after logical transport close.
+- The pinned protocol accepts `dynamicTools` only on `thread/start`, not `thread/resume` or `turn/start`. Consequently a pending tool-result request and every later completed-thread continuation must repeat the original canonical tool set. A 3-tool thread cannot resume in place with 2 tools; v1 rejects that request rather than silently creating a different thread.
+- Implicit tool continuation is enabled by default: `tool_call_id` values must jointly identify exactly one live in-memory suspension. `--implicit-tool-continuation false` disables this compatibility mode and requires `previous_response_id`; unknown or ambiguous IDs never fall back to a new thread.

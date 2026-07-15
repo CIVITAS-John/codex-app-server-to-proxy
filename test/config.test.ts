@@ -29,10 +29,20 @@ test("serve options have safe documented defaults and reject ambiguity", () => {
   assert.equal(parsed.port, 8787);
   assert.equal(parsed.root, "/tmp/project");
   assert.equal(parsed.toolTimeoutMs, 300_000);
+  assert.equal(parsed.implicitToolContinuation, true);
   assert.equal(parsed.stateDir, "/tmp/project/.codex-openai-proxy");
   assert.throws(
     () => parseServeOptions(["--port", "80", "--port", "81"]),
     /Duplicate/,
   );
   assert.throws(() => parseServeOptions(["--unknown", "x"]), /Unknown/);
+  assert.equal(
+    parseServeOptions(["--implicit-tool-continuation", "false"])
+      .implicitToolContinuation,
+    false,
+  );
+  assert.throws(
+    () => parseServeOptions(["--implicit-tool-continuation", "yes"]),
+    /true or false/,
+  );
 });

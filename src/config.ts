@@ -10,6 +10,7 @@ export interface ServeOptions {
   root: string;
   codexPath: string;
   toolTimeoutMs: number;
+  implicitToolContinuation: boolean;
   requestTimeoutMs: number;
   shutdownTimeoutMs: number;
   bodyLimitBytes: number;
@@ -60,6 +61,13 @@ function duration(name: string, value: string): number {
   return result;
 }
 
+/** Parses an explicit true-or-false CLI option. */
+function boolean(name: string, value: string): boolean {
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new Error(`${name} must be true or false.`);
+}
+
 /** Parses and validates all options for the serve command. */
 export function parseServeOptions(
   args: readonly string[],
@@ -85,6 +93,7 @@ export function parseServeOptions(
     "--root",
     "--codex-path",
     "--tool-timeout",
+    "--implicit-tool-continuation",
     "--request-timeout",
     "--shutdown-timeout",
     "--body-limit",
@@ -112,6 +121,10 @@ export function parseServeOptions(
     toolTimeoutMs: duration(
       "--tool-timeout",
       values.get("--tool-timeout") ?? "5m",
+    ),
+    implicitToolContinuation: boolean(
+      "--implicit-tool-continuation",
+      values.get("--implicit-tool-continuation") ?? "true",
     ),
     requestTimeoutMs: duration(
       "--request-timeout",

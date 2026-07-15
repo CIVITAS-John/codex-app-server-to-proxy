@@ -1,5 +1,6 @@
 import { PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
+import { tmpdir } from "node:os";
 import { startAppServer, type AppServer } from "../../src/app-server.js";
 import { ensureAuthenticated } from "../../src/auth.js";
 import { parseServeOptions } from "../../src/config.js";
@@ -60,11 +61,16 @@ function createScriptedTransport(): ScriptedTransport {
   const rpc = new JsonRpcTransport(fromServer, toServer);
   let nextThread = 0;
   let nextTurn = 0;
+  let nextServerRequest = 10_000;
   const active = new Map<
     string,
     { threadId: string; timer?: NodeJS.Timeout }
   >();
   const injected = new Map<string, unknown[]>();
+  const pendingTools = new Map<
+    number,
+    { threadId: string; turnId: string }
+  >();
   const send = (value: unknown): void => {
     const frame = `${JSON.stringify(value)}\n`;
     const middle = Math.max(1, Math.floor(frame.length / 2));
@@ -110,27 +116,47 @@ function createScriptedTransport(): ScriptedTransport {
   lines.on("line", (line) => {
     const message = JSON.parse(line) as {
       id: number;
-      method: string;
-      params: Record<string, unknown>;
+      method?: string;
+      params?: Record<string, unknown>;
+      result?: unknown;
     };
+    if (message.method === undefined) {
+      const pending = pendingTools.get(message.id);
+      if (!pending || message.result === undefined) return;
+      pendingTools.delete(message.id);
+      send(
+        protocolNotification({
+          method: "item/agentMessage/delta",
+          params: {
+            threadId: pending.threadId,
+            turnId: pending.turnId,
+            itemId: "tool-result-message",
+            delta: "contract-tool-ok",
+          },
+        }),
+      );
+      complete(pending.threadId, pending.turnId);
+      return;
+    }
+    const params = message.params ?? {};
     if (message.method === "thread/start") {
       const threadId = `thr_contract_${++nextThread}`;
       send({ id: message.id, result: { thread: { id: threadId } } });
       return;
     }
     if (message.method === "thread/inject_items") {
-      const threadId = String(message.params.threadId);
-      const items = Array.isArray(message.params.items)
-        ? message.params.items
+      const threadId = String(params.threadId);
+      const items = Array.isArray(params.items)
+        ? params.items
         : [];
       injected.set(threadId, items);
       send({ id: message.id, result: {} });
       return;
     }
     if (message.method === "turn/start") {
-      const threadId = String(message.params.threadId);
+      const threadId = String(params.threadId);
       const turnId = `turn_contract_${++nextTurn}`;
-      const input = message.params.input as Array<{ text?: string }>;
+      const input = params.input as Array<{ text?: string }>;
       const prompt = input?.[0]?.text ?? "";
       if (
         prompt.includes("remembered word") &&
@@ -138,6 +164,24 @@ function createScriptedTransport(): ScriptedTransport {
       )
         throw new Error("role history was not injected before the turn");
       send({ id: message.id, result: { turn: { id: turnId } } });
+      active.set(turnId, { threadId });
+      if (prompt.includes("contract_lookup")) {
+        const requestId = ++nextServerRequest;
+        pendingTools.set(requestId, { threadId, turnId });
+        send({
+          id: requestId,
+          method: "item/tool/call",
+          params: {
+            threadId,
+            turnId,
+            callId: "call_contract_lookup",
+            namespace: null,
+            tool: "contract_lookup",
+            arguments: { key: "cedar" },
+          },
+        });
+        return;
+      }
       send(
         protocolNotification({
           method: "item/agentMessage/delta",
@@ -149,14 +193,13 @@ function createScriptedTransport(): ScriptedTransport {
           },
         }),
       );
-      active.set(turnId, { threadId });
       if (prompt.includes("10000")) return;
       const timer = setTimeout(() => complete(threadId, turnId), 1);
       active.set(turnId, { threadId, timer });
       return;
     }
     if (message.method === "turn/interrupt") {
-      const turnId = String(message.params.turnId);
+      const turnId = String(params.turnId);
       const pending = active.get(turnId);
       if (pending?.timer) clearTimeout(pending.timer);
       send({ id: message.id, result: {} });
@@ -215,6 +258,8 @@ async function startProxy(
         "2m",
         "--shutdown-timeout",
         "10s",
+        "--state-dir",
+        `${tmpdir()}/codex-proxy-contract-tests-${process.pid}`,
       ]),
       silentLogger,
     );

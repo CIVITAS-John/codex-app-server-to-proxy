@@ -4,7 +4,7 @@
 
 ## Development CLI
 
-Build and start the Stage 04 server:
+Build and start the Stage 05 server:
 
 ```sh
 npm install
@@ -13,7 +13,7 @@ npm start
 
 The listener defaults to `127.0.0.1:8787`. The proxy installs and uses its own `@openai/codex` runtime dependency by default. `--codex-path` can override that executable, and `PATH` is only a compatibility fallback when the package is unavailable. The proxy validates the executable and owns one `codex app-server` child. `GET /health` reports proxy liveness. `GET /ready` remains HTTP 503 until app-server initialization and usable ChatGPT authentication complete, and becomes unavailable again during bounded crash recovery.
 
-Fresh text-only Chat Completions are translated in both streaming and non-streaming modes. Prior system, developer, user, and assistant messages are injected as role-preserving Responses API history; the final user message starts the Codex turn. Standard assistant text remains usable by generic clients, while exposed reasoning and internal activity use `x_codex` extensions. Exact last-turn usage is returned when app-server reports it. Continuation, client tool-result round trips, and request policy selection remain unavailable until their later stages and are rejected rather than approximated.
+Fresh text-only Chat Completions are translated in both streaming and non-streaming modes. Prior system, developer, user, and assistant messages are injected as role-preserving Responses API history; the final user message starts the Codex turn. Standard assistant text remains usable by generic clients, while exposed reasoning and internal activity use `x_codex` extensions. Exact last-turn usage is returned when app-server reports it. Stage 05 adds function-tool round trips and completed-thread continuation through `previous_response_id`. Request policy selection remains unavailable until Stage 06 and is rejected rather than approximated.
 
 On first use, an interactive CLI attempts to open the ChatGPT authorization URL without a shell. If that fails, it prints the URL once to the interactive terminal; structured logs contain only a redacted event. A non-interactive CLI uses the device-code flow. Shutdown closes pending transport requests and terminates app-server after the configured grace period.
 
@@ -93,7 +93,9 @@ The minimum extension is additive:
 }
 ```
 
-`previous_response_id` is not a standard Chat Completions field. The proxy uses it to locate and resume the persisted Codex thread associated with an earlier response. Before accepting the request, the proxy verifies both its durable response mapping and the thread's current app-server state. An unknown, expired, superseded, busy, archived, deleted, policy-incompatible, or otherwise non-resumable continuation is rejected; the proxy never silently creates a replacement thread. A superseded reference (one that is no longer the newest response on its thread) is rejected rather than treated as a branch, because resuming would silently include the later turns. Clients may omit prior message history when continuing through this extension; only omission of `previous_response_id` creates a new thread.
+`previous_response_id` is not a standard Chat Completions field. The proxy uses it to locate and resume the persisted Codex thread associated with an earlier response. Before accepting the request, the proxy verifies both its durable response mapping and the thread's current app-server state. An unknown, expired, superseded, busy, archived, deleted, policy-incompatible, or otherwise non-resumable continuation is rejected; the proxy never silently creates a replacement thread. A superseded reference (one that is no longer the newest response on its thread) is rejected rather than treated as a branch, because resuming would silently include the later turns. Clients may omit prior message history when continuing through this extension.
+
+Pending tool results are the one implicit-continuation case. By default, one or more `role: "tool"` messages without `previous_response_id` select the unique live suspension containing their `tool_call_id` values. Unknown, duplicate, ambiguous, expired, or replayed call IDs are rejected and never create a thread. Start the server with `--implicit-tool-continuation false` to require `previous_response_id` for tool results as well.
 
 Initial `x_codex` values are:
 
@@ -121,10 +123,12 @@ Client-defined tools follow the normal multi-request Chat Completions pattern:
 
 1. Send `tools` with the user request.
 2. Receive streamed `tool_calls` and a completion with `finish_reason: "tool_calls"`.
-3. Send a new request with the returned assistant tool-call message, corresponding `role: "tool"` messages, and the prior response's `previous_response_id`.
+3. Send a new request with the returned assistant tool-call message and corresponding `role: "tool"` messages. The proxy correlates their `tool_call_id` values to the unique live suspension. Supplying the prior response's `previous_response_id` remains supported and is required when implicit tool continuation is disabled.
 4. The proxy delivers those results to the pending app-server dynamic-tool calls and continues the same Codex thread.
 
-Pending dynamic calls are process-local in the first release. Their deadline is configurable and defaults to five minutes. Persisted, completed threads can resume after a proxy restart, but a tool call awaiting a client result cannot.
+Pending dynamic calls are process-local in the first release. Their deadline is configurable and defaults to five minutes. The state store keeps only call IDs in its non-secret tombstone; tool arguments and results are not persisted. Persisted, completed threads can resume after a proxy restart, but a tool call awaiting a client result returns the non-retryable `expired_tool_continuation` error after restart.
+
+Repeat the same `tools` definition when sending tool results and on later `previous_response_id` continuations. The pinned app-server protocol defines dynamic tools only when a thread starts, so it cannot faithfully change a resumed thread from, for example, three tools to two. The proxy returns `continuation_tools_mismatch` for that request and never silently starts a replacement thread.
 
 ## Usage metadata
 

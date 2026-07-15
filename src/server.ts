@@ -11,6 +11,7 @@ import type { ServeOptions } from "./config.js";
 import type { Logger } from "./logger.js";
 import type { JsonRpcTransport } from "./json-rpc.js";
 import { handleChatCompletion } from "./chat.js";
+import { ContinuationCoordinator, ResponseStore } from "./state.js";
 
 /** Controls the proxy HTTP listener and readiness state. */
 export interface ProxyServer {
@@ -28,6 +29,8 @@ export function createProxyServer(
 ): ProxyServer {
   let ready = false;
   let transport: JsonRpcTransport | undefined;
+  let continuations: ContinuationCoordinator | undefined;
+  const continuationStore = new ResponseStore(options.stateDir);
   let active = 0;
   const controllers = new Set<AbortController>();
   const sockets = new Set<Socket>();
@@ -85,6 +88,9 @@ export function createProxyServer(
       options.bodyLimitBytes,
       controller.signal,
       transport,
+      continuations,
+      options.root,
+      options.implicitToolContinuation,
       log,
       requestId,
     ).catch((cause: unknown) => {
@@ -126,7 +132,18 @@ export function createProxyServer(
       ready = value;
     },
     setTransport(value) {
+      if (transport === value) return;
+      continuations?.dispose();
+      if (transport && transport !== value)
+        transport.close(new Error("app-server transport replaced"));
       transport = value;
+      continuations = value
+        ? new ContinuationCoordinator(
+            continuationStore,
+            value,
+            options.toolTimeoutMs,
+          )
+        : undefined;
     },
     listen: () =>
       new Promise((resolve, reject) => {
@@ -147,6 +164,10 @@ export function createProxyServer(
       }),
     close: () =>
       new Promise((resolve, reject) => {
+        continuations?.dispose();
+        transport?.close(new Error("proxy shutting down"));
+        continuations = undefined;
+        transport = undefined;
         controllers.forEach((controller) =>
           controller.abort(new Error("server shutting down")),
         );
@@ -169,6 +190,9 @@ async function route(
   bodyLimit: number,
   signal: AbortSignal,
   transport: JsonRpcTransport | undefined,
+  continuations: ContinuationCoordinator | undefined,
+  root: string,
+  implicitToolContinuation: boolean,
   log: Logger,
   requestId: string,
 ): Promise<void> {
@@ -203,7 +227,7 @@ async function route(
         "server_error",
         "app_server_not_ready",
       );
-    if (!transport)
+    if (!transport || !continuations)
       throw new HttpError(
         503,
         "The app-server transport is unavailable.",
@@ -215,6 +239,9 @@ async function route(
       log,
       requestId,
       signal,
+      continuations,
+      root,
+      implicitToolContinuation,
     });
     return;
   }

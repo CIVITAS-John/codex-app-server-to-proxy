@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
+import { tmpdir } from "node:os";
 import { test } from "vitest";
 import { EventNormalizer, normalizeNotification } from "../src/chat.js";
 import { JsonRpcTransport } from "../src/json-rpc.js";
@@ -107,7 +108,12 @@ async function withChatServer(
   ) => Promise<void>,
 ): Promise<void> {
   const proxy = createProxyServer(
-    parseServeOptions(["--port", "0"]),
+    parseServeOptions([
+      "--port",
+      "0",
+      "--state-dir",
+      `${tmpdir()}/codex-proxy-chat-tests-${process.pid}`,
+    ]),
     silentLogger,
   );
   proxy.setTransport(fakeAppServer());
@@ -327,17 +333,12 @@ test("streaming and aggregate responses share content and exact usage", async ()
   });
 });
 
-test("rejects ambiguous history and unsupported continuation before app-server work", async () => {
+test("rejects ambiguous history and unknown continuation before app-server work", async () => {
   await withChatServer(async (origin) => {
     for (const body of [
       {
         model: "m",
         messages: [{ role: "assistant", content: "not a user turn" }],
-      },
-      {
-        model: "m",
-        messages: [{ role: "user", content: "x" }],
-        previous_response_id: "chatcmpl_old",
       },
       { model: "m", messages: [{ role: "tool", content: "x" }] },
     ]) {
@@ -352,6 +353,20 @@ test("rejects ambiguous history and unsupported continuation before app-server w
         "invalid_request",
       );
     }
+    const unknown = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        messages: [{ role: "user", content: "x" }],
+        previous_response_id: "chatcmpl_old",
+      }),
+    });
+    assert.equal(unknown.status, 404);
+    assert.equal(
+      ((await unknown.json()) as { error: { code: string } }).error.code,
+      "unknown_previous_response_id",
+    );
   });
 });
 

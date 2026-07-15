@@ -17,6 +17,7 @@ The work is split into gated stages. Complete stages in order unless a stage exp
 - Expose each web-search mode the pinned app-server can enforce per request and reject the others.
 - Handle approvals non-interactively with `auto_review` where policy permits and decline any unexpected approval request.
 - On continuation, require the original tool set, model, cwd, and policy.
+    - The pinned protocol cannot replace dynamic tools on a resumed thread; a changed set is rejected rather than applied approximately or placed on a silent replacement thread.
 - Reject message history that cannot be represented faithfully.
 - Reject any request value the proxy cannot apply exactly. During v1 development, prefer a clear error over fallback or approximation.
 - Ignore harmless unsupported fields and log structured warnings.
@@ -38,7 +39,7 @@ The work is split into gated stages. Complete stages in order unless a stage exp
 
 ## Current status
 
-Stages 01, 02, 04, and the offline portion of Stage 03 are implemented. A shared Chat Completions contract now targets either a deterministic fake backend under `npm test` or real Codex under the explicit `npm run test:live` opt-in, with at most four `gpt-5.4-mini` call attempts. The expanded live contract passed on 2026-07-14 with exactly four attempts. Tool, policy, and restart/resume observations remain pending. Stage 08 owns packed-tarball installation and bin-shim proof.
+Stages 01, 02, 04, 05, and the offline portion of Stage 03 are implemented. A shared Chat Completions contract now targets either a deterministic fake backend under `npm test` or real Codex under the explicit `npm run test:live` opt-in, with at most five `gpt-5.4-mini` call attempts. The expanded Stage 04 live contract passed on 2026-07-14 with exactly four attempts. The Stage 05 live scenario covers one function-tool round trip with at most two model calls; it has not yet been recorded as passing. Stage 05 adds atomic response mappings, strict continuation bindings, restart-safe completed threads, process-local dynamic-tool suspension, and per-thread serialization. Policy observations remain pending. Stage 08 owns packed-tarball installation and bin-shim proof.
 
 Stage 01 and Stage 02 coverage now runs as type-checked TypeScript through Vitest. The files are split by protocol contract, continuation behavior, offline spike, configuration, HTTP server, and CLI lifecycle. The checked-in default configuration selects offline tests and excludes opt-in live-test filenames. This is a development-only compatibility change: it does not alter the Node.js 20+ runtime or the CLI/API contract, but contributors and CI must use the TypeScript and Vitest configurations.
 
@@ -50,6 +51,7 @@ Stage 01 and Stage 02 coverage now runs as type-checked TypeScript through Vites
 - Supplying `previous_response_id` requires continuation.
     - The proxy must validate the local mapping and confirm that app-server can resume the mapped thread.
     - It rejects any non-resumable reference and never falls back to a new thread.
+- Tool-result messages may omit `previous_response_id` when the default implicit-tool-continuation mode can correlate all `tool_call_id` values to exactly one live suspension. Operators may disable this mode and require the extension explicitly.
 - A `previous_response_id` must reference its thread's newest completed response.
     - Continuing from an older response is a branch; v1 rejects it with a distinct error rather than resuming a thread whose later turns would be silently included.
     - `thread/fork` with `lastTurnId` is the documented mechanism if branching is ever supported.

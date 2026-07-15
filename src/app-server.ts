@@ -193,7 +193,10 @@ function failClosed(
   request: ServerRequest,
   log: Logger,
 ): void {
-  if (request.method === "item/tool/requestUserInput") {
+  if (request.method === "item/tool/call") {
+    // The continuation coordinator centrally routes this callback by thread.
+    return;
+  } else if (request.method === "item/tool/requestUserInput") {
     rpc.respond(request.id, { answers: {} });
   } else if (request.method === "mcpServer/elicitation/request") {
     rpc.respond(request.id, { action: "decline", content: null });

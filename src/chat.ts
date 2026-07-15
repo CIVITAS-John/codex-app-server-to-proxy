@@ -4,11 +4,19 @@ import { randomUUID } from "node:crypto";
 import type { JsonRpcTransport } from "./json-rpc.js";
 import { HttpError, writeJson } from "./errors.js";
 import type { Logger } from "./logger.js";
+import {
+  bindingHash,
+  type ContinuationCoordinator,
+  type PendingToolCall,
+  type ThreadBinding,
+} from "./state.js";
 
 /** A validated text-only Chat Completions message. */
 interface ChatMessage {
-  role: "system" | "developer" | "user" | "assistant";
+  role: "system" | "developer" | "user" | "assistant" | "tool";
   content: string;
+  toolCallId?: string;
+  toolCalls?: Array<{ id: string; name: string; arguments: string }>;
 }
 
 /** The Stage 04 request subset after validation. */
@@ -18,6 +26,7 @@ interface ChatRequest {
   stream: boolean;
   includeUsage: boolean;
   dynamicTools: Array<Record<string, unknown>>;
+  previousResponseId?: string;
 }
 
 /** Standard token usage, with details present only when app-server reports them. */
@@ -43,6 +52,9 @@ export interface ChatHandlerOptions {
   log: Logger;
   requestId: string;
   signal: AbortSignal;
+  continuations: ContinuationCoordinator;
+  root: string;
+  implicitToolContinuation: boolean;
 }
 
 /** Validates, executes, and serializes one Chat Completions request. */
@@ -51,10 +63,25 @@ export async function handleChatCompletion(
   response: ServerResponse,
   options: ChatHandlerOptions,
 ): Promise<void> {
-  const request = validateRequest(body, options.log, options.requestId);
+  const request = validateRequest(
+    body,
+    options.log,
+    options.requestId,
+    options.implicitToolContinuation,
+  );
+  if (
+    !request.previousResponseId &&
+    request.messages.some((message) => message.role === "tool")
+  ) {
+    const callIds = request.messages
+      .filter((message) => message.role === "tool")
+      .map((message) => message.toolCallId!);
+    request.previousResponseId =
+      options.continuations.findPendingResponse(callIds);
+  }
   const responseId = `chatcmpl_codex_${randomUUID().replaceAll("-", "")}`;
   const created = Math.floor(Date.now() / 1_000);
-  const events = execute(request, options);
+  const events = execute(request, options, responseId);
   if (request.stream) {
     response.writeHead(200, {
       "content-type": "text/event-stream; charset=utf-8",
@@ -104,6 +131,7 @@ export async function handleChatCompletion(
   }
 
   let content = "";
+  const toolCalls = new Map<number, Record<string, unknown>>();
   let finishReason: string | null = null;
   let usage: Usage | undefined;
   const extensions: unknown[] = [];
@@ -112,12 +140,29 @@ export async function handleChatCompletion(
       throw new HttpError(502, event.error, "server_error", "app_server_error");
     if (typeof event.delta?.content === "string")
       content += event.delta.content;
+    if (Array.isArray(event.delta?.tool_calls)) {
+      for (const raw of event.delta.tool_calls) {
+        const call = record(raw);
+        if (call && typeof call.index === "number")
+          toolCalls.set(call.index, call);
+      }
+    }
     if (event.delta?.x_codex !== undefined)
       extensions.push(event.delta.x_codex);
     if (event.finishReason) finishReason = event.finishReason;
     if (event.usage) usage = event.usage;
   }
   const message: Record<string, unknown> = { role: "assistant", content };
+  if (toolCalls.size) {
+    message.content = null;
+    message.tool_calls = [...toolCalls.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([, call]) => ({
+        id: call.id,
+        type: call.type,
+        function: call.function,
+      }));
+  }
   if (extensions.length > 0) message.x_codex = { events: extensions };
   writeJson(response, 200, {
     id: responseId,
@@ -129,22 +174,47 @@ export async function handleChatCompletion(
   });
 }
 
-/** Runs a fresh Codex thread and yields its normalized event stream. */
+/** Runs or resumes a Codex thread and yields its normalized event stream. */
 async function* execute(
   request: ChatRequest,
   options: ChatHandlerOptions,
+  responseId: string,
 ): AsyncGenerator<NormalizedEvent> {
   const queued: Array<{ method: string; params: unknown }> = [];
+  const toolRequests: PendingToolCall[] = [];
   let wake: (() => void) | undefined;
+  let transportError: Error | undefined;
   const onNotification = (method: string, params: unknown): void => {
+    const item = record(record(params)?.item);
+    if (method === "item/started" && item?.type === "dynamicToolCall") {
+      // The server request is authoritative and carries the responder ID; using
+      // both messages would expose the same call twice.
+      return;
+    }
     queued.push({ method, params });
     wake?.();
   };
+  const onToolRequest = (toolRequest: PendingToolCall): void => {
+    toolRequests.push(toolRequest);
+    wake?.();
+  };
+  const onClose = (error: Error): void => {
+    transportError = error;
+    wake?.();
+  };
   options.rpc.on("notification", onNotification);
+  options.rpc.once("close", onClose);
   let threadId: string | undefined;
   let turnId: string | undefined;
   let terminal = false;
+  let suspended = false;
   const normalizer = new EventNormalizer();
+  const binding: ThreadBinding = {
+    model: request.model,
+    cwd: options.root,
+    toolsHash: bindingHash(request.dynamicTools),
+    policyHash: bindingHash({}),
+  };
   const abort = async (): Promise<void> => {
     if (threadId && turnId && !terminal)
       await options.rpc
@@ -153,49 +223,183 @@ async function* execute(
   };
   options.signal.addEventListener("abort", () => void abort(), { once: true });
   try {
-    const started = asRecord(
-      await options.rpc.request(
-        "thread/start",
-        {
-          model: request.model,
-          ephemeral: true,
-          ...(request.dynamicTools.length
-            ? { dynamicTools: request.dynamicTools }
-            : {}),
-        },
-        options.signal,
-      ),
-      "thread/start",
-    );
-    threadId = stringAt(asRecord(started.thread, "thread/start.thread"), "id");
-    const prior = request.messages.slice(0, -1).map(toHistoryItem);
-    if (prior.length)
-      await options.rpc.request(
-        "thread/inject_items",
-        { threadId, items: prior },
-        options.signal,
+    if (request.previousResponseId) {
+      const stored = options.continuations.store.get(
+        request.previousResponseId,
       );
-    const last = request.messages.at(-1)!;
-    const turn = asRecord(
-      await options.rpc.request(
+      if (!stored) continuationFailure(404, "unknown_previous_response_id");
+      if (stored.model !== binding.model)
+        continuationFailure(409, "continuation_model_mismatch");
+      if (stored.cwd !== binding.cwd)
+        continuationFailure(409, "continuation_cwd_mismatch");
+      if (stored.toolsHash !== binding.toolsHash)
+        continuationFailure(409, "continuation_tools_mismatch");
+      if (stored.policyHash !== binding.policyHash)
+        continuationFailure(409, "continuation_policy_mismatch");
+      threadId = stored.threadId;
+      if (stored.state === "pending_tool") {
+        const pending = options.continuations.pending(
+          request.previousResponseId,
+        );
+        if (!pending) continuationFailure(410, "expired_tool_continuation");
+        const results = validateToolResults(request.messages, pending);
+        turnId = pending[0]!.turnId;
+        if (!options.continuations.setToolOwner(threadId, onToolRequest))
+          continuationFailure(409, "thread_busy");
+        options.continuations.resolve(request.previousResponseId, results);
+      } else {
+        if (stored.state === "expired")
+          continuationFailure(410, "expired_previous_response_id");
+        if (stored.state === "superseded")
+          continuationFailure(409, "superseded_previous_response_id");
+        if (stored.state !== "ready")
+          continuationFailure(500, "corrupt_response_state");
+        if (!options.continuations.claim(threadId))
+          continuationFailure(409, "thread_busy");
+        if (!options.continuations.setToolOwner(threadId, onToolRequest))
+          continuationFailure(409, "thread_busy");
+        let resumed: Record<string, unknown>;
+        try {
+          const read = asRecord(
+            await options.rpc.request(
+              "thread/read",
+              { threadId, includeTurns: false },
+              options.signal,
+            ),
+            "thread/read",
+          );
+          const readThread = asRecord(read.thread, "thread/read.thread");
+          const status = record(readThread.status)?.type;
+          if (status === "active") continuationFailure(409, "thread_busy");
+          if (status === "systemError")
+            continuationFailure(409, "thread_not_resumable");
+          resumed = asRecord(
+            await options.rpc.request(
+              "thread/resume",
+              { threadId, excludeTurns: true },
+              options.signal,
+            ),
+            "thread/resume",
+          );
+        } catch (error) {
+          if (error instanceof HttpError) throw error;
+          continuationFailure(409, "thread_not_resumable");
+        }
+        threadId = stringAt(
+          asRecord(resumed.thread, "thread/resume.thread"),
+          "id",
+        );
+        const last = request.messages.at(-1)!;
+        const turn = asRecord(
+          await options.rpc.request(
+            "turn/start",
+            {
+              threadId,
+              model: request.model,
+              input: [{ type: "text", text: last.content, text_elements: [] }],
+            },
+            options.signal,
+          ),
+          "turn/start",
+        );
+        turnId = stringAt(asRecord(turn.turn, "turn/start.turn"), "id");
+      }
+    } else {
+      const started = asRecord(
+        await options.rpc.request(
+          "thread/start",
+          {
+            model: request.model,
+            ephemeral: false,
+            ...(request.dynamicTools.length
+              ? { dynamicTools: request.dynamicTools }
+              : {}),
+          },
+          options.signal,
+        ),
+        "thread/start",
+      );
+      threadId = stringAt(
+        asRecord(started.thread, "thread/start.thread"),
+        "id",
+      );
+      if (!options.continuations.claim(threadId))
+        continuationFailure(409, "thread_busy");
+      if (!options.continuations.setToolOwner(threadId, onToolRequest))
+        continuationFailure(409, "thread_busy");
+      const prior = request.messages.slice(0, -1).map(toHistoryItem);
+      if (prior.length)
+        await options.rpc.request(
+          "thread/inject_items",
+          { threadId, items: prior },
+          options.signal,
+        );
+      const last = request.messages.at(-1)!;
+      const turn = asRecord(
+        await options.rpc.request(
+          "turn/start",
+          {
+            threadId,
+            model: request.model,
+            input: [{ type: "text", text: last.content, text_elements: [] }],
+          },
+          options.signal,
+        ),
         "turn/start",
-        {
-          threadId,
-          model: request.model,
-          input: [{ type: "text", text: last.content, text_elements: [] }],
-        },
-        options.signal,
-      ),
-      "turn/start",
-    );
-    turnId = stringAt(asRecord(turn.turn, "turn/start.turn"), "id");
+      );
+      turnId = stringAt(asRecord(turn.turn, "turn/start.turn"), "id");
+    }
     while (!terminal) {
-      if (!queued.length)
+      if (transportError) throw transportError;
+      if (!queued.length && !toolRequests.length)
         await new Promise<void>((resolve) => {
           wake = resolve;
-          if (queued.length) resolve();
+          if (queued.length || toolRequests.length) resolve();
         });
       wake = undefined;
+      if (transportError) throw transportError;
+      if (toolRequests.length) {
+        // Let parallel app-server requests arriving in this event-loop turn join the batch.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        const calls = toolRequests
+          .splice(0)
+          .sort((a, b) => a.callId.localeCompare(b.callId));
+        if (
+          calls.some(
+            (call) => call.threadId !== threadId || call.turnId !== turnId,
+          )
+        ) {
+          for (const call of calls)
+            options.rpc.respondError(call.request.id, {
+              code: -32602,
+              message: "Dynamic tool correlation mismatch",
+            });
+          throw new Error(
+            "Dynamic tool request did not match the active turn.",
+          );
+        }
+        options.continuations.suspend(responseId, binding, calls);
+        suspended = true;
+        for (const [index, call] of calls.entries())
+          yield {
+            delta: {
+              tool_calls: [
+                {
+                  index,
+                  id: call.callId,
+                  type: "function",
+                  function: {
+                    name: call.name,
+                    arguments: JSON.stringify(call.arguments ?? {}),
+                  },
+                },
+              ],
+            },
+          };
+        yield { finishReason: "tool_calls" };
+        terminal = true;
+        continue;
+      }
       const next = queued.shift();
       if (!next) continue;
       const params = record(next.params);
@@ -214,8 +418,17 @@ async function* execute(
         yield event;
       }
     }
+    if (
+      !suspended &&
+      threadId &&
+      !options.continuations.recordReady(responseId, threadId, binding)
+    )
+      throw new Error("App-server transport was replaced before completion.");
   } finally {
     options.rpc.off("notification", onNotification);
+    options.rpc.off("close", onClose);
+    if (threadId) options.continuations.clearToolOwner(threadId, onToolRequest);
+    if (threadId && !suspended) options.continuations.release(threadId);
     if (options.signal.aborted) await abort();
   }
 }
@@ -379,6 +592,7 @@ function validateRequest(
   value: unknown,
   log: Logger,
   requestId: string,
+  implicitToolContinuation: boolean,
 ): ChatRequest {
   const body = record(value);
   if (!body) invalid("Request body must be a JSON object.", null);
@@ -388,9 +602,13 @@ function validateRequest(
     invalid("messages must be a non-empty array.", "messages");
   if (body.stream !== undefined && typeof body.stream !== "boolean")
     invalid("stream must be a boolean.", "stream");
-  if (body.previous_response_id !== undefined)
+  if (
+    body.previous_response_id !== undefined &&
+    (typeof body.previous_response_id !== "string" ||
+      body.previous_response_id === "")
+  )
     invalid(
-      "previous_response_id is not supported until continuation is enabled.",
+      "previous_response_id must be a non-empty string.",
       "previous_response_id",
     );
   if (
@@ -405,8 +623,23 @@ function validateRequest(
   const messages = body.messages.map((entry, index) =>
     validateMessage(entry, index),
   );
-  if (messages.at(-1)?.role !== "user")
+  const hasToolResults = messages.some((message) => message.role === "tool");
+  if (!body.previous_response_id && hasToolResults && !implicitToolContinuation)
+    invalid(
+      "Tool results require previous_response_id when implicit tool continuation is disabled.",
+      "previous_response_id",
+    );
+  if (
+    !body.previous_response_id &&
+    !hasToolResults &&
+    messages.at(-1)?.role !== "user"
+  )
     invalid("The final message must have role user.", "messages");
+  if (
+    body.previous_response_id &&
+    !["user", "tool"].includes(messages.at(-1)!.role)
+  )
+    invalid("A continuation must end with a user or tool message.", "messages");
   let includeUsage = false;
   if (body.stream_options !== undefined) {
     const streamOptions = record(body.stream_options);
@@ -445,6 +678,9 @@ function validateRequest(
     stream: body.stream === true,
     includeUsage,
     dynamicTools,
+    ...(typeof body.previous_response_id === "string"
+      ? { previousResponseId: body.previous_response_id }
+      : {}),
   };
 }
 
@@ -454,23 +690,57 @@ function validateMessage(value: unknown, index: number): ChatMessage {
   const param = `messages.${index}`;
   if (
     !message ||
-    !["system", "developer", "user", "assistant"].includes(String(message.role))
-  )
-    invalid(
-      "Only system, developer, user, and assistant messages are supported in this stage.",
-      `${param}.role`,
-    );
-  if (typeof message.content !== "string")
-    invalid("Message content must be a string.", `${param}.content`);
-  if (
-    Object.keys(message).some(
-      (key) => !["role", "content", "name"].includes(key),
+    !["system", "developer", "user", "assistant", "tool"].includes(
+      String(message.role),
     )
   )
+    invalid(
+      "Only system, developer, user, assistant, and tool messages are supported.",
+      `${param}.role`,
+    );
+  if (
+    typeof message.content !== "string" &&
+    !(message.role === "assistant" && message.content === null)
+  )
+    invalid("Message content must be a string.", `${param}.content`);
+  const allowed = new Set([
+    "role",
+    "content",
+    "name",
+    "tool_call_id",
+    "tool_calls",
+  ]);
+  if (Object.keys(message).some((key) => !allowed.has(key)))
     invalid("This message contains unsupported fields.", param);
+  let toolCalls: ChatMessage["toolCalls"];
+  if (message.role === "assistant" && message.tool_calls !== undefined) {
+    if (!Array.isArray(message.tool_calls))
+      invalid("tool_calls must be an array.", `${param}.tool_calls`);
+    toolCalls = message.tool_calls.map((raw, callIndex) => {
+      const call = record(raw);
+      const fn = record(call?.function);
+      if (
+        call?.type !== "function" ||
+        typeof call.id !== "string" ||
+        typeof fn?.name !== "string" ||
+        typeof fn.arguments !== "string"
+      )
+        invalid(
+          "Each assistant tool call must be a complete function call.",
+          `${param}.tool_calls.${callIndex}`,
+        );
+      return { id: call.id, name: fn.name, arguments: fn.arguments };
+    });
+  }
+  if (message.role === "tool" && typeof message.tool_call_id !== "string")
+    invalid("A tool message requires tool_call_id.", `${param}.tool_call_id`);
   return {
     role: message.role as ChatMessage["role"],
-    content: message.content as string,
+    content: typeof message.content === "string" ? message.content : "",
+    ...(typeof message.tool_call_id === "string"
+      ? { toolCallId: message.tool_call_id }
+      : {}),
+    ...(toolCalls ? { toolCalls } : {}),
   };
 }
 
@@ -494,6 +764,8 @@ function validateTools(
       !fn ||
       typeof fn.name !== "string" ||
       fn.name === "" ||
+      fn.name.length > 128 ||
+      !/^[a-zA-Z0-9_-]+$/.test(fn.name) ||
       !record(fn.parameters)
     )
       invalid(
@@ -573,6 +845,65 @@ async function writeFrame(
 ): Promise<void> {
   if (!response.write(`data: ${data}\n\n`))
     await Promise.race([once(response, "drain"), once(response, "close")]);
+}
+
+/** Validates a complete, single-use result set for a suspended tool batch. */
+function validateToolResults(
+  messages: ChatMessage[],
+  pending: PendingToolCall[],
+): Map<string, string> {
+  const assistant = [...messages]
+    .reverse()
+    .find(
+      (message) =>
+        message.role === "assistant" && message.toolCalls !== undefined,
+    );
+  if (!assistant?.toolCalls)
+    invalid("The assistant tool-call message is required.", "messages");
+  const expected = new Map(pending.map((call) => [call.callId, call]));
+  if (
+    assistant.toolCalls.length !== expected.size ||
+    assistant.toolCalls.some(
+      (call) =>
+        expected.get(call.id)?.name !== call.name ||
+        call.arguments !==
+          JSON.stringify(expected.get(call.id)?.arguments ?? {}),
+    )
+  )
+    invalid(
+      "The assistant tool calls do not match the pending continuation.",
+      "messages",
+    );
+  const results = new Map<string, string>();
+  for (const message of messages) {
+    if (message.role !== "tool") continue;
+    if (!message.toolCallId || !expected.has(message.toolCallId))
+      invalid("The tool result references a foreign call ID.", "messages");
+    if (results.has(message.toolCallId))
+      invalid("A tool call has more than one result.", "messages");
+    results.set(message.toolCallId, message.content);
+  }
+  if (results.size !== expected.size)
+    invalid(
+      "Exactly one result is required for every pending tool call.",
+      "messages",
+    );
+  return results;
+}
+
+/** Throws the stable OpenAI-shaped error for continuation failures. */
+function continuationFailure(status: number, code: string): never {
+  throw new HttpError(
+    status,
+    "The previous response cannot be continued.",
+    status >= 500
+      ? "server_error"
+      : status === 409
+        ? "conflict_error"
+        : "invalid_request_error",
+    code,
+    "previous_response_id",
+  );
 }
 
 /** Throws an OpenAI-shaped request validation error. */

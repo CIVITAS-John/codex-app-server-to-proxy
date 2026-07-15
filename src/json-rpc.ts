@@ -116,6 +116,8 @@ export class JsonRpcTransport extends EventEmitter {
   }
 
   #receive(line: string): void {
+    // Buffered frames may arrive after close; logical closure is authoritative.
+    if (this.#closed) return;
     if (line.trim() === "") return;
     let value: unknown;
     try {

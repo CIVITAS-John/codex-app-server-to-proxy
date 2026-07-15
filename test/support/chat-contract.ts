@@ -5,7 +5,10 @@ import { afterAll, beforeAll, describe, test } from "vitest";
 export const CONTRACT_MODEL = "gpt-5.4-mini";
 
 /** Maximum number of requests in this suite that may start a model turn. */
-const MAX_MODEL_CALLS = 4;
+const MAX_MODEL_CALLS = 5;
+
+/** Maximum model turns allowed for the complete tool round trip. */
+const MAX_TOOL_MODEL_CALLS = 2;
 
 /** Maximum error text retained in assertion output. */
 const MAX_DIAGNOSTIC_LENGTH = 1_000;
@@ -135,17 +138,87 @@ export function registerChatContract(
       if (usage) assertUsage(usage);
     }, 130_000);
 
+    test("completes a client function-tool round trip", async () => {
+      const callsBefore = backend!.modelCalls();
+      const tools = [
+        {
+          type: "function",
+          function: {
+            name: "contract_lookup",
+            description: "Looks up the fixed live-contract test value.",
+            parameters: {
+              type: "object",
+              properties: { key: { type: "string" } },
+              required: ["key"],
+              additionalProperties: false,
+            },
+          },
+        },
+      ];
+      const first = await chat({
+        model: CONTRACT_MODEL,
+        messages: [
+          {
+            role: "user",
+            content:
+              "Call contract_lookup exactly once with key cedar. Do not answer without using the tool.",
+          },
+        ],
+        tools,
+      });
+      const firstRaw = await first.text();
+      assert.equal(first.status, 200, diagnostic(firstRaw));
+      const firstBody = JSON.parse(firstRaw) as ToolCompletion;
+      const assistant = firstBody.choices?.[0]?.message;
+      const call = assistant?.tool_calls?.[0];
+      assert.match(firstBody.id ?? "", /^chatcmpl_codex_/);
+      assert.equal(firstBody.choices?.[0]?.finish_reason, "tool_calls");
+      assert.equal(assistant?.role, "assistant");
+      assert.equal(assistant?.tool_calls?.length, 1);
+      assert.ok(call?.id);
+      assert.equal(call?.type, "function");
+      assert.equal(call?.function.name, "contract_lookup");
+      assert.deepEqual(JSON.parse(call?.function.arguments ?? ""), {
+        key: "cedar",
+      });
+
+      const second = await chat({
+        model: CONTRACT_MODEL,
+        messages: [
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: assistant!.tool_calls,
+          },
+          {
+            role: "tool",
+            tool_call_id: call!.id,
+            content:
+              "The lookup succeeded. Reply exactly with contract-tool-ok.",
+          },
+        ],
+        tools,
+      });
+      const secondRaw = await second.text();
+      assert.equal(second.status, 200, diagnostic(secondRaw));
+      const secondBody = JSON.parse(secondRaw) as ToolCompletion;
+      assert.equal(secondBody.choices?.[0]?.finish_reason, "stop");
+      assert.match(
+        secondBody.choices?.[0]?.message?.content ?? "",
+        /contract-tool-ok/i,
+      );
+      assert.ok(
+        backend!.modelCalls() - callsBefore <= MAX_TOOL_MODEL_CALLS,
+        `tool round trip exceeded ${MAX_TOOL_MODEL_CALLS} model calls`,
+      );
+    }, 130_000);
+
     test("rejects invalid requests before starting model work", async () => {
       const callsBefore = backend!.modelCalls();
       for (const body of [
         {
           model: CONTRACT_MODEL,
           messages: [{ role: "assistant", content: "not a user turn" }],
-        },
-        {
-          model: CONTRACT_MODEL,
-          messages: [{ role: "user", content: "x" }],
-          previous_response_id: "chatcmpl_old",
         },
         {
           model: CONTRACT_MODEL,
@@ -162,6 +235,20 @@ export function registerChatContract(
         const error = JSON.parse(raw) as { error?: { code?: string } };
         assert.equal(error.error?.code, "invalid_request");
       }
+      const unknown = await fetch(`${backend!.origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: CONTRACT_MODEL,
+          messages: [{ role: "user", content: "x" }],
+          previous_response_id: "chatcmpl_old",
+        }),
+      });
+      assert.equal(unknown.status, 404);
+      assert.equal(
+        ((await unknown.json()) as { error?: { code?: string } }).error?.code,
+        "unknown_previous_response_id",
+      );
       assert.equal(
         backend!.modelCalls(),
         callsBefore,
@@ -222,6 +309,23 @@ interface StreamChunk {
     finish_reason?: string | null;
   }>;
   usage?: Usage;
+}
+
+/** Aggregate response subset used by the shared function-tool scenario. */
+interface ToolCompletion {
+  id?: string;
+  choices?: Array<{
+    finish_reason?: string | null;
+    message?: {
+      role?: string;
+      content?: string | null;
+      tool_calls?: Array<{
+        id: string;
+        type: string;
+        function: { name: string; arguments: string };
+      }>;
+    };
+  }>;
 }
 
 /** Validates reported usage without estimating omitted counts. */

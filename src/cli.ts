@@ -14,6 +14,8 @@ Options:
   --root <directory>            Allowed working-directory root (default: launch directory)
   --codex-path <path>           Override the package-owned Codex executable
   --tool-timeout <duration>     Dynamic tool deadline (default: 5m)
+  --implicit-tool-continuation <true|false>
+                                Resolve tool results by tool_call_id (default: true)
   --request-timeout <duration>  HTTP request deadline (default: 30s)
   --shutdown-timeout <duration> Graceful shutdown deadline (default: 10s)
   --body-limit <bytes>          Maximum request body (default: 1048576)
