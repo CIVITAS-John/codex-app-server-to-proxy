@@ -12,9 +12,11 @@ test("transport correlates interleaved notifications and responses without jsonr
   const request = rpc.request("account/read", {});
   const [wire] = await once(output, "data");
   const id = (JSON.parse(String(wire)) as { id: number }).id;
+  // This transport-only test intentionally uses an unknown notification method.
   input.write(
     `${JSON.stringify({ method: "notice", params: { value: 1 } })}\n`,
   );
+  // This transport-only generic result deliberately does not model account/read.
   input.write(`${JSON.stringify({ id, result: { ok: true } })}\n`);
   assert.deepEqual(await notification, ["notice", { value: 1 }]);
   assert.deepEqual(await request, { ok: true });
@@ -45,6 +47,7 @@ test("transport immediately exposes server requests and supports cancellation", 
   const output = new PassThrough();
   const rpc = new JsonRpcTransport(input, output);
   const serverRequest = once(rpc, "request");
+  // Incomplete params deliberately prove transport dispatch is method-agnostic.
   input.write(
     `${JSON.stringify({ id: "server-1", method: "item/tool/requestUserInput", params: {} })}\n`,
   );
@@ -64,6 +67,7 @@ test("transport suppresses buffered server requests after logical close", async 
   });
 
   rpc.close();
+  // Incomplete params are intentional because logical close must suppress parsing.
   input.write(
     `${JSON.stringify({ id: 7, method: "item/tool/call", params: {} })}\n`,
   );

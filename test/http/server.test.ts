@@ -134,6 +134,51 @@ test("every route rejects missing, malformed, and non-loopback Host headers", as
   });
 });
 
+test("every route rejects browser Origin headers", async () => {
+  await withServer({}, async (origin) => {
+    for (const [path, init] of [
+      ["/health", {}],
+      ["/ready", {}],
+      ["/missing", {}],
+      [
+        "/v1/chat/completions",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        },
+      ],
+    ] as const) {
+      const headers = new Headers(init.headers);
+      headers.set("origin", "https://hostile.example");
+      const response = await fetch(`${origin}${path}`, { ...init, headers });
+      assert.equal(response.status, 403);
+      assert.equal(
+        ((await response.json()) as { error: { code: string } }).error.code,
+        "invalid_origin_header",
+      );
+    }
+  });
+});
+
+test("default request logs retain only the pathname", async () => {
+  const entries: Array<Record<string, unknown>> = [];
+  const proxy = createProxyServer(
+    await options({}),
+    createLogger("info", (entry) => entries.push(entry)),
+  );
+  const address = await proxy.listen();
+  const origin = `http://${address.address}:${address.port}`;
+  try {
+    await fetch(`${origin}/health?token=secret-value`);
+  } finally {
+    await proxy.close();
+  }
+  const request = entries.find((entry) => entry.event === "http_request");
+  assert.equal(request?.path, "/health");
+  assert.equal(JSON.stringify(entries).includes("secret-value"), false);
+});
+
 test("HTTP failures use OpenAI-shaped JSON and never leak warnings", async () => {
   await withServer({}, async (origin) => {
     const cases: Array<[Promise<Response>, number, string]> = [
@@ -218,7 +263,7 @@ test("an incomplete request receives the configured timeout error", async () => 
   });
 });
 
-test("a disconnected client releases request capacity", async () => {
+test("capacity rejects with overloaded and a disconnect releases it", async () => {
   await withServer({ maxRequests: 1 }, async (origin) => {
     const url = new URL(origin);
     const socket = net.connect(Number(url.port), url.hostname);
@@ -230,6 +275,12 @@ test("a disconnected client releases request capacity", async () => {
         "Content-Length: 2\r\n\r\n",
     );
     await new Promise((resolve) => setTimeout(resolve, 20));
+    const overloaded = await fetch(`${origin}/health`);
+    assert.equal(overloaded.status, 429);
+    assert.equal(
+      ((await overloaded.json()) as { error: { code: string } }).error.code,
+      "overloaded",
+    );
     socket.destroy();
     await once(socket, "close");
     const response = await fetch(`${origin}/health`);

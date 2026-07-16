@@ -10,7 +10,7 @@ Make the proxy predictable under hostile local input, protocol churn, and operat
     - `vitest.config.js` selects all offline `*.test.ts` files and excludes `*.live.test.ts`.
     - `vitest.live.config.js` selects only live tests and runs them serially with one worker.
     - The fake and real app-server backends share the Chat Completions contract in `test/support/chat-contract.ts`. Fault injection remains fake-only.
-    - `test/support/protocol-fixtures.ts` type-checks maintained notifications against the generated `ServerNotification` union and builds complete nested `Turn` values.
+    - `test/support/protocol-fixtures.ts` type-checks maintained client requests, client notifications, server requests, server notifications, and method-specific responses against generated structures and builds complete nested `Thread` and `Turn` values.
 2. The deterministic suites already cover the main implemented contract and many failure paths:
     - partial JSON-RPC frames, interleaved notifications and responses, malformed frames, overload errors, and transport closure;
     - streaming and aggregate Chat Completions output, exact usage when reported, dynamic tools, built-in Codex activity normalization, and continuation/restart behavior;
@@ -19,10 +19,12 @@ Make the proxy predictable under hostile local input, protocol churn, and operat
     - the full offline sandbox × web-search policy matrix, managed denials, canonical cwd enforcement, and fresh/resumed request forwarding.
 3. Structured event names and HTTP request IDs are implemented. Default-visible failure summaries redact configured paths, home paths, URLs, and token-like values; full error detail is intentionally available only at `debug` level.
 4. New continuation state directories and files request `0700` and `0600` modes, respectively. Persisted records contain identifiers, bindings, lifecycle state, and dynamic-tool call IDs, but not prompts, message bodies, tool arguments, or tool results.
-5. Generated protocol artifacts, synthetic exposed-event fixtures, the root README, the repository guide, and the protocol contract are checked in. Current tests pin metadata and fixture presence, but do not yet prove a clean regeneration or complete schema compatibility.
-6. The exact `@openai/codex 0.144.5` runtime dependency is the single Codex version source. Default startup and protocol generation resolve its declared executable, explicit overrides must report the same version, regeneration recreates both output trees, and `protocol/VERSION.json` records the package pin. This intentionally rejects older or newer Codex executables until their generated contract has been reviewed and checked in.
+5. Generated protocol artifacts, the generated-type-checked exposed-event corpus, the root README, the repository guide, and the protocol contract are checked in. Required CI regenerates both protocol trees and compares their complete file sets and contents with the reviewed baseline.
+6. The exact `@openai/codex 0.144.5` runtime dependency is the single Codex version source. Default startup and protocol generation resolve its declared JavaScript entry point and invoke it through the current Node.js runtime so the package-owned path works cross-platform. Explicit overrides are spawned directly without a shell and must be executable on the host while reporting the same version. Regeneration recreates both output trees, and `protocol/VERSION.json` records the package pin. This intentionally rejects older or newer Codex executables until their generated contract has been reviewed and checked in.
 
-## Remaining work
+## Implemented scope
+
+All implementation items below are now represented in the source tree and deterministic offline gate. The final local Node.js 20.19.1 verification passed 18 files and 130 tests with 80.76% statements, 79.72% branches, 84.42% functions, and 83.58% lines. The expanded five-call-normal/six-call-maximum live contract remains opt-in and was not executed as part of this implementation run.
 
 1. Add checked-in CI with two explicit modes.
     - Define a finite runtime support policy and align `engines`, the README, and CI. Exercise the minimum Node.js 20 line, every retained LTS line, and the current release on Linux; exercise the primary supported LTS on macOS and Windows. Deduplicate overlapping versions rather than creating an unbounded `20+` matrix.
@@ -76,6 +78,20 @@ Make the proxy predictable under hostile local input, protocol churn, and operat
 ## Decisions and stage boundary
 
 Vitest remains the sole runner for maintained automated suites. The default configuration is the required offline gate; the dedicated live configuration is a separately authorized compatibility smoke and never substitutes for deterministic fault coverage.
+
+The finite runtime policy is Node.js 20, 22, 24, and 26. Linux exercises every line, while macOS and Windows exercise the primary Node.js 24 LTS. Node.js 20 remains the minimum compatibility line despite its upstream end of life; future majors require an explicit policy and matrix update.
+
+Required property tests use deterministic seed `17072026` and bounded runs. Minimal regression values are checked in separately from generated protocol artifacts. Coverage measures maintained `src/` TypeScript only, excludes the executable shim, and publishes text, JSON summary, and LCOV output from the primary Linux Node.js 24 job. CI explicitly disables coverage on compatibility-matrix jobs; default local tests keep it enabled.
+
+The recorded Stage 07 offline baseline on Node.js 20.19.1 is 80.49% statements, 79.13% branches, 83.58% functions, and 83.30% lines across maintained source. Adopted global floors are 80% statements, 79% branches, 83% functions, and 83% lines. CLI subprocess tests do not contribute in-process V8 coverage, but `src/cli/cli.ts` remains included so that limitation cannot inflate the maintained-source result.
+
+The HTTP Origin policy is fail-closed: every request carrying `Origin` is rejected, including health routes. This complements exact loopback `Host` validation and the JSON-only Chat Completions media type; the proxy does not implement CORS.
+
+Continuation persistence remains schema version 0 until the format is released. `protocol/schemas/response-mapping.schema.json` now documents the actual wrapper and flattened records rather than the abandoned version-1 draft, so version 1 remains untrusted by design.
+
+Required CI seeds a temporary protocol root, regenerates there from the package-owned executable, compares the complete TypeScript tree, JSON Schema tree, and version metadata with the checked-in snapshot, and cleans up in a `finally` path. The cleanliness gate is non-destructive; only the explicit generation command writes checked-in artifacts. The typed exposed-event source must exactly match the JSONL compatibility corpus.
+
+The manual live workflow fails before installation when `CODEX_ACCESS_TOKEN` is absent and never echoes credentials. Headless live authentication suppresses device-code URLs and one-time codes, while local TTY runs preserve the interactive fallback.
 
 Codex built-in tools are observational, already-executed activity. Their function-shaped `tool_calls` and nonstandard direct `tool_results` remain distinct from client-defined dynamic tools, which alone suspend with `finish_reason: "tool_calls"` and require a later `role: "tool"` request.
 

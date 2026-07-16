@@ -1,0 +1,51 @@
+name: Offline CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    name: ${{ matrix.os }} / Node.js ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    env:
+      CODEX_TEST_COVERAGE: ${{ matrix.os == 'ubuntu-latest' && matrix.node == 24 && '1' || '0' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            node: 20
+          - os: ubuntu-latest
+            node: 22
+          - os: ubuntu-latest
+            node: 24
+          - os: ubuntu-latest
+            node: 26
+          - os: macos-latest
+            node: 24
+          - os: windows-latest
+            node: 24
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - name: Publish maintained-source coverage
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-coverage-node-24
+          path: coverage/
+          if-no-files-found: error
+          retention-days: 14

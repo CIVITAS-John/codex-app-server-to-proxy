@@ -6,7 +6,7 @@ The project is under active development. Text completions, streaming, function t
 
 ## Start the proxy
 
-Node.js 20 or newer is required. Until the package is published, run it from this repository:
+Supported Node.js lines are 20, 22, 24, and 26. Node.js 24 is the primary supported LTS; Node.js 20 remains a compatibility minimum even though upstream support has ended. New major lines are not assumed compatible until CI adds them. Until the package is published, run it from this repository:
 
 ```sh
 npm install
@@ -161,6 +161,8 @@ Approval policy is proxy-owned and non-interactive. The proxy prefers `never`, s
 
 Continuations must repeat the same effective `x_codex` settings. A change is rejected with `continuation_cwd_mismatch` or `continuation_policy_mismatch` before the thread is resumed.
 
+The machine-readable request-extension schema is [protocol/schemas/x-codex.schema.json](protocol/schemas/x-codex.schema.json). `previous_response_id` is a separate nonstandard continuation field; it is not nested below `x_codex`. Response `reasoning` and `tool_results` are also nonstandard direct compatibility fields rather than standard Chat Completions or response-side `x_codex` fields.
+
 > **Project trust side effect:** Starting a new thread with `workspace-write` and a `cwd` can cause app-server to mark that project as trusted in the user's `config.toml`. Set `--root` to the narrowest appropriate boundary; the proxy will not cause app-server to trust a directory outside it.
 
 > **State directory placement:** Under `workspace-write` the Codex agent can write anywhere in the effective `cwd`. The proxy therefore derives its continuation store from the canonical root and keeps it outside that root by default (under `~/.codex-openai-proxy`, namespaced per root). Startup fails if a broad root would contain the default store. Relative `--state-dir` values are resolved against the canonical root. Pointing `--state-dir` back inside the root explicitly lets a writable-sandbox turn modify the store, so keep it outside the root.
@@ -171,7 +173,9 @@ When app-server reports exact counts, the proxy returns standard `prompt_tokens`
 
 ## Safety and local operation
 
-The listener accepts only `127.0.0.1`, `::1`, or `localhost`; non-loopback hosts are rejected. There is no proxy bearer-token check, so any process running as your local user may be able to call it.
+The listener accepts only `127.0.0.1`, `::1`, or `localhost`; configuration normalizes `localhost` to `127.0.0.1`. Every route requires an exact `Host` authority of `localhost`, `127.0.0.1`, or `[::1]`, optionally followed by a valid port. Missing, malformed, non-loopback, DNS-alias, and rebinding-style authorities are rejected. Any request carrying an `Origin` header is rejected, including health requests. Chat Completions accepts only JSON POST bodies, so browser-simple form submissions fail closed.
+
+There is no proxy bearer-token check, so any process running as your local user may be able to call it. Continuation state is private to that user where the platform supports POSIX permissions. See the [security model](docs/security.md) for the threat model, audit boundary, and debug-logging policy.
 
 The launch directory is the default root for Codex work. Set a narrower boundary when needed:
 
@@ -181,8 +185,40 @@ npx codex-openai-proxy serve --root /absolute/path/to/project
 
 The proxy writes structured JSON logs to stderr. Default logs omit working directories and command details. `--log-level debug` is the opt-in diagnostic mode and may reveal the configured root or redacted app-server diagnostic context, so capture it carefully. Run `npx codex-openai-proxy --help` for all server, timeout, capacity, logging, state, and Codex executable options.
 
+## Limits and recovery
+
+The safe defaults are a 1 MiB JSON body, 100 concurrent HTTP requests, a 30-second request deadline, a five-minute suspended dynamic-tool deadline, and a 10-second graceful-shutdown deadline. Each is configurable through the CLI. A full HTTP request pool rejects new work with HTTP 429 `overloaded`; requests never enter an unbounded queue. A second request for an active Codex thread is rejected with HTTP 409 `thread_busy`.
+
+If app-server exits unexpectedly, `/ready` returns 503 while the proxy retries after bounded 1, 3, 5, and 10 second delays. Completed continuation records can survive a restart. Suspended client-defined tool calls cannot: shutdown or transport replacement fails their pending app-server requests and expires their mappings.
+
+## Known incompatibilities
+
+This proxy implements only the focused Chat Completions subset described above. In particular:
+
+- content is text-only; multimodal message parts are unsupported;
+- only one choice is produced, and harmless unsupported sampling/output fields are ignored with one warning;
+- `tool_choice` supports only `auto` and `none`;
+- response `reasoning` and `tool_results` require clients that tolerate nonstandard fields;
+- continuation is linear and bound to the original model, tools, canonical cwd, and effective policy; and
+- no endpoint other than health, readiness, and `POST /v1/chat/completions` is implemented.
+
+## Troubleshooting
+
+- If `/ready` returns 503, inspect the structured terminal logs for authentication, managed-policy, version, or bounded-restart failures.
+- If startup reports an address conflict, choose another loopback `--port` or stop the process already using it.
+- If a Codex override is rejected, use the package-owned executable or provide a host-executable override whose `codex --version` exactly matches the pinned protocol version.
+- If a policy request is denied, choose a value permitted by the loaded managed requirements; the proxy will not silently weaken or substitute policy.
+- Use `--log-level debug` only for temporary diagnosis. Debug output is a sensitive-data opt-in and should not be attached to issues without review.
+
+## Verification modes
+
+`npm ci && npm run check` is the deterministic offline gate. It regenerates the pinned protocol in a temporary tree for comparison, type-checks both Vitest configurations, and runs bounded property and compatibility tests. Required CI runs that gate on Node.js 20, 22, 24, and 26 on Linux and Node.js 24 on macOS and Windows. Coverage and its floors run only on the primary Linux Node.js 24 job and remain enabled by default for local `npm test`.
+
+`npm run test:live` is a separate opt-in compatibility check using the dedicated live configuration. It is serial, uses only `gpt-5.4-mini`, normally makes five model calls, and has a hard maximum of six. The manual online workflow additionally requires explicit environment authorization and a nonempty `CODEX_ACCESS_TOKEN`; headless execution never prints device-code URLs or codes. It is never a pull-request prerequisite.
+
 ## Project documentation
 
 - [Repository guide](docs/development.md) explains the source layout, development commands, tests, and generated protocol files.
+- [Security model](docs/security.md) records the local threat model and audit decisions.
 - [Implementation plan](plans/README.md) tracks product decisions, completed stages, and remaining work.
 - [App-server protocol reference](docs/codex-app-server.md) is the checked-in upstream protocol reference used during implementation.

@@ -52,6 +52,11 @@ export function createProxyServer(
   const server = createServer((request, response) => {
     const requestId = randomUUID();
     response.setHeader("x-request-id", requestId);
+    const authorityError = validateRequestAuthority(request);
+    if (authorityError) {
+      writeError(response, authorityError);
+      return;
+    }
     // Reject before allocating per-request resources when capacity is full.
     if (active >= options.maxRequests) {
       writeError(
@@ -78,23 +83,26 @@ export function createProxyServer(
     const finish = (): void => {
       if (finished) return;
       finished = true;
+      request.off("aborted", abortRequest);
       clearTimeout(timer);
       controllers.delete(controller);
       active -= 1;
       log("info", "http_request", {
         request_id: requestId,
         method: request.method,
-        path: request.url,
+        path: requestPathname(request.url),
         status: response.statusCode,
         duration_ms: Date.now() - started,
       });
     };
+    const abortRequest = (): void => {
+      controller.abort(new Error("client disconnected"));
+      finish();
+    };
+    request.once("aborted", abortRequest);
     response.once("finish", finish);
     response.once("close", () => {
-      if (!response.writableFinished) {
-        controller.abort(new Error("client disconnected"));
-        finish();
-      }
+      if (!response.writableFinished) abortRequest();
     });
     void route(
       request,
@@ -216,14 +224,6 @@ async function route(
   log: Logger,
   requestId: string,
 ): Promise<void> {
-  if (!isAllowedHost(request.headers.host))
-    throw new HttpError(
-      403,
-      "The Host header must identify a loopback address.",
-      "invalid_request_error",
-      "invalid_host_header",
-      "host",
-    );
   const url = new URL(request.url ?? "/", "http://loopback.invalid");
   if (request.method === "GET" && url.pathname === "/health") {
     writeJson(response, 200, { status: "ok" });
@@ -280,6 +280,41 @@ async function route(
     "not_found_error",
     "route_not_found",
   );
+}
+
+/** Rejects hostile authorities and every browser-originated request. */
+function validateRequestAuthority(
+  request: IncomingMessage,
+): HttpError | undefined {
+  if (!isAllowedHost(request.headers.host))
+    return new HttpError(
+      403,
+      "The Host header must identify a loopback address.",
+      "invalid_request_error",
+      "invalid_host_header",
+      "host",
+    );
+  // The proxy has no browser authentication surface. Rejecting Origin entirely
+  // keeps cross-origin and browser form traffic fail-closed, while ordinary CLI
+  // and server-side HTTP clients (which omit Origin) remain compatible.
+  if (request.headers.origin !== undefined)
+    return new HttpError(
+      403,
+      "Browser-originated requests are not accepted.",
+      "invalid_request_error",
+      "invalid_origin_header",
+      "origin",
+    );
+  return undefined;
+}
+
+/** Returns a query-free request target suitable for default-visible logs. */
+function requestPathname(target: string | undefined): string {
+  try {
+    return new URL(target ?? "/", "http://loopback.invalid").pathname;
+  } catch {
+    return "[invalid-path]";
+  }
 }
 
 /** Accepts only explicit loopback HTTP authorities with an optional valid port. */

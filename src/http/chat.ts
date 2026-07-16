@@ -1,6 +1,5 @@
-import { once } from "node:events";
 import type { ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { JsonRpcTransport } from "../app-server/json-rpc.js";
 import { HttpError, writeJson } from "./errors.js";
 import type { Logger } from "../core/logger.js";
@@ -45,7 +44,7 @@ type ParsedChatRequest = Omit<ChatRequest, "policy"> & {
 };
 
 /** Standard token usage, with details present only when app-server reports them. */
-interface Usage {
+export interface Usage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
@@ -54,13 +53,13 @@ interface Usage {
 }
 
 /** Function metadata shared by normalized calls and their correlated results. */
-interface NormalizedFunction {
+export interface NormalizedFunction {
   name: string;
   arguments: string;
 }
 
 /** One function-shaped call with its stable streaming index. */
-interface NormalizedToolCall {
+export interface NormalizedToolCall {
   index: number;
   id: string;
   type: "function";
@@ -68,7 +67,7 @@ interface NormalizedToolCall {
 }
 
 /** Bounded lifecycle data attached to one normalized tool result. */
-interface NormalizedToolResultData {
+export interface NormalizedToolResultData {
   status: string;
   content?: unknown;
   exit_code?: unknown;
@@ -80,7 +79,7 @@ interface NormalizedToolResultData {
 }
 
 /** One self-correlating result for a normalized function-shaped call. */
-interface NormalizedToolResult {
+export interface NormalizedToolResult {
   id: string;
   type: "function";
   function: NormalizedFunction;
@@ -88,7 +87,7 @@ interface NormalizedToolResult {
 }
 
 /** Public fields emitted by one normalized lifecycle event. */
-interface NormalizedDelta {
+export interface NormalizedDelta {
   content?: string;
   reasoning?: string;
   tool_calls?: NormalizedToolCall[];
@@ -96,7 +95,7 @@ interface NormalizedDelta {
 }
 
 /** Structured public subset of an app-server tool error. */
-interface NormalizedError {
+export interface NormalizedError {
   message?: string;
   code?: string;
 }
@@ -111,6 +110,33 @@ export interface NormalizedEvent {
 
 /** Maximum buffered app-server activity retained for one HTTP response. */
 const MAX_INGRESS_EVENTS = 1_024;
+
+/** Maximum approximate JSON bytes retained in one response's ingress queue. */
+const MAX_INGRESS_BYTES = 8 * 1024 * 1024;
+
+/** Maximum distinct unknown methods diagnosed for one HTTP request. */
+const MAX_UNKNOWN_METHODS = 32;
+
+/** Notification methods intentionally consumed or exposed by the proxy. */
+const KNOWN_NOTIFICATION_METHODS = new Set([
+  "error",
+  "item/agentMessage/delta",
+  "item/commandExecution/outputDelta",
+  "item/fileChange/outputDelta",
+  "item/fileChange/patchUpdated",
+  "item/mcpToolCall/progress",
+  "item/reasoning/summaryPartAdded",
+  "item/reasoning/summaryTextDelta",
+  "item/reasoning/textDelta",
+  "item/started",
+  "item/completed",
+  "serverRequest/resolved",
+  "thread/tokenUsage/updated",
+  "turn/completed",
+]);
+
+/** Unknown notification methods already diagnosed for each transport generation. */
+const DIAGNOSED_UNKNOWN_METHODS = new WeakMap<JsonRpcTransport, Set<string>>();
 
 /** One arrival-ordered app-server notification or dynamic tool request. */
 type IngressEvent =
@@ -133,6 +159,16 @@ export interface ChatHandlerOptions {
 interface ExecutionSession {
   events: AsyncGenerator<NormalizedEvent>;
   dispose(): Promise<void>;
+}
+
+/** Aggregate fields derived from the shared normalized event stream. */
+export interface AggregatedNormalizedEvents {
+  content: string;
+  reasoning: string;
+  toolCalls: NormalizedToolCall[];
+  toolResults: NormalizedToolResult[];
+  finishReason: string | null;
+  usage?: Usage;
 }
 
 /** Validates, executes, and serializes one Chat Completions request. */
@@ -246,43 +282,19 @@ export async function handleChatCompletion(
       return;
     }
 
-    let content = "";
-    let reasoning = "";
-    const toolCalls = new Map<number, NormalizedToolCall>();
-    const toolResults: NormalizedToolResult[] = [];
-    let finishReason: string | null = null;
-    let usage: Usage | undefined;
-    for await (const event of events) {
-      if (event.error)
-        throw new HttpError(
-          502,
-          event.error,
-          "server_error",
-          "app_server_error",
-        );
-      if (typeof event.delta?.content === "string")
-        content += event.delta.content;
-      if (typeof event.delta?.reasoning === "string")
-        reasoning += event.delta.reasoning;
-      for (const call of event.delta?.tool_calls ?? [])
-        toolCalls.set(call.index, call);
-      toolResults.push(...(event.delta?.tool_results ?? []));
-      if (event.finishReason) finishReason = event.finishReason;
-      if (event.usage) usage = event.usage;
-    }
+    const aggregated = await aggregateNormalizedEvents(events);
+    const { content, reasoning, toolResults, finishReason, usage } = aggregated;
     const message: Record<string, unknown> = {
       role: "assistant",
-      content: toolCalls.size && content === "" ? null : content,
+      content: aggregated.toolCalls.length && content === "" ? null : content,
     };
     if (reasoning) message.reasoning = reasoning;
-    if (toolCalls.size) {
-      message.tool_calls = [...toolCalls.entries()]
-        .sort(([a], [b]) => a - b)
-        .map(([, call]) => ({
-          id: call.id,
-          type: call.type,
-          function: call.function,
-        }));
+    if (aggregated.toolCalls.length) {
+      message.tool_calls = aggregated.toolCalls.map((call) => ({
+        id: call.id,
+        type: call.type,
+        function: call.function,
+      }));
     }
     if (toolResults.length) message.tool_results = toolResults;
     writeJson(response, 200, {
@@ -300,6 +312,41 @@ export async function handleChatCompletion(
   }
 }
 
+/** Aggregates normalized events for non-streaming output without HTTP state. */
+export async function aggregateNormalizedEvents(
+  events: AsyncIterable<NormalizedEvent> | Iterable<NormalizedEvent>,
+): Promise<AggregatedNormalizedEvents> {
+  let content = "";
+  let reasoning = "";
+  const toolCalls = new Map<number, NormalizedToolCall>();
+  const toolResults: NormalizedToolResult[] = [];
+  let finishReason: string | null = null;
+  let usage: Usage | undefined;
+  for await (const event of events) {
+    if (event.error)
+      throw new HttpError(502, event.error, "server_error", "app_server_error");
+    if (typeof event.delta?.content === "string")
+      content += event.delta.content;
+    if (typeof event.delta?.reasoning === "string")
+      reasoning += event.delta.reasoning;
+    for (const call of event.delta?.tool_calls ?? [])
+      toolCalls.set(call.index, call);
+    toolResults.push(...(event.delta?.tool_results ?? []));
+    if (event.finishReason) finishReason = event.finishReason;
+    if (event.usage) usage = event.usage;
+  }
+  return {
+    content,
+    reasoning,
+    toolCalls: [...toolCalls.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([, call]) => call),
+    toolResults,
+    finishReason,
+    ...(usage ? { usage } : {}),
+  };
+}
+
 /** Runs or resumes a Codex thread and yields its normalized event stream. */
 async function execute(
   request: ChatRequest,
@@ -307,24 +354,40 @@ async function execute(
   responseId: string,
 ): Promise<ExecutionSession> {
   const ingress: IngressEvent[] = [];
+  let ingressBytes = 0;
   let wake: (() => void) | undefined;
   let transportError: Error | undefined;
   let queueError: Error | undefined;
+  let threadId: string | undefined;
+  let turnId: string | undefined;
   const enqueue = (event: IngressEvent): void => {
     if (queueError) {
       if (event.type === "dynamic_tool") rejectDynamicCall(options, event.call);
       return;
     }
-    if (ingress.length >= MAX_INGRESS_EVENTS) {
+    const eventBytes = approximateJsonBytes(event);
+    if (
+      ingress.length >= MAX_INGRESS_EVENTS ||
+      ingressBytes + eventBytes > MAX_INGRESS_BYTES
+    ) {
       queueError = new Error("App-server activity queue overflowed.");
       if (event.type === "dynamic_tool") rejectDynamicCall(options, event.call);
       wake?.();
       return;
     }
     ingress.push(event);
+    ingressBytes += eventBytes;
     wake?.();
   };
   const onNotification = (method: string, params: unknown): void => {
+    if (!KNOWN_NOTIFICATION_METHODS.has(method)) {
+      diagnoseUnknownNotification(method, params, options.rpc, options.log);
+      return;
+    }
+    // Notifications can arrive while thread/start or turn/start is still
+    // resolving. Once both identifiers are established, discard unrelated work
+    // before it consumes this request's bounded ingress budget.
+    if (isEstablishedUnrelatedNotification(params, threadId, turnId)) return;
     const item = record(record(params)?.item);
     if (
       (method === "item/started" || method === "item/completed") &&
@@ -345,8 +408,6 @@ async function execute(
   };
   options.rpc.on("notification", onNotification);
   options.rpc.once("close", onClose);
-  let threadId: string | undefined;
-  let turnId: string | undefined;
   let terminal = false;
   let suspended = false;
   let disposed = false;
@@ -588,6 +649,7 @@ async function execute(
             await new Promise<void>((resolve) => setImmediate(resolve));
             if (queueError) throw queueError;
             const captured = ingress.splice(0);
+            ingressBytes = 0;
             const calls = captured
               .filter(
                 (
@@ -637,6 +699,7 @@ async function execute(
             continue;
           }
           const next = ingress.shift();
+          if (next) ingressBytes -= approximateJsonBytes(next);
           if (!next) continue;
           if (next.type === "dynamic_tool") continue;
           if (!matchesTurn(next.params, threadId, turnId)) continue;
@@ -810,7 +873,11 @@ export class EventNormalizer {
         ),
       ];
     }
-    if (method.startsWith("item/") && method !== "item/agentMessage/delta")
+    if (
+      KNOWN_NOTIFICATION_METHODS.has(method) &&
+      method.startsWith("item/") &&
+      method !== "item/agentMessage/delta"
+    )
       return [this.#internalProgress(method, params)];
     return [];
   }
@@ -1311,13 +1378,90 @@ async function writeFrame(
 ): Promise<void> {
   if (response.destroyed || response.writableEnded)
     throw new Error("The HTTP response closed before the SSE frame was sent.");
-  if (!response.write(`data: ${data}\n\n`)) {
-    // close may have fired synchronously during write, before once() attaches.
+  if (!response.write(serializeSseFrame(data))) {
+    // close may have fired synchronously during write, before listeners attach.
     if (response.destroyed || response.writableEnded)
       throw new Error("The HTTP response closed while sending an SSE frame.");
-    await Promise.race([once(response, "drain"), once(response, "close")]);
+    await new Promise<void>((resolve) => {
+      const cleanup = (): void => {
+        response.off("drain", onDrain);
+        response.off("close", onClose);
+      };
+      const onDrain = (): void => {
+        cleanup();
+        resolve();
+      };
+      const onClose = (): void => {
+        cleanup();
+        resolve();
+      };
+      response.once("drain", onDrain);
+      response.once("close", onClose);
+    });
     if (response.destroyed && !response.writableFinished)
       throw new Error("The HTTP response closed while sending an SSE frame.");
+  }
+}
+
+/** Serializes one SSE data frame without performing I/O. */
+export function serializeSseFrame(data: string): string {
+  return `data: ${data}\n\n`;
+}
+
+/** Records safe structural metadata once per unknown method and transport. */
+function diagnoseUnknownNotification(
+  method: string,
+  params: unknown,
+  rpc: JsonRpcTransport,
+  log: Logger,
+): void {
+  let diagnosed = DIAGNOSED_UNKNOWN_METHODS.get(rpc);
+  if (!diagnosed) {
+    diagnosed = new Set<string>();
+    DIAGNOSED_UNKNOWN_METHODS.set(rpc, diagnosed);
+  }
+  if (KNOWN_NOTIFICATION_METHODS.has(method) || diagnosed.has(method)) return;
+  if (diagnosed.size >= MAX_UNKNOWN_METHODS) return;
+  diagnosed.add(method);
+  const value = record(params);
+  const keys = value ? Object.keys(value) : [];
+  log("debug", "unknown_app_server_event", {
+    method_fingerprint: diagnosticFingerprint(method),
+    params_type: Array.isArray(params)
+      ? "array"
+      : params === null
+        ? "null"
+        : typeof params,
+    field_count: keys.length,
+    field_fingerprints: keys.slice(0, 32).map(diagnosticFingerprint).sort(),
+  });
+}
+
+/** Hashes an untrusted diagnostic name without retaining its sensitive value. */
+function diagnosticFingerprint(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 16);
+}
+
+/** Rejects notifications that do not exactly match established correlation IDs. */
+function isEstablishedUnrelatedNotification(
+  value: unknown,
+  threadId: string | undefined,
+  turnId: string | undefined,
+): boolean {
+  const params = record(value);
+  if (!params) return threadId !== undefined || turnId !== undefined;
+  if (threadId && params.threadId !== threadId) return true;
+  const notificationTurnId =
+    typeof params.turnId === "string" ? params.turnId : record(params.turn)?.id;
+  return Boolean(turnId && notificationTurnId !== turnId);
+}
+
+/** Estimates retained ingress size using its JSON representation. */
+function approximateJsonBytes(value: unknown): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(value) ?? "null");
+  } catch {
+    return MAX_INGRESS_BYTES + 1;
   }
 }
 

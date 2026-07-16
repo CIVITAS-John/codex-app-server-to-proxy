@@ -1,5 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
@@ -88,6 +97,37 @@ test("a corrupt store is recovered as empty without inventing mappings", async (
   assert.equal(new ResponseStore(directory).get("missing"), undefined);
 });
 
+test("state loading rejects schema-invalid record details", async () => {
+  const valid = {
+    responseId: "response_valid",
+    threadId: "thread_valid",
+    state: "ready",
+    ...binding,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + 60_000,
+  };
+  const invalidRecords = [
+    { ...valid, unexpected: true },
+    { ...valid, callIds: ["duplicate", "duplicate"] },
+    { ...valid, toolsHash: "A".repeat(64) },
+    { ...valid, policyHash: "f".repeat(63) },
+    { ...valid, responseId: "" },
+  ];
+  for (const [index, invalid] of invalidRecords.entries()) {
+    const directory = await mkdtemp(
+      join(tmpdir(), `codex-proxy-invalid-record-${index}-`),
+    );
+    await writeFile(
+      join(directory, "continuations.json"),
+      JSON.stringify({ version: 0, records: [invalid] }),
+    );
+    assert.equal(
+      new ResponseStore(directory).get(String(invalid.responseId)),
+      undefined,
+    );
+  }
+});
+
 test("leftover atomic-write temporary files cannot replace valid records", async () => {
   const directory = await mkdtemp(join(tmpdir(), "codex-proxy-state-"));
   const store = new ResponseStore(directory);
@@ -107,14 +147,14 @@ test("leftover atomic-write temporary files cannot replace valid records", async
 
 test("a failed atomic write preserves disk and rolls back in-memory records", async () => {
   const directory = await mkdtemp(join(tmpdir(), "codex-proxy-state-"));
-  const store = new ResponseStore(directory);
+  const temporary = join(directory, "forced-temporary");
+  const store = new ResponseStore(directory, undefined, () => temporary);
   store.put({
     responseId: "response_1",
     threadId: "thread_1",
     state: "ready",
     ...binding,
   });
-  const temporary = join(directory, `continuations.json.${process.pid}.tmp`);
   await mkdir(temporary);
 
   assert.throws(() =>
@@ -127,8 +167,58 @@ test("a failed atomic write preserves disk and rolls back in-memory records", as
   );
   assert.equal(store.get("response_1")?.state, "ready");
   assert.equal(store.get("response_2"), undefined);
-  assert.equal(new ResponseStore(directory).get("response_1")?.state, "ready");
   await rm(temporary, { recursive: true });
+  assert.equal(new ResponseStore(directory).get("response_1")?.state, "ready");
+});
+
+test("pre-existing state paths are tightened on POSIX platforms", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-proxy-state-mode-"));
+  const path = join(directory, "continuations.json");
+  await writeFile(path, "not json", { mode: 0o666 });
+  if (process.platform !== "win32") {
+    await chmod(directory, 0o777);
+    await chmod(path, 0o666);
+  }
+
+  new ResponseStore(directory);
+
+  if (process.platform !== "win32") {
+    assert.equal((await stat(directory)).mode & 0o777, 0o700);
+    assert.equal((await stat(path)).mode & 0o777, 0o600);
+  }
+});
+
+test.skipIf(process.platform === "win32")(
+  "state paths reject symlinks",
+  async () => {
+    const parent = await mkdtemp(join(tmpdir(), "codex-proxy-state-path-"));
+    const target = join(parent, "target");
+    const linkedDirectory = join(parent, "linked");
+    await mkdir(target);
+    await symlink(target, linkedDirectory, "dir");
+    assert.throws(
+      () => new ResponseStore(linkedDirectory),
+      /regular directory/,
+    );
+
+    const fileDirectory = join(parent, "file-state");
+    await mkdir(fileDirectory);
+    const targetFile = join(parent, "target.json");
+    await writeFile(targetFile, "{}");
+    await symlink(
+      targetFile,
+      join(fileDirectory, "continuations.json"),
+      "file",
+    );
+    assert.throws(() => new ResponseStore(fileDirectory), /regular file/);
+  },
+);
+
+test("state directories must be directories", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "codex-proxy-state-path-"));
+  const notDirectory = join(parent, "not-directory");
+  await writeFile(notDirectory, "x");
+  assert.throws(() => new ResponseStore(notDirectory));
 });
 
 test("pending tool_call_id values implicitly select exactly one response", async () => {

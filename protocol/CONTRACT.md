@@ -36,8 +36,8 @@ This contract targets `codex-cli 0.144.5`, pinned by the exact `@openai/codex` r
 | `serverRequest/resolved` | Remove/cancel matching pending dynamic call. Duplicate client results are rejected. |
 | account read/login events | `account/read` detects auth. `account/login/start` with ChatGPT opens the returned URL when possible; one interactive-terminal fallback may print it, but logs/state never retain it. |
 
-Unknown app-server events are retained only in redacted diagnostics and are not exposed over HTTP.
-`protocol/fixtures/exposed-events.json` is the authoritative manifest of event types claimed for HTTP exposure; each entry must have exactly one synthetic JSONL fixture.
+Unknown app-server events are retained only as bounded, redacted debug diagnostics and are not exposed over HTTP. Diagnostics are capped per request and repeated unknown methods are recorded once.
+`protocol/fixtures/exposed-events.json` is the authoritative manifest of event types claimed for HTTP exposure; each entry must have exactly one synthetic JSONL fixture. `protocol/fixtures/exposed-events.ts` is the generated-protocol-typed source for that JSONL corpus, including complete nested `Turn` values and server-request parameters.
 
 ## SSE mapping
 
@@ -53,12 +53,12 @@ The nonstandard direct compatibility result shape is:
 
 Errors use `{"error":{"message":"...","type":"invalid_request_error|conflict_error|server_error","param":"field or null","code":"stable_code"}}`. `protocol/fixtures/continuation-cases.json` freezes the continuation statuses and codes. A rejection is read-only: it must not mutate the mapping, invoke `turn/start`, or invoke `thread/start`.
 
-Response IDs are `chatcmpl_codex_` plus at least 128 bits of URL-safe cryptographic randomness. Version 1 mappings follow `schemas/response-mapping.schema.json`. The newest completed response ID is stored per thread; any older ID is superseded and branching is rejected. `thread/fork(lastTurnId)` remains unproven and is not a v1 feature.
+Response IDs are `chatcmpl_codex_` plus at least 128 bits of URL-safe cryptographic randomness. The unreleased schema-version-0 store follows `schemas/response-mapping.schema.json`: it contains a wrapper version and flattened response records with thread bindings, lifecycle state, creation/expiry times, and optional dynamic-tool call IDs. The newest completed response ID is stored per thread; any older ID is superseded and branching is rejected. `thread/fork(lastTurnId)` remains unproven and is not a v1 feature.
 
 Continuation requires exact model, canonical tool set, canonical cwd, and effective-policy fingerprints. Effective policy includes sandbox, web-search mode, approval policy, and approval reviewer. The proxy reapplies matching settings on resume and turn start rather than relying on sticky thread state. This includes completed-thread continuation: changing the tool set cannot be represented by the pinned app-server protocol, so the proxy returns `continuation_tools_mismatch` instead of starting a replacement thread. A pending tool call is process-local, defaults to a five-minute deadline, and is registered before the originating HTTP response ends. Timeout answers the app-server request with failure and marks the mapping expired. One store instance remains authoritative for the server lifetime. Transport replacement and shutdown dispose the old coordinator generation, cancel its timers, reject suspended responders, expire pending mappings, reject callbacks until close, and close the old transport; buffered post-close frames are ignored and stale executions cannot record completed responses.
 
 A tool-ending continuation is valid only against a pending-tool mapping. A ready mapping has no pending call to receive that result and returns HTTP 409 `tool_results_without_pending_call` without resuming or starting a turn.
 
-## Unproven live behavior
+## Live compatibility boundary
 
-The offline contract does not claim the following as live-verified: browser launch fallback, the actual pending-request lifetime, per-thread web-search behavior, `thread/fork` fidelity, or executable npm ownership. Stage 06 deterministically verifies that every accepted web-search mode is forwarded through the pinned protocol's per-thread `config.web_search` field and never mutates shared configuration; no live model calls were made for that stage. Branching remains unsupported.
+The opt-in Stage 07 live contract verifies role-history SSE, one client-defined dynamic-tool round trip, restart continuation, one explicit read-only/disabled-web policy tuple, bounded built-in tool observation, and continuation after that information. It does not claim that one live tuple validates every sandbox or web-search mode. Exact policy mapping and denials remain deterministic offline coverage. Browser launch fallback, the actual pending-request lifetime, and `thread/fork` fidelity remain unproven; branching remains unsupported.

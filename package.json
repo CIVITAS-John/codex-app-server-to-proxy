@@ -14,7 +14,8 @@
   ],
   "scripts": {
     "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json",
-    "check": "npm run format:check && npm run lint && npm run build && npm test",
+    "check": "npm run format:check && npm run lint && npm run check:protocol && npm test",
+    "check:protocol": "node scripts/check-protocol-clean.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "generate:protocol": "node scripts/generate-protocol.mjs",
@@ -24,21 +25,22 @@
     "start": "npm run build && npm run serve",
     "test": "npm run build --silent && npm run test:typecheck --silent && vitest run",
     "test:live": "npm run build --silent && npm run test:typecheck --silent && vitest run --config vitest.live.config.js",
-    "test:live:hello": "npm run test:live",
     "test:typecheck": "tsc -p tsconfig.test.json",
     "spike:offline": "node scripts/offline-spike.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",
     "@types/node": "^20.19.43",
+    "@vitest/coverage-v8": "^4.1.10",
     "eslint": "^9.0.0",
+    "fast-check": "^4.9.0",
     "prettier": "^3.0.0",
     "typescript": "^5.0.0",
     "typescript-eslint": "^8.0.0",
     "vitest": "^4.1.10"
   },
   "engines": {
-    "node": ">=20"
+    "node": "20.x || 22.x || 24.x || 26.x"
   },
   "dependencies": {
     "@openai/codex": "0.144.5"

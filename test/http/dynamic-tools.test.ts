@@ -14,6 +14,11 @@ import { createLogger } from "../../src/core/logger.js";
 import { createProxyServer, type ProxyServer } from "../../src/http/server.js";
 import {
   protocolNotification,
+  protocolResponse,
+  protocolServerRequest,
+  protocolThread,
+  protocolThreadResumeResponse,
+  protocolThreadStartResponse,
   protocolTurn,
 } from "../support/protocol-fixtures.js";
 import { UNRESTRICTED_POLICY_REQUIREMENTS } from "../../src/core/policy.js";
@@ -81,22 +86,45 @@ class ToolAppServer {
       this.methods.push(message.method);
       const id = message.id as number;
       if (message.method === "thread/start")
-        this.#send({ id, result: { thread: { id: this.#thread } } });
-      else if (message.method === "thread/read")
-        this.#send({
-          id,
-          result: { thread: { id: this.#thread, status: { type: "idle" } } },
-        });
-      else if (message.method === "thread/resume")
         this.#send(
-          this.failResume
-            ? { id, error: { code: -32000, message: "thread changed" } }
-            : { id, result: { thread: { id: this.resumedThreadId } } },
+          protocolResponse(
+            "thread/start",
+            id,
+            protocolThreadStartResponse(protocolThread(this.#thread)),
+          ),
         );
-      else if (message.method === "turn/start") {
+      else if (message.method === "thread/read")
+        this.#send(
+          protocolResponse("thread/read", id, {
+            thread: protocolThread(this.#thread),
+          }),
+        );
+      else if (message.method === "thread/resume") {
+        if (this.failResume) {
+          // JSON-RPC failures intentionally have no generated success type.
+          this.#send({
+            id,
+            error: { code: -32000, message: "thread changed" },
+          });
+        } else {
+          this.#send(
+            protocolResponse(
+              "thread/resume",
+              id,
+              protocolThreadResumeResponse(
+                protocolThread(this.resumedThreadId),
+              ),
+            ),
+          );
+        }
+      } else if (message.method === "turn/start") {
         this.#turn += 1;
         const turnId = `turn_${this.#turn}`;
-        this.#send({ id, result: { turn: { id: turnId } } });
+        this.#send(
+          protocolResponse("turn/start", id, {
+            turn: protocolTurn(turnId, "inProgress"),
+          }),
+        );
         if (this.toolsOnFirstTurn && this.#turn === 1) {
           this.#send(
             protocolNotification({
@@ -110,30 +138,34 @@ class ToolAppServer {
             }),
           );
           // Deliberately issue call_b first; the proxy must preserve arrival order.
-          this.#send({
-            id: 902,
-            method: "item/tool/call",
-            params: {
-              threadId: this.#thread,
-              turnId,
-              callId: "call_b",
-              tool: "second",
-              namespace: null,
-              arguments: { fragment: "b" },
-            },
-          });
-          this.#send({
-            id: 901,
-            method: "item/tool/call",
-            params: {
-              threadId: this.#thread,
-              turnId,
-              callId: "call_a",
-              tool: "first",
-              namespace: null,
-              arguments: { fragment: "a" },
-            },
-          });
+          this.#send(
+            protocolServerRequest({
+              id: 902,
+              method: "item/tool/call",
+              params: {
+                threadId: this.#thread,
+                turnId,
+                callId: "call_b",
+                tool: "second",
+                namespace: null,
+                arguments: { fragment: "b" },
+              },
+            }),
+          );
+          this.#send(
+            protocolServerRequest({
+              id: 901,
+              method: "item/tool/call",
+              params: {
+                threadId: this.#thread,
+                turnId,
+                callId: "call_a",
+                tool: "first",
+                namespace: null,
+                arguments: { fragment: "a" },
+              },
+            }),
+          );
         } else this.#complete(turnId, "continued");
       }
       return;

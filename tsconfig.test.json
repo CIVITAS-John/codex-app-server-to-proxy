@@ -13,6 +13,8 @@
     "test/**/*.ts",
     "scripts/**/*.mjs",
     "eslint.config.js",
-    "vitest.config.js"
+    "vitest.config.js",
+    "vitest.live.config.js",
+    "protocol/fixtures/**/*.ts"
   ]
 }

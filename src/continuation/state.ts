@@ -1,4 +1,13 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import type {
   JsonRpcTransport,
@@ -42,9 +51,14 @@ export class ResponseStore {
   constructor(
     directory: string,
     private readonly retentionMs = 30 * 24 * 60 * 60_000,
+    private readonly temporaryPath: (
+      statePath: string,
+    ) => string = defaultTemporaryPath,
   ) {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
+    hardenStatePath(directory, "directory");
     this.#path = join(directory, "continuations.json");
+    hardenExistingStateFile(this.#path);
     this.#load();
   }
 
@@ -145,19 +159,29 @@ export class ResponseStore {
 
   /** Replaces the state file atomically so abrupt termination preserves the old file. */
   #save(): void {
-    const temporary = `${this.#path}.${process.pid}.tmp`;
-    writeFileSync(
-      temporary,
-      JSON.stringify({
-        version: SCHEMA_VERSION,
-        records: [...this.#records.values()],
-      }),
-      {
-        encoding: "utf8",
-        mode: 0o600,
-      },
-    );
-    renameSync(temporary, this.#path);
+    const temporary = this.temporaryPath(this.#path);
+    try {
+      writeFileSync(
+        temporary,
+        JSON.stringify({
+          version: SCHEMA_VERSION,
+          records: [...this.#records.values()],
+        }),
+        {
+          encoding: "utf8",
+          mode: 0o600,
+          flag: "wx",
+        },
+      );
+      renameSync(temporary, this.#path);
+    } catch (error) {
+      try {
+        unlinkSync(temporary);
+      } catch {
+        // The write may have failed before creating its private temporary file.
+      }
+      throw error;
+    }
   }
 
   /** Commits a mutation durably or restores the exact prior in-memory view. */
@@ -173,6 +197,42 @@ export class ResponseStore {
       for (const [id, record] of snapshot) this.#records.set(id, record);
       throw error;
     }
+  }
+}
+
+/** Creates an unpredictable same-directory path for one atomic state write. */
+function defaultTemporaryPath(statePath: string): string {
+  return `${statePath}.${process.pid}.${randomUUID()}.tmp`;
+}
+
+/** Tightens and validates the state directory on platforms with POSIX modes. */
+function hardenStatePath(path: string, kind: "directory" | "file"): void {
+  const before = lstatSync(path);
+  if (
+    before.isSymbolicLink() ||
+    (kind === "directory" ? !before.isDirectory() : !before.isFile())
+  )
+    throw new Error(`Continuation state ${kind} must be a regular ${kind}.`);
+  if (process.platform === "win32") return;
+  chmodSync(path, kind === "directory" ? 0o700 : 0o600);
+  const after = lstatSync(path);
+  const unsafe = kind === "directory" ? 0o077 : 0o177;
+  if ((after.mode & unsafe) !== 0)
+    throw new Error(`Continuation state ${kind} permissions are too broad.`);
+}
+
+/** Secures an existing state file without creating an empty replacement. */
+function hardenExistingStateFile(path: string): void {
+  try {
+    hardenStatePath(path, "file");
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    )
+      return;
+    throw error;
   }
 }
 
@@ -433,6 +493,18 @@ export class ContinuationCoordinator {
 function isResponseRecord(value: unknown): value is ResponseRecord {
   const record = asRecord(value);
   if (!record) return false;
+  const allowedKeys = new Set([
+    "responseId",
+    "threadId",
+    "state",
+    "model",
+    "cwd",
+    "toolsHash",
+    "policyHash",
+    "createdAt",
+    "expiresAt",
+    "callIds",
+  ]);
   const validStates = new Set([
     "ready",
     "pending_tool",
@@ -440,22 +512,31 @@ function isResponseRecord(value: unknown): value is ResponseRecord {
     "superseded",
     "corrupt",
   ]);
+  const validHash = (hash: unknown): hash is string =>
+    typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash);
+  const callIds = record.callIds;
   return (
+    Object.keys(record).every((key) => allowedKeys.has(key)) &&
     typeof record.responseId === "string" &&
+    record.responseId.length > 0 &&
     typeof record.threadId === "string" &&
+    record.threadId.length > 0 &&
     typeof record.model === "string" &&
+    record.model.length > 0 &&
     typeof record.cwd === "string" &&
-    typeof record.toolsHash === "string" &&
-    typeof record.policyHash === "string" &&
+    record.cwd.length > 0 &&
+    validHash(record.toolsHash) &&
+    validHash(record.policyHash) &&
     typeof record.state === "string" &&
     validStates.has(record.state) &&
     typeof record.createdAt === "number" &&
     Number.isFinite(record.createdAt) &&
     typeof record.expiresAt === "number" &&
     Number.isFinite(record.expiresAt) &&
-    (record.callIds === undefined ||
-      (Array.isArray(record.callIds) &&
-        record.callIds.every((id) => typeof id === "string")))
+    (callIds === undefined ||
+      (Array.isArray(callIds) &&
+        callIds.every((id) => typeof id === "string") &&
+        new Set(callIds).size === callIds.length))
   );
 }
 

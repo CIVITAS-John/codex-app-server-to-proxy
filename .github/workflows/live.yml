@@ -1,0 +1,38 @@
+name: Authorized live compatibility
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-live-compatibility
+  cancel-in-progress: false
+
+jobs:
+  live:
+    name: Serial gpt-5.4-mini compatibility
+    runs-on: ubuntu-latest
+    environment: codex-live-tests
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Require authorized live credentials
+        shell: bash
+        env:
+          CODEX_ACCESS_TOKEN: ${{ secrets.CODEX_ACCESS_TOKEN }}
+        run: |
+          if [ -z "${CODEX_ACCESS_TOKEN:-}" ]; then
+            echo "::error::CODEX_ACCESS_TOKEN is required for the authorized live workflow."
+            exit 1
+          fi
+      - run: npm ci
+      - name: Run explicitly selected live configuration
+        run: npm run test:live
+        env:
+          CODEX_ACCESS_TOKEN: ${{ secrets.CODEX_ACCESS_TOKEN }}

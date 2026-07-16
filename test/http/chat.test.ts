@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import http from "node:http";
+import { once } from "node:events";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
@@ -15,6 +17,11 @@ import {
 import { createProxyServer } from "../../src/http/server.js";
 import {
   protocolNotification,
+  protocolResponse,
+  protocolServerRequest,
+  protocolThread,
+  protocolThreadResumeResponse,
+  protocolThreadStartResponse,
   protocolTurn,
 } from "../support/protocol-fixtures.js";
 import { UNRESTRICTED_POLICY_REQUIREMENTS } from "../../src/core/policy.js";
@@ -46,24 +53,36 @@ function fakeAppServer(
     };
     if (message.method === "thread/start") {
       thread = "thr_test";
-      send({ id: message.id, result: { thread: { id: thread } } });
+      send(
+        protocolResponse(
+          "thread/start",
+          message.id,
+          protocolThreadStartResponse(protocolThread(thread)),
+        ),
+      );
     } else if (message.method === "thread/inject_items") {
-      send({ id: message.id, result: {} });
+      send(protocolResponse("thread/inject_items", message.id, {}));
     } else if (message.method === "turn/start") {
-      send({ id: message.id, result: { turn: { id: "turn_test" } } });
+      send(
+        protocolResponse("turn/start", message.id, {
+          turn: protocolTurn("turn_test", "inProgress"),
+        }),
+      );
       if (requestTool) {
-        send({
-          id: 8_001,
-          method: "item/tool/call",
-          params: {
-            threadId: thread,
-            turnId: "turn_test",
-            callId: "call_lookup",
-            tool: "lookup",
-            namespace: null,
-            arguments: { key: "value" },
-          },
-        });
+        send(
+          protocolServerRequest({
+            id: 8_001,
+            method: "item/tool/call",
+            params: {
+              threadId: thread,
+              turnId: "turn_test",
+              callId: "call_lookup",
+              tool: "lookup",
+              namespace: null,
+              arguments: { key: "value" },
+            },
+          }),
+        );
         return;
       }
       send(
@@ -116,7 +135,7 @@ function fakeAppServer(
       }
     } else if (message.method === "turn/interrupt") {
       onInterrupt();
-      send({ id: message.id, result: {} });
+      send(protocolResponse("turn/interrupt", message.id, {}));
     }
   });
   return rpc;
@@ -140,18 +159,33 @@ function policyCapturingAppServer(): {
     messages.push(message);
     const id = message.id as number;
     if (message.method === "thread/start")
-      send({ id, result: { thread: { id: "thr_policy" } } });
+      send(
+        protocolResponse(
+          "thread/start",
+          id,
+          protocolThreadStartResponse(protocolThread("thr_policy")),
+        ),
+      );
     else if (message.method === "thread/read")
-      send({
-        id,
-        result: {
-          thread: { id: "thr_policy", status: { type: "idle" } },
-        },
-      });
+      send(
+        protocolResponse("thread/read", id, {
+          thread: protocolThread("thr_policy"),
+        }),
+      );
     else if (message.method === "thread/resume")
-      send({ id, result: { thread: { id: "thr_policy" } } });
+      send(
+        protocolResponse(
+          "thread/resume",
+          id,
+          protocolThreadResumeResponse(protocolThread("thr_policy")),
+        ),
+      );
     else if (message.method === "turn/start") {
-      send({ id, result: { turn: { id: "turn_policy" } } });
+      send(
+        protocolResponse("turn/start", id, {
+          turn: protocolTurn("turn_policy", "inProgress"),
+        }),
+      );
       send(
         protocolNotification({
           method: "turn/completed",
@@ -187,25 +221,37 @@ function failingIngressAppServer(mode: "overflow" | "mismatch" | "suspend"): {
       error?: unknown;
     };
     if (message.method === "thread/start")
-      send({ id: message.id, result: { thread: { id: "thr_overflow" } } });
+      send(
+        protocolResponse(
+          "thread/start",
+          message.id,
+          protocolThreadStartResponse(protocolThread("thr_overflow")),
+        ),
+      );
     else if (message.method === "turn/start") {
-      send({ id: message.id, result: { turn: { id: "turn_overflow" } } });
+      send(
+        protocolResponse("turn/start", message.id, {
+          turn: protocolTurn("turn_overflow", "inProgress"),
+        }),
+      );
       for (const id of [7001, 7002])
-        send({
-          id,
-          method: "item/tool/call",
-          params: {
-            threadId: "thr_overflow",
-            turnId:
-              mode === "mismatch" && id === 7002
-                ? "foreign_turn"
-                : "turn_overflow",
-            callId: `call_${id}`,
-            tool: "lookup",
-            namespace: null,
-            arguments: { id },
-          },
-        });
+        send(
+          protocolServerRequest({
+            id,
+            method: "item/tool/call",
+            params: {
+              threadId: "thr_overflow",
+              turnId:
+                mode === "mismatch" && id === 7002
+                  ? "foreign_turn"
+                  : "turn_overflow",
+              callId: `call_${id}`,
+              tool: "lookup",
+              namespace: null,
+              arguments: { id },
+            },
+          }),
+        );
       if (mode === "overflow")
         for (let index = 0; index < 1_024; index += 1)
           send(
@@ -221,7 +267,7 @@ function failingIngressAppServer(mode: "overflow" | "mismatch" | "suspend"): {
           );
     } else if (message.method === "turn/interrupt") {
       interrupts += 1;
-      send({ id: message.id, result: {} });
+      send(protocolResponse("turn/interrupt", message.id, {}));
     } else if (message.error !== undefined) responderErrors.push(message.id);
   });
   return { rpc, responderErrors, interruptCount: () => interrupts };
@@ -242,9 +288,19 @@ function lateFailureAppServer(mode: "transport" | "event"): JsonRpcTransport {
       params: Record<string, unknown>;
     };
     if (message.method === "thread/start")
-      send({ id: message.id, result: { thread: { id: "thr_failure" } } });
+      send(
+        protocolResponse(
+          "thread/start",
+          message.id,
+          protocolThreadStartResponse(protocolThread("thr_failure")),
+        ),
+      );
     else if (message.method === "turn/start") {
-      send({ id: message.id, result: { turn: { id: "turn_failure" } } });
+      send(
+        protocolResponse("turn/start", message.id, {
+          turn: protocolTurn("turn_failure", "inProgress"),
+        }),
+      );
       send(
         protocolNotification({
           method: "item/agentMessage/delta",
@@ -275,7 +331,7 @@ function lateFailureAppServer(mode: "transport" | "event"): JsonRpcTransport {
           }),
         );
     } else if (message.method === "turn/interrupt")
-      send({ id: message.id, result: {} });
+      send(protocolResponse("turn/interrupt", message.id, {}));
   });
   return rpc;
 }
@@ -300,10 +356,20 @@ function recoverableAppServer(): {
       params: Record<string, unknown>;
     };
     if (message.method === "thread/start")
-      send({ id: message.id, result: { thread: { id: "thr_recover" } } });
+      send(
+        protocolResponse(
+          "thread/start",
+          message.id,
+          protocolThreadStartResponse(protocolThread("thr_recover")),
+        ),
+      );
     else if (message.method === "turn/start") {
       const turnId = `turn_recover_${++turns}`;
-      send({ id: message.id, result: { turn: { id: turnId } } });
+      send(
+        protocolResponse("turn/start", message.id, {
+          turn: protocolTurn(turnId, "inProgress"),
+        }),
+      );
       if (turns === 1) return;
       send(
         protocolNotification({
@@ -316,10 +382,199 @@ function recoverableAppServer(): {
       );
     } else if (message.method === "turn/interrupt") {
       interrupted = true;
-      send({ id: message.id, result: {} });
+      send(protocolResponse("turn/interrupt", message.id, {}));
     }
   });
   return { rpc, wasInterrupted: () => interrupted };
+}
+
+/** Creates a completed turn containing duplicate unknown global notifications. */
+function unknownEventAppServer(secret: string): JsonRpcTransport {
+  const fromServer = new PassThrough();
+  const toServer = new PassThrough();
+  const rpc = new JsonRpcTransport(fromServer, toServer);
+  const send = (value: unknown): void => {
+    fromServer.write(`${JSON.stringify(value)}\n`);
+  };
+  createInterface({ input: toServer }).on("line", (line) => {
+    const message = JSON.parse(line) as { id: number; method: string };
+    if (message.method === "thread/start")
+      send(
+        protocolResponse(
+          "thread/start",
+          message.id,
+          protocolThreadStartResponse(protocolThread("thr_unknown")),
+        ),
+      );
+    else if (message.method === "turn/start") {
+      send(
+        protocolResponse("turn/start", message.id, {
+          turn: protocolTurn("turn_unknown", "inProgress"),
+        }),
+      );
+      // Unknown future events deliberately cannot satisfy the generated union.
+      for (let index = 0; index < 2; index += 1)
+        send({
+          method: "future/diagnostic",
+          params: { detail: `${secret} https://secret.example/token=abc` },
+        });
+      send(
+        protocolNotification({
+          method: "item/agentMessage/delta",
+          params: {
+            threadId: "thr_unknown",
+            turnId: "turn_unknown",
+            itemId: "message",
+            delta: "Hello",
+          },
+        }),
+      );
+      send(
+        protocolNotification({
+          method: "turn/completed",
+          params: {
+            threadId: "thr_unknown",
+            turn: protocolTurn("turn_unknown", "completed"),
+          },
+        }),
+      );
+    }
+  });
+  return rpc;
+}
+
+/** Creates an ordered multi-megabyte stream that exercises HTTP drain behavior. */
+function backpressureAppServer(): JsonRpcTransport {
+  const fromServer = new PassThrough();
+  const toServer = new PassThrough();
+  const rpc = new JsonRpcTransport(fromServer, toServer);
+  const send = (value: unknown): void => {
+    fromServer.write(`${JSON.stringify(value)}\n`);
+  };
+  createInterface({ input: toServer }).on("line", (line) => {
+    const message = JSON.parse(line) as { id: number; method: string };
+    if (message.method === "thread/start")
+      send(
+        protocolResponse(
+          "thread/start",
+          message.id,
+          protocolThreadStartResponse(protocolThread("thr_slow")),
+        ),
+      );
+    else if (message.method === "turn/start") {
+      send(
+        protocolResponse("turn/start", message.id, {
+          turn: protocolTurn("turn_slow", "inProgress"),
+        }),
+      );
+      for (let index = 0; index < 128; index += 1)
+        send(
+          protocolNotification({
+            method: "item/agentMessage/delta",
+            params: {
+              threadId: "thr_slow",
+              turnId: "turn_slow",
+              itemId: "message",
+              delta: `${String(index).padStart(3, "0")}:${"x".repeat(32 * 1024)}`,
+            },
+          }),
+        );
+      send(
+        protocolNotification({
+          method: "turn/completed",
+          params: {
+            threadId: "thr_slow",
+            turn: protocolTurn("turn_slow", "completed"),
+          },
+        }),
+      );
+    } else if (message.method === "turn/interrupt")
+      send(protocolResponse("turn/interrupt", message.id, {}));
+  });
+  return rpc;
+}
+
+/** Creates two active turns while flooding notifications for a third turn. */
+function foreignFloodAppServer(): JsonRpcTransport {
+  const fromServer = new PassThrough();
+  const toServer = new PassThrough();
+  const rpc = new JsonRpcTransport(fromServer, toServer);
+  let nextThread = 0;
+  const turns: Array<{ threadId: string; turnId: string }> = [];
+  const send = (value: unknown): void => {
+    fromServer.write(`${JSON.stringify(value)}\n`);
+  };
+  createInterface({ input: toServer }).on("line", (line) => {
+    const message = JSON.parse(line) as {
+      id: number;
+      method: string;
+      params: Record<string, unknown>;
+    };
+    if (message.method === "thread/start") {
+      const threadId = `thr_active_${++nextThread}`;
+      send(
+        protocolResponse(
+          "thread/start",
+          message.id,
+          protocolThreadStartResponse(protocolThread(threadId)),
+        ),
+      );
+    } else if (message.method === "turn/start") {
+      const threadId = String(message.params.threadId);
+      const turnId = `turn_${threadId}`;
+      turns.push({ threadId, turnId });
+      send(
+        protocolResponse("turn/start", message.id, {
+          turn: protocolTurn(turnId, "inProgress"),
+        }),
+      );
+      if (turns.length === 2)
+        setImmediate(() => {
+          for (let index = 0; index < 2_048; index += 1)
+            send(
+              protocolNotification({
+                method: "item/agentMessage/delta",
+                params: {
+                  threadId: "thr_foreign",
+                  turnId: "turn_foreign",
+                  itemId: "foreign_message",
+                  delta: ".",
+                },
+              }),
+            );
+          // Correlation-less known notifications are malformed wire input. Once
+          // a turn is established they must be rejected before ingress accounting.
+          for (let index = 0; index < 2_048; index += 1)
+            send({
+              method: "item/agentMessage/delta",
+              params: { itemId: "missing_correlation", delta: "." },
+            });
+          for (const active of turns) {
+            send(
+              protocolNotification({
+                method: "item/agentMessage/delta",
+                params: {
+                  ...active,
+                  itemId: `message_${active.threadId}`,
+                  delta: active.threadId,
+                },
+              }),
+            );
+            send(
+              protocolNotification({
+                method: "turn/completed",
+                params: {
+                  threadId: active.threadId,
+                  turn: protocolTurn(active.turnId, "completed"),
+                },
+              }),
+            );
+          }
+        });
+    } else if (message.method === "turn/interrupt")
+      send({ id: message.id, result: {} });
+  });
+  return rpc;
 }
 
 /** Runs an HTTP assertion against an ephemeral, ready offline proxy. */
@@ -330,6 +585,7 @@ async function withChatServer(
   ) => Promise<void>,
   requestTimeout = "30s",
   stateDir = `${tmpdir()}/codex-proxy-chat-tests-${process.pid}`,
+  logger = silentLogger,
 ): Promise<void> {
   const proxy = createProxyServer(
     await resolveServeOptions(
@@ -342,7 +598,7 @@ async function withChatServer(
         requestTimeout,
       ]),
     ),
-    silentLogger,
+    logger,
   );
   proxy.setTransport(fakeAppServer(), UNRESTRICTED_POLICY_REQUIREMENTS);
   proxy.setReady(true);
@@ -623,7 +879,7 @@ test("allocates unique call indexes across internal, dynamic, continuation, and 
   const laterInternal = normalizer.normalize("item/started", {
     item: { id: "later", type: "webSearch", query: "forecast" },
   });
-  const orphan = normalizer.normalize("item/mcpToolCall/progress.update", {
+  const orphan = normalizer.normalize("item/mcpToolCall/progress", {
     itemId: "orphan",
     delta: "working",
   });
@@ -642,7 +898,7 @@ test("allocates unique call indexes across internal, dynamic, continuation, and 
       index: 4,
       id: "orphan",
       type: "function",
-      function: { name: "mcpToolCall_progress_update", arguments: "{}" },
+      function: { name: "mcpToolCall_progress", arguments: "{}" },
     },
   ]);
   assert.equal(
@@ -945,6 +1201,138 @@ test("client disconnect interrupts an active app-server turn", async () => {
   });
 });
 
+test("unknown app-server events produce one transport-scoped safe diagnostic", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-unknown-event-"));
+  const secret = `${await realpath(".")} https://secret.example/token=abc`;
+  const entries: Array<Record<string, unknown>> = [];
+  const logger = createLogger("debug", (entry) => entries.push(entry));
+  try {
+    await withChatServer(
+      async (origin, proxy) => {
+        proxy.setTransport(
+          unknownEventAppServer(secret),
+          UNRESTRICTED_POLICY_REQUIREMENTS,
+        );
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const response = await fetch(`${origin}/v1/chat/completions`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              model: "m",
+              messages: [{ role: "user", content: "x" }],
+            }),
+          });
+          assert.equal(response.status, 200);
+          assert.equal(
+            (
+              (await response.json()) as {
+                choices: [{ message: { content: string } }];
+              }
+            ).choices[0].message.content,
+            "Hello",
+          );
+        }
+      },
+      "30s",
+      join(directory, "state"),
+      logger,
+    );
+    const diagnostics = entries.filter(
+      (entry) => entry.event === "unknown_app_server_event",
+    );
+    assert.equal(diagnostics.length, 1);
+    assert.match(String(diagnostics[0]?.method_fingerprint), /^[a-f0-9]{16}$/);
+    assert.equal(diagnostics[0]?.params_type, "object");
+    assert.deepEqual(diagnostics[0]?.field_fingerprints, ["9c0211c51d04574f"]);
+    assert.equal("request_id" in diagnostics[0]!, false);
+    assert.equal(JSON.stringify(entries).includes(secret), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a paused real SSE client drains bounded frames in order", async () => {
+  await withChatServer(async (origin, proxy) => {
+    proxy.setTransport(
+      backpressureAppServer(),
+      UNRESTRICTED_POLICY_REQUIREMENTS,
+    );
+    let drains = 0;
+    let maxWritableLength = 0;
+    proxy.server.prependOnceListener("request", (_request, response) => {
+      response.on("drain", () => {
+        drains += 1;
+      });
+      const monitor = setInterval(() => {
+        maxWritableLength = Math.max(
+          maxWritableLength,
+          response.writableLength,
+        );
+      }, 1);
+      monitor.unref();
+      response.once("close", () => clearInterval(monitor));
+    });
+    const url = new URL(`${origin}/v1/chat/completions`);
+    const body = JSON.stringify({
+      model: "m",
+      stream: true,
+      messages: [{ role: "user", content: "x" }],
+    });
+    const response = await new Promise<http.IncomingMessage>(
+      (resolve, reject) => {
+        const request = http.request(
+          {
+            hostname: url.hostname,
+            port: url.port,
+            path: url.pathname,
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "content-length": Buffer.byteLength(body),
+            },
+          },
+          resolve,
+        );
+        request.once("error", reject);
+        request.end(body);
+      },
+    );
+    response.pause();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    let raw = "";
+    response.setEncoding("utf8");
+    response.on("data", (chunk: string) => {
+      raw += chunk;
+    });
+    response.resume();
+    await once(response, "end");
+
+    const frames = raw
+      .split("\n\n")
+      .filter(Boolean)
+      .map((frame) => frame.slice(6));
+    assert.equal(frames.at(-1), "[DONE]");
+    const indexes = frames
+      .slice(0, -1)
+      .map(
+        (frame) =>
+          JSON.parse(frame) as { choices?: [{ delta?: { content?: string } }] },
+      )
+      .map((frame) => frame.choices?.[0]?.delta?.content)
+      .filter((content): content is string => content !== undefined)
+      .map((content) => Number(content.slice(0, 3)));
+    assert.deepEqual(
+      indexes,
+      Array.from({ length: 128 }, (_, index) => index),
+    );
+    assert.ok(drains > 0, "server never observed writable backpressure");
+    assert.ok(
+      maxWritableLength < 128 * 1024,
+      `buffer grew to ${maxWritableLength}`,
+    );
+  }, "60s");
+}, 70_000);
+
 test("ingress overflow interrupts the turn and rejects every queued tool responder", async () => {
   await withChatServer(async (origin, proxy) => {
     const fake = failingIngressAppServer("overflow");
@@ -966,6 +1354,34 @@ test("ingress overflow interrupts the turn and rejects every queued tool respond
       fake.responderErrors.sort((a, b) => a - b),
       [7001, 7002],
     );
+  });
+});
+
+test("concurrent foreign notifications do not consume ingress capacity", async () => {
+  await withChatServer(async (origin, proxy) => {
+    proxy.setTransport(
+      foreignFloodAppServer(),
+      UNRESTRICTED_POLICY_REQUIREMENTS,
+    );
+    const request = (content: string): Promise<Response> =>
+      fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "m",
+          messages: [{ role: "user", content }],
+        }),
+      });
+    const responses = await Promise.all([request("one"), request("two")]);
+    for (const response of responses) {
+      assert.equal(response.status, 200);
+      const content = (
+        (await response.json()) as {
+          choices: [{ message: { content: string } }];
+        }
+      ).choices[0].message.content;
+      assert.match(content, /^thr_active_[12]$/);
+    }
   });
 });
 

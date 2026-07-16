@@ -4,7 +4,11 @@ import { test } from "vitest";
 import { ensureAuthenticated } from "../../src/app-server/auth.js";
 import { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
 import { createLogger } from "../../src/core/logger.js";
-import { protocolNotification } from "../support/protocol-fixtures.js";
+import {
+  protocolAuthenticatedAccountResponse,
+  protocolNotification,
+  protocolResponse,
+} from "../support/protocol-fixtures.js";
 
 /** Authentication scenario simulated by fakeRpc. */
 type LoginKind =
@@ -35,30 +39,51 @@ function fakeRpc(kind: LoginKind): JsonRpcTransport {
       };
       buffered = buffered.slice(newline + 1);
       if (message.method === "account/read") {
-        const result =
-          kind === "missing-requirement"
-            ? { account: null }
-            : kind === "malformed-requirement"
-              ? { account: null, requiresOpenaiAuth: "yes" }
-              : kind === "logged-in"
-                ? { account: { type: "chatgpt" }, requiresOpenaiAuth: true }
-                : { account: null, requiresOpenaiAuth: true };
-        input.write(`${JSON.stringify({ id: message.id, result })}\n`);
+        if (kind === "missing-requirement") {
+          // Deliberately incomplete response proves authentication fails closed.
+          input.write(
+            `${JSON.stringify({ id: message.id, result: { account: null } })}\n`,
+          );
+        } else if (kind === "malformed-requirement") {
+          // Deliberately wrong scalar type proves authentication fails closed.
+          input.write(
+            `${JSON.stringify({ id: message.id, result: { account: null, requiresOpenaiAuth: "yes" } })}\n`,
+          );
+        } else {
+          input.write(
+            `${JSON.stringify(
+              protocolResponse(
+                "account/read",
+                message.id,
+                kind === "logged-in"
+                  ? protocolAuthenticatedAccountResponse()
+                  : { account: null, requiresOpenaiAuth: true },
+              ),
+            )}\n`,
+          );
+        }
       } else if (message.method === "account/login/start") {
         const device = message.params.type === "chatgptDeviceCode";
-        const result = device
-          ? {
-              type: "chatgptDeviceCode",
-              loginId: "login",
-              verificationUrl: "https://example.invalid/device",
-              userCode: "SAFE-CODE",
-            }
-          : {
-              type: "chatgpt",
-              loginId: "login",
-              authUrl: "https://example.invalid/oauth?token=secret",
-            };
-        input.write(`${JSON.stringify({ id: message.id, result })}\n`);
+        input.write(
+          `${JSON.stringify(
+            protocolResponse(
+              "account/login/start",
+              message.id,
+              device
+                ? {
+                    type: "chatgptDeviceCode",
+                    loginId: "login",
+                    verificationUrl: "https://example.invalid/device",
+                    userCode: "SAFE-CODE",
+                  }
+                : {
+                    type: "chatgpt",
+                    loginId: "login",
+                    authUrl: "https://example.invalid/oauth?token=secret",
+                  },
+            ),
+          )}\n`,
+        );
         if (kind === "early")
           input.write(
             `${JSON.stringify(protocolNotification({ method: "account/login/completed", params: { loginId: "login", success: true, error: null } }))}\n`,

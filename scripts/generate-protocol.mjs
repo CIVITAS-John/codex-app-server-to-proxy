@@ -9,6 +9,12 @@ import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 
 const require = createRequire(import.meta.url);
+/** Protocol tree to mutate; defaults to the checked-in repository path. */
+const protocolRoot = resolve(
+  process.env.CODEX_PROTOCOL_OUTPUT_ROOT ?? "protocol",
+);
+/** Resolves one artifact below the selected protocol output root. */
+const protocolPath = (path) => resolve(protocolRoot, path);
 const projectPackage = JSON.parse(readFileSync("package.json", "utf8"));
 const pinnedVersion = projectPackage.dependencies?.["@openai/codex"];
 if (typeof pinnedVersion !== "string" || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(pinnedVersion)) {
@@ -17,7 +23,7 @@ if (typeof pinnedVersion !== "string" || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.
 let priorVersionMetadata = {};
 try {
   priorVersionMetadata = JSON.parse(
-    readFileSync("protocol/VERSION.json", "utf8"),
+    readFileSync(protocolPath("VERSION.json"), "utf8"),
   );
 } catch (error) {
   if (error?.code !== "ENOENT") throw error;
@@ -44,13 +50,13 @@ const generatedAt =
     ? priorVersionMetadata.generatedAt
     : new Date().toISOString().slice(0, 10);
 const combinedSchemaPaths = [
-  "protocol/generated/json-schema/codex_app_server_protocol.schemas.json",
-  "protocol/generated/json-schema/codex_app_server_protocol.v2.schemas.json",
+  "generated/json-schema/codex_app_server_protocol.schemas.json",
+  "generated/json-schema/codex_app_server_protocol.v2.schemas.json",
 ];
 const priorDefinitionOrders = new Map(
   combinedSchemaPaths.map((path) => {
     try {
-      const schema = JSON.parse(readFileSync(path, "utf8"));
+      const schema = JSON.parse(readFileSync(protocolPath(path), "utf8"));
       return [path, Object.keys(schema.definitions ?? {})];
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
@@ -60,21 +66,23 @@ const priorDefinitionOrders = new Map(
 );
 
 for (const [kind, output] of [
-  ["generate-ts", "protocol/generated/typescript"],
-  ["generate-json-schema", "protocol/generated/json-schema"],
+  ["generate-ts", "generated/typescript"],
+  ["generate-json-schema", "generated/json-schema"],
 ]) {
+  const outputPath = protocolPath(output);
   // Recreate each tree so removed upstream types cannot survive regeneration.
-  rmSync(output, { recursive: true, force: true });
-  mkdirSync(output, { recursive: true });
+  rmSync(outputPath, { recursive: true, force: true });
+  mkdirSync(outputPath, { recursive: true });
   execFileSync(
     process.execPath,
-    [codexPath, "app-server", kind, "--experimental", "--out", output],
+    [codexPath, "app-server", kind, "--experimental", "--out", outputPath],
     { stdio: "inherit" },
   );
 }
 
 for (const path of combinedSchemaPaths) {
-  const schema = JSON.parse(readFileSync(path, "utf8"));
+  const outputPath = protocolPath(path);
+  const schema = JSON.parse(readFileSync(outputPath, "utf8"));
   const definitions = schema.definitions ?? {};
   const priorOrder = priorDefinitionOrders.get(path) ?? [];
   const retained = priorOrder.filter((name) => name in definitions);
@@ -86,11 +94,11 @@ for (const path of combinedSchemaPaths) {
   schema.definitions = Object.fromEntries(
     [...retained, ...additions].map((name) => [name, definitions[name]]),
   );
-  writeFileSync(path, `${JSON.stringify(schema, null, 2)}\n`);
+  writeFileSync(outputPath, `${JSON.stringify(schema, null, 2)}\n`);
 }
 
 writeFileSync(
-  "protocol/VERSION.json",
+  protocolPath("VERSION.json"),
   `${JSON.stringify(
     {
       codexPackage: "@openai/codex",

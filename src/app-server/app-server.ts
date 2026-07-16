@@ -42,6 +42,12 @@ function codexPackageMetadata(): {
 /** Exact Codex CLI version supported by this proxy build. */
 export const PINNED_CODEX_VERSION = codexPackageMetadata().packageJson.version;
 
+/** Process command and argument prefix used to invoke Codex without a shell. */
+export interface CodexInvocation {
+  command: string;
+  prefixArgs: string[];
+}
+
 /** Resolves the package-owned Codex executable unless explicitly overridden. */
 export function resolveCodexExecutable(configuredPath: string): string {
   if (configuredPath !== "codex") return configuredPath;
@@ -52,6 +58,16 @@ export function resolveCodexExecutable(configuredPath: string): string {
       : packageJson.bin?.codex;
   if (!bin) throw new Error("@openai/codex does not declare a codex binary");
   return resolve(dirname(packageJsonPath), bin);
+}
+
+/** Resolves a cross-platform process invocation for package-owned or explicit Codex. */
+export function resolveCodexInvocation(
+  configuredPath: string,
+): CodexInvocation {
+  const executable = resolveCodexExecutable(configuredPath);
+  return configuredPath === "codex"
+    ? { command: process.execPath, prefixArgs: [executable] }
+    : { command: executable, prefixArgs: [] };
 }
 
 /** Owns the initialized app-server process and its JSON-RPC transport. */
@@ -71,6 +87,7 @@ export interface StartAppServerOptions {
   log: Logger;
   diagnosticLogging?: boolean;
   spawnProcess?: typeof spawn;
+  signal?: AbortSignal;
 }
 
 /** Starts, verifies, and initializes an app-server child process. */
@@ -78,20 +95,29 @@ export async function startAppServer(
   options: StartAppServerOptions,
 ): Promise<AppServer> {
   const spawnProcess = options.spawnProcess ?? spawn;
-  const codexPath = resolveCodexExecutable(options.codexPath);
+  const invocation = resolveCodexInvocation(options.codexPath);
   await verifyCodex(
-    codexPath,
+    invocation,
     options.root,
     options.startupTimeoutMs,
     spawnProcess,
+    options.signal,
   );
-  const child = spawnProcess(codexPath, ["app-server"], {
-    cwd: options.root,
-    shell: false,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  await waitForSpawn(child);
+  if (options.signal?.aborted) throw abortReason(options.signal);
+  const child = spawnProcess(
+    invocation.command,
+    [...invocation.prefixArgs, "app-server"],
+    {
+      cwd: options.root,
+      shell: false,
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+  await waitForSpawn(child, options.signal);
   const rpc = new JsonRpcTransport(child.stdout, child.stdin);
+  let stopping: Promise<void> | undefined;
+  const stop = (): Promise<void> =>
+    (stopping ??= stopChild(child, rpc, options.shutdownTimeoutMs));
   child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
     options.log("warn", "app_server_stderr", {
       message: "[REDACTED_DIAGNOSTIC]",
@@ -126,11 +152,16 @@ export async function startAppServer(
         capabilities: { experimentalApi: true },
       },
       options.startupTimeoutMs,
+      options.signal,
     );
     rpc.notify("initialized");
-    requirements = await readConfigRequirements(rpc, options.startupTimeoutMs);
+    requirements = await readConfigRequirements(
+      rpc,
+      options.startupTimeoutMs,
+      options.signal,
+    );
   } catch (error) {
-    await stopChild(child, rpc, options.shutdownTimeoutMs);
+    await stop();
     throw error;
   }
 
@@ -139,7 +170,7 @@ export async function startAppServer(
     requirements,
     child,
     async stop() {
-      await stopChild(child, rpc, options.shutdownTimeoutMs);
+      await stop();
     },
   };
 }
@@ -148,6 +179,7 @@ export async function startAppServer(
 async function readConfigRequirements(
   rpc: JsonRpcTransport,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<PolicyRequirements> {
   let value: unknown;
   try {
@@ -156,6 +188,7 @@ async function readConfigRequirements(
       "configRequirements/read",
       undefined,
       timeoutMs,
+      signal,
     );
   } catch (error) {
     if (error instanceof RpcError && error.rpcCode === -32601)
@@ -174,24 +207,46 @@ async function readConfigRequirements(
 
 /** Verifies that a configured executable matches the pinned contract version. */
 async function verifyCodex(
-  path: string,
+  invocation: CodexInvocation,
   cwd: string,
   timeoutMs: number,
   spawnProcess: typeof spawn,
+  externalSignal?: AbortSignal,
 ): Promise<void> {
-  const child = spawnProcess(path, ["--version"], {
-    cwd,
-    shell: false,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  await waitForSpawn(child);
+  if (externalSignal?.aborted) throw abortReason(externalSignal);
+  const child = spawnProcess(
+    invocation.command,
+    [...invocation.prefixArgs, "--version"],
+    {
+      cwd,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  const onAbort = (): void => {
+    child.kill("SIGKILL");
+  };
+  externalSignal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    await waitForSpawn(child, externalSignal);
+  } catch (error) {
+    externalSignal?.removeEventListener("abort", onAbort);
+    throw error;
+  }
   const output: Buffer[] = [];
   child.stdout.on("data", (chunk: Buffer) => output.push(chunk));
-  const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    child.kill("SIGKILL");
+  }, timeoutMs);
   timer.unref();
-  const [code, signal] = await once(child, "exit");
+  const [code, exitSignal] = await once(child, "exit");
   clearTimeout(timer);
-  if (signal === "SIGKILL") throw new Error("Codex version check timed out.");
+  externalSignal?.removeEventListener("abort", onAbort);
+  if (externalSignal?.aborted) throw abortReason(externalSignal);
+  if (timedOut && exitSignal === "SIGKILL")
+    throw new Error("Codex version check timed out.");
   if (code !== 0) throw new Error("Codex version check failed.");
   const value = Buffer.concat(output).toString("utf8").trim();
   const match = /^codex-cli (\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/.exec(value);
@@ -211,8 +266,12 @@ async function requestWithTimeout(
   method: string,
   params: unknown,
   timeoutMs: number,
+  externalSignal?: AbortSignal,
 ): Promise<unknown> {
   const controller = new AbortController();
+  const onAbort = (): void => controller.abort(abortReason(externalSignal!));
+  externalSignal?.addEventListener("abort", onAbort, { once: true });
+  if (externalSignal?.aborted) onAbort();
   const timer = setTimeout(
     () => controller.abort(new Error(`${method} timed out.`)),
     timeoutMs,
@@ -222,6 +281,7 @@ async function requestWithTimeout(
     return await rpc.request(method, params, controller.signal);
   } finally {
     clearTimeout(timer);
+    externalSignal?.removeEventListener("abort", onAbort);
   }
 }
 
@@ -242,12 +302,42 @@ async function stopChild(
 }
 
 /** Waits until a child either spawns successfully or reports an error. */
-async function waitForSpawn(child: ChildProcess): Promise<void> {
+async function waitForSpawn(
+  child: ChildProcess,
+  signal?: AbortSignal,
+): Promise<void> {
   if (child.pid !== undefined) return;
-  await Promise.race([
-    once(child, "spawn"),
-    once(child, "error").then(([error]) => Promise.reject(error)),
-  ]);
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = (): void => {
+      child.off("spawn", onSpawn);
+      child.off("error", onError);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const onSpawn = (): void => {
+      cleanup();
+      resolve();
+    };
+    const onError = (error: Error): void => {
+      cleanup();
+      reject(error);
+    };
+    const onAbort = (): void => {
+      cleanup();
+      child.kill("SIGKILL");
+      reject(abortReason(signal!));
+    };
+    child.once("spawn", onSpawn);
+    child.once("error", onError);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
+}
+
+/** Returns a stable Error reason for lifecycle cancellation. */
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error("app-server startup cancelled");
 }
 
 /** Declines unsolicited app-server requests that the proxy cannot safely serve. */

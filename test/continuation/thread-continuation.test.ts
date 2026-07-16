@@ -19,6 +19,11 @@ import {
 } from "../../src/core/policy.js";
 import {
   protocolNotification,
+  protocolResponse,
+  protocolServerRequest,
+  protocolThread,
+  protocolThreadResumeResponse,
+  protocolThreadStartResponse,
   protocolTurn,
 } from "../support/protocol-fixtures.js";
 
@@ -73,30 +78,49 @@ class ContinuationAppServer {
     this.methods.push(message.method);
     const id = message.id as number;
     if (message.method === "thread/start") {
-      this.#send({ id, result: { thread: { id: this.#threadId } } });
+      this.#send(
+        protocolResponse(
+          "thread/start",
+          id,
+          protocolThreadStartResponse(protocolThread(this.#threadId)),
+        ),
+      );
     } else if (message.method === "thread/read") {
+      // The configurable unknown status is intentionally hostile protocol input.
       this.#send({
         id,
         result: { thread: { id: this.#threadId, status: this.status } },
       });
     } else if (message.method === "thread/resume") {
-      this.#send({ id, result: { thread: { id: this.#threadId } } });
+      this.#send(
+        protocolResponse(
+          "thread/resume",
+          id,
+          protocolThreadResumeResponse(protocolThread(this.#threadId)),
+        ),
+      );
     } else if (message.method === "turn/start") {
       const turnId = `turn_continuation_${++this.#turn}`;
-      this.#send({ id, result: { turn: { id: turnId } } });
+      this.#send(
+        protocolResponse("turn/start", id, {
+          turn: protocolTurn(turnId, "inProgress"),
+        }),
+      );
       if (this.requestTool) {
-        this.#send({
-          id: 901,
-          method: "item/tool/call",
-          params: {
-            threadId: this.#threadId,
-            turnId,
-            callId: "call_weather",
-            tool: "weather",
-            namespace: null,
-            arguments: { city: "Chicago", units: "metric" },
-          },
-        });
+        this.#send(
+          protocolServerRequest({
+            id: 901,
+            method: "item/tool/call",
+            params: {
+              threadId: this.#threadId,
+              turnId,
+              callId: "call_weather",
+              tool: "weather",
+              namespace: null,
+              arguments: { city: "Chicago", units: "metric" },
+            },
+          }),
+        );
         return;
       }
       const complete = (): void => {

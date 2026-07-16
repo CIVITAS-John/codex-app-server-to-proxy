@@ -1,42 +1,38 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://codex-openai-proxy.invalid/response-mapping.schema.json",
-  "title": "Durable response mapping record",
+  "title": "Durable continuation store",
   "type": "object",
   "additionalProperties": false,
-  "required": ["version", "responseId", "threadId", "turnId", "status", "createdAt", "updatedAt", "fingerprint"],
+  "required": ["version", "records"],
   "properties": {
-    "version": { "const": 1 },
-    "responseId": { "type": "string", "pattern": "^chatcmpl_codex_[A-Za-z0-9_-]{16,}$" },
-    "threadId": { "type": "string", "minLength": 1 },
-    "turnId": { "type": "string", "minLength": 1 },
-    "status": { "enum": ["completed", "pending_tool", "expired", "failed"] },
-    "createdAt": { "type": "string", "format": "date-time" },
-    "updatedAt": { "type": "string", "format": "date-time" },
-    "fingerprint": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["model", "toolsSha256", "cwd", "policySha256"],
-      "properties": {
-        "model": { "type": "string" },
-        "toolsSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-        "cwd": { "type": "string" },
-        "policySha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
-      }
-    },
-    "pendingTool": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["callIds", "deadlineAt"],
-      "properties": {
-        "callIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
-        "deadlineAt": { "type": "string", "format": "date-time" }
-      }
+    "version": { "const": 0 },
+    "records": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/record" }
     }
   },
-  "allOf": [{
-    "if": { "properties": { "status": { "const": "pending_tool" } }, "required": ["status"] },
-    "then": { "required": ["pendingTool"] },
-    "else": { "not": { "required": ["pendingTool"] } }
-  }]
+  "$defs": {
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["responseId", "threadId", "state", "model", "cwd", "toolsHash", "policyHash", "createdAt", "expiresAt"],
+      "properties": {
+        "responseId": { "type": "string", "minLength": 1 },
+        "threadId": { "type": "string", "minLength": 1 },
+        "state": { "enum": ["ready", "pending_tool", "expired", "superseded", "corrupt"] },
+        "model": { "type": "string", "minLength": 1 },
+        "cwd": { "type": "string", "minLength": 1 },
+        "toolsHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "policyHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "createdAt": { "type": "number" },
+        "expiresAt": { "type": "number" },
+        "callIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
 }
