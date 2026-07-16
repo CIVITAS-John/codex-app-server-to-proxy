@@ -28,7 +28,7 @@ This contract targets `codex-cli 0.144.5`, pinned by the exact `@openai/codex` r
 | `item/agentMessage/delta` | Standard `choices[0].delta.content`. |
 | `item/tool/call` request | Centrally routed by thread to exactly one active owner and exposed with the standard function-shaped `tool_calls` field; request remains pending until continuation, timeout, disconnect, turn resolution, or shutdown. |
 | reasoning delta events | Nonstandard direct compatibility field `choices[0].delta.reasoning`; never standard `content` and never a response-side `x_codex` field. |
-| command, file-change, MCP, web-search, collaboration, approval, and other supported internal activity | Function-shaped `tool_calls` plus the nonstandard direct compatibility field `tool_results`. These calls are observational, are not client-executable dynamic calls, and do not cause `finish_reason: "tool_calls"`. |
+| command, file-change, MCP, plan, web-search, collaboration, and other supported internal activity | Function-shaped `tool_calls` plus the nonstandard direct compatibility field `tool_results`. These calls are observational, are not client-executable dynamic calls, and do not cause `finish_reason: "tool_calls"`. |
 | `thread/tokenUsage/updated` | Attribute only `last` usage observed after `turn/started`. Omit unavailable values and never subtract or estimate. Replayed resume usage is ignored. |
 | `turn/completed` | Finalize mapping. Standard finish reason is `stop`, or `tool_calls` when client dynamic calls remain pending. Internal activity does not change the finish reason. |
 | `error` or JSON-RPC error | OpenAI-shaped error; an SSE stream emits one error event and then closes without `[DONE]`. Overload `-32001` maps to retryable HTTP 503 before headers. |
@@ -36,8 +36,8 @@ This contract targets `codex-cli 0.144.5`, pinned by the exact `@openai/codex` r
 | `serverRequest/resolved` | Remove/cancel matching pending dynamic call. Duplicate client results are rejected. |
 | account read/login events | `account/read` detects auth. `account/login/start` with ChatGPT opens the returned URL when possible; one interactive-terminal fallback may print it, but logs/state never retain it. |
 
-Unknown app-server events are retained only as bounded, redacted debug diagnostics and are not exposed over HTTP. Diagnostics are capped per request and repeated unknown methods are recorded once.
-`protocol/fixtures/exposed-events.json` is the authoritative manifest of event types claimed for HTTP exposure; each entry must have exactly one synthetic JSONL fixture. `protocol/fixtures/exposed-events.ts` is the generated-protocol-typed source for that JSONL corpus, including complete nested `Turn` values and server-request parameters.
+Unknown and explicitly diagnostic-only app-server events are retained only as bounded, redacted debug diagnostics and are not exposed over HTTP. This includes the pinned unstable `item/autoApprovalReview/*` notifications and `item/commandExecution/terminalInteraction`, whose payloads do not satisfy the public item-progress contract. Each diagnosed method is recorded once per app-server transport, and diagnostics are capped at a fixed number of distinct methods for that transport's lifetime.
+`protocol/fixtures/exposed-events.json` is the authoritative manifest of notification and server-request types intentionally handled by the HTTP translation; diagnostic-only events are excluded. Each entry must have exactly one synthetic JSONL fixture. `protocol/fixtures/exposed-events.ts` is the generated-protocol-typed source for that JSONL corpus, including complete nested `Turn` values and server-request parameters. A contract test requires every runtime-handled notification to appear in this corpus.
 
 ## SSE mapping
 

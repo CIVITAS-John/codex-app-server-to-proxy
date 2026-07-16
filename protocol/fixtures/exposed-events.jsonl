@@ -1,4 +1,7 @@
 {"method":"item/agentMessage/delta","params":{"threadId":"thr_fixture","turnId":"turn_fixture","itemId":"item_text","delta":"hello"}}
+{"method":"item/started","params":{"threadId":"thr_fixture","turnId":"turn_fixture","startedAtMs":0,"item":{"type":"plan","id":"item_plan","text":"step one"}}}
+{"method":"item/completed","params":{"threadId":"thr_fixture","turnId":"turn_fixture","completedAtMs":1,"item":{"type":"plan","id":"item_plan","text":"step one"}}}
+{"method":"item/plan/delta","params":{"threadId":"thr_fixture","turnId":"turn_fixture","itemId":"item_plan","delta":"step one"}}
 {"method":"item/reasoning/summaryPartAdded","params":{"threadId":"thr_fixture","turnId":"turn_fixture","itemId":"item_reason","summaryIndex":0}}
 {"method":"item/reasoning/summaryTextDelta","params":{"threadId":"thr_fixture","turnId":"turn_fixture","itemId":"item_reason","summaryIndex":0,"delta":"checked inputs"}}
 {"method":"item/reasoning/textDelta","params":{"threadId":"thr_fixture","turnId":"turn_fixture","itemId":"item_reason","contentIndex":0,"delta":"exposed reasoning"}}

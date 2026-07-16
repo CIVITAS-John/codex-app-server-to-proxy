@@ -179,6 +179,27 @@ test("default request logs retain only the pathname", async () => {
   assert.equal(JSON.stringify(entries).includes("secret-value"), false);
 });
 
+test("authority-rejected requests still emit an http_request log entry", async () => {
+  const entries: Array<Record<string, unknown>> = [];
+  const proxy = createProxyServer(
+    await options({}),
+    createLogger("info", (entry) => entries.push(entry)),
+  );
+  const address = await proxy.listen();
+  const origin = `http://${address.address}:${address.port}`;
+  try {
+    const headers = new Headers();
+    headers.set("origin", "https://hostile.example");
+    const response = await fetch(`${origin}/health`, { headers });
+    assert.equal(response.status, 403);
+  } finally {
+    await proxy.close();
+  }
+  const request = entries.find((entry) => entry.event === "http_request");
+  assert.equal(request?.status, 403);
+  assert.equal(request?.path, "/health");
+});
+
 test("HTTP failures use OpenAI-shaped JSON and never leak warnings", async () => {
   await withServer({}, async (origin) => {
     const cases: Array<[Promise<Response>, number, string]> = [

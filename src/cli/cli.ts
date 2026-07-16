@@ -84,24 +84,14 @@ async function runServer(options: ServeOptions, log: Logger): Promise<number> {
 
   let appServer: AppServer | undefined;
   let startingAppServer: AppServer | undefined;
-  let lifecycleStopping = false;
   const lifecycle = new AbortController();
   let settleShutdown!: (code: number) => void;
   const shutdown = new Promise<number>((resolve) => {
     settleShutdown = resolve;
   });
   let stopping: Promise<void> | undefined;
-  const childStops = new Map<AppServer, Promise<void>>();
-  const stopChild = (child: AppServer): Promise<void> => {
-    const existing = childStops.get(child);
-    if (existing) return existing;
-    const pending = child.stop();
-    childStops.set(child, pending);
-    return pending;
-  };
   const stop = (signal: NodeJS.Signals): void => {
     if (stopping) return;
-    lifecycleStopping = true;
     lifecycle.abort(new Error(`proxy received ${signal}`));
     log("info", "shutdown_started", { signal });
     proxy.setReady(false);
@@ -111,7 +101,8 @@ async function runServer(options: ServeOptions, log: Logger): Promise<number> {
     const children = [...new Set([appServer, startingAppServer])].filter(
       (child): child is AppServer => child !== undefined,
     );
-    stopping = Promise.all(children.map(stopChild)).then(
+    // AppServer.stop() memoizes its own shutdown, so repeated calls are safe.
+    stopping = Promise.all(children.map((child) => child.stop())).then(
       async () => {
         await proxy.close();
         log("info", "shutdown_complete");
@@ -145,7 +136,7 @@ async function runServer(options: ServeOptions, log: Logger): Promise<number> {
     let exited = false;
     next.child.once("exit", () => {
       exited = true;
-      if (!lifecycleStopping && appServer === next) {
+      if (!lifecycle.signal.aborted && appServer === next) {
         appServer = undefined;
         proxy.setReady(false);
         proxy.setTransport(undefined);
@@ -162,12 +153,12 @@ async function runServer(options: ServeOptions, log: Logger): Promise<number> {
         signal: lifecycle.signal,
       });
     } catch (error) {
-      await stopChild(next).catch(() => undefined);
+      await next.stop().catch(() => undefined);
       if (startingAppServer === next) startingAppServer = undefined;
       throw error;
     }
-    if (lifecycleStopping || lifecycle.signal.aborted || exited) {
-      await stopChild(next).catch(() => undefined);
+    if (lifecycle.signal.aborted || exited) {
+      await next.stop().catch(() => undefined);
       if (startingAppServer === next) startingAppServer = undefined;
       throw (
         lifecycle.signal.reason ?? new Error("app-server exited during startup")
@@ -179,23 +170,23 @@ async function runServer(options: ServeOptions, log: Logger): Promise<number> {
   let recovering = false;
   // Keep the HTTP listener alive while bounded retries restore app-server.
   const recoverAppServer = async (): Promise<void> => {
-    if (recovering || lifecycleStopping) return;
+    if (recovering || lifecycle.signal.aborted) return;
     recovering = true;
     proxy.setReady(false);
     try {
       for (const [index, delayMs] of APP_SERVER_RECOVERY_DELAYS_MS.entries()) {
-        if (lifecycleStopping) return;
+        if (lifecycle.signal.aborted) return;
         const attempt = index + 1;
         try {
           await abortableDelay(delayMs, lifecycle.signal);
         } catch {
-          if (lifecycleStopping) return;
+          if (lifecycle.signal.aborted) return;
           throw new Error("App-server recovery delay failed.");
         }
         try {
           const next = await initializeAppServer();
-          if (lifecycleStopping) {
-            await stopChild(next).catch(() => undefined);
+          if (lifecycle.signal.aborted) {
+            await next.stop().catch(() => undefined);
             return;
           }
           appServer = next;
@@ -204,7 +195,7 @@ async function runServer(options: ServeOptions, log: Logger): Promise<number> {
           log("info", "app_server_restarted", { attempt });
           return;
         } catch (error) {
-          if (lifecycleStopping) return;
+          if (lifecycle.signal.aborted) return;
           log.failure("app_server_restart_failed", { attempt }, error);
         }
       }
@@ -215,19 +206,17 @@ async function runServer(options: ServeOptions, log: Logger): Promise<number> {
   };
   try {
     appServer = await initializeAppServer();
-    if (lifecycleStopping) return await shutdown;
+    if (lifecycle.signal.aborted) return await shutdown;
     proxy.setTransport(appServer.rpc, appServer.requirements);
     proxy.setReady(true);
   } catch (error) {
-    if (lifecycleStopping) {
+    if (lifecycle.signal.aborted) {
       const code = await shutdown;
       process.off("SIGINT", onSigint);
       process.off("SIGTERM", onSigterm);
       return code;
     }
-    await (appServer ? stopChild(appServer) : undefined)?.catch(
-      () => undefined,
-    );
+    await (appServer ? appServer.stop() : undefined)?.catch(() => undefined);
     await proxy.close().catch(() => undefined);
     process.off("SIGINT", onSigint);
     process.off("SIGTERM", onSigterm);

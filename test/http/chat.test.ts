@@ -907,6 +907,88 @@ test("allocates unique call indexes across internal, dynamic, continuation, and 
   );
 });
 
+test("exposes pinned item/plan/delta notifications as self-correlating progress", () => {
+  const normalizer = new EventNormalizer();
+  const notification = protocolNotification({
+    method: "item/plan/delta",
+    params: {
+      threadId: "thread",
+      turnId: "turn",
+      itemId: "plan",
+      delta: "step one",
+    },
+  });
+  const progress = normalizer.normalize(
+    notification.method,
+    notification.params,
+  );
+  assert.deepEqual(progress[0]?.delta?.tool_calls, [
+    {
+      index: 0,
+      id: "plan",
+      type: "function",
+      function: { name: "plan_delta", arguments: "{}" },
+    },
+  ]);
+  assert.equal(
+    (progress[0]?.delta?.tool_results as Array<{ id: string }>)[0]?.id,
+    "plan",
+  );
+});
+
+test("keeps unstable auto-approval review notifications out of HTTP output", () => {
+  const normalizer = new EventNormalizer();
+  const action = {
+    type: "networkAccess" as const,
+    target: "fixture target",
+    host: "fixture.invalid",
+    protocol: "https" as const,
+    port: 443,
+  };
+  const started = protocolNotification({
+    method: "item/autoApprovalReview/started",
+    params: {
+      threadId: "thread",
+      turnId: "turn",
+      startedAtMs: 0,
+      reviewId: "review_1",
+      targetItemId: null,
+      review: {
+        status: "inProgress",
+        riskLevel: null,
+        userAuthorization: null,
+        rationale: null,
+      },
+      action,
+    },
+  });
+  const completed = protocolNotification({
+    method: "item/autoApprovalReview/completed",
+    params: {
+      threadId: "thread",
+      turnId: "turn",
+      startedAtMs: 0,
+      completedAtMs: 1,
+      reviewId: "review_1",
+      targetItemId: null,
+      decisionSource: "agent",
+      review: {
+        status: "approved",
+        riskLevel: "low",
+        userAuthorization: "high",
+        rationale: "fixture review",
+      },
+      action,
+    },
+  });
+
+  assert.deepEqual(normalizer.normalize(started.method, started.params), []);
+  assert.deepEqual(
+    normalizer.normalize(completed.method, completed.params),
+    [],
+  );
+});
+
 test("streaming and aggregate responses share content and exact usage", async () => {
   await withChatServer(async (origin) => {
     const request = {

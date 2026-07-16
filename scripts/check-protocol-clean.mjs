@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   cpSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -47,11 +48,22 @@ function changedFiles(before, after) {
 const checkedInRoot = "protocol";
 /** Isolated seeded output root removed regardless of generator success. */
 const temporaryRoot = mkdtempSync(join(tmpdir(), "codex-protocol-check-"));
+/** Prior state the generator reads back: seeding only these keeps the copy cheap. */
+const seededSchemas = [
+  "generated/json-schema/codex_app_server_protocol.schemas.json",
+  "generated/json-schema/codex_app_server_protocol.v2.schemas.json",
+];
 try {
-  // Seed stable definition ordering and version metadata without touching the tree.
-  cpSync(join(checkedInRoot, "generated"), join(temporaryRoot, "generated"), {
+  // Seed only what generate-protocol.mjs consumes as prior state: the combined
+  // json-schema files (for stable definition ordering) and VERSION.json (for
+  // generatedAt). A definition reordering or a still-valid generatedAt edit is
+  // reproduced verbatim and therefore not flagged here; genuine added, removed,
+  // or changed generated artifacts still are.
+  mkdirSync(join(temporaryRoot, "generated", "json-schema"), {
     recursive: true,
   });
+  for (const path of seededSchemas)
+    cpSync(join(checkedInRoot, path), join(temporaryRoot, path));
   cpSync(
     join(checkedInRoot, "VERSION.json"),
     join(temporaryRoot, "VERSION.json"),

@@ -4,11 +4,12 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   renameSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type {
   JsonRpcTransport,
   ServerRequest,
@@ -59,7 +60,27 @@ export class ResponseStore {
     hardenStatePath(directory, "directory");
     this.#path = join(directory, "continuations.json");
     hardenExistingStateFile(this.#path);
+    this.#sweepStaleTemporaries(directory);
     this.#load();
+  }
+
+  /** Removes temporaries stranded by a crash between write and atomic rename. */
+  #sweepStaleTemporaries(directory: string): void {
+    const prefix = `${basename(this.#path)}.`;
+    let entries: string[];
+    try {
+      entries = readdirSync(directory);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.startsWith(prefix) || !entry.endsWith(".tmp")) continue;
+      try {
+        unlinkSync(join(directory, entry));
+      } catch {
+        // A concurrent writer may still hold this temporary; leave it in place.
+      }
+    }
   }
 
   /** Retrieves a record after applying expiry and newest-response rules. */

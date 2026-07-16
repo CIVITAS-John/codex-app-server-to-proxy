@@ -6,7 +6,7 @@ The project is under active development. Text completions, streaming, function t
 
 ## Start the proxy
 
-Supported Node.js lines are 20, 22, 24, and 26. Node.js 24 is the primary supported LTS; Node.js 20 remains a compatibility minimum even though upstream support has ended. New major lines are not assumed compatible until CI adds them. Until the package is published, run it from this repository:
+Node.js 20 or newer is required; Node.js 24 is the primary supported LTS. CI exercises Node.js 20, 22, 24, and 26 on Linux and Node.js 24 on macOS and Windows. Until the package is published, run it from this repository:
 
 ```sh
 npm install

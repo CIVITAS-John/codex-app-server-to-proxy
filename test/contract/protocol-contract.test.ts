@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
 import { ResponseStore } from "../../src/continuation/state.js";
+import { HANDLED_NOTIFICATION_METHODS } from "../../src/http/chat.js";
 import { repoRootUrl } from "../support/repo-root.js";
 import { exposedEvents } from "../../protocol/fixtures/exposed-events.js";
 import {
@@ -99,11 +100,12 @@ test("every claimed exposed app-server event has a synthetic fixture", async () 
   )
     .trim()
     .split("\n");
-  const fixtureMethods = lines.map(
-    (line) => (JSON.parse(line) as { method: string }).method,
+  const fixtures = lines.map(
+    (line) => JSON.parse(line) as { method: string; id?: unknown },
   );
+  const fixtureMethods = fixtures.map((fixture) => fixture.method);
   assert.deepEqual(
-    lines.map((line) => JSON.parse(line) as unknown),
+    fixtures,
     exposedEvents,
     "JSONL corpus drifted from its generated-protocol-typed source",
   );
@@ -114,6 +116,14 @@ test("every claimed exposed app-server event has a synthetic fixture", async () 
     "duplicate event fixture",
   );
   assert.deepEqual([...fixtureMethods].sort(), [...claimed].sort());
+  const fixtureNotifications = fixtures
+    .filter((fixture) => !("id" in fixture))
+    .map((fixture) => fixture.method);
+  assert.deepEqual(
+    [...HANDLED_NOTIFICATION_METHODS].sort(),
+    fixtureNotifications.sort(),
+    "runtime-handled notifications drifted from the typed exposure corpus",
+  );
 });
 
 test("continuation schema examples agree with the production store reader", async () => {

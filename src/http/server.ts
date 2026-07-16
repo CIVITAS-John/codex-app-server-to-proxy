@@ -50,24 +50,41 @@ export function createProxyServer(
   const controllers = new Set<AbortController>();
   const sockets = new Set<Socket>();
   const server = createServer((request, response) => {
+    const started = Date.now();
     const requestId = randomUUID();
     response.setHeader("x-request-id", requestId);
+    // Parse the request target once; routing and every log line reuse it.
+    let url: URL | undefined;
+    try {
+      url = new URL(request.url ?? "/", "http://loopback.invalid");
+    } catch {
+      url = undefined;
+    }
+    const logRequest = (status: number): void => {
+      log("info", "http_request", {
+        request_id: requestId,
+        method: request.method,
+        path: url?.pathname ?? "[invalid-path]",
+        status,
+        duration_ms: Date.now() - started,
+      });
+    };
     const authorityError = validateRequestAuthority(request);
     if (authorityError) {
       writeError(response, authorityError);
+      logRequest(authorityError.status);
       return;
     }
     // Reject before allocating per-request resources when capacity is full.
     if (active >= options.maxRequests) {
-      writeError(
-        response,
-        new HttpError(
-          429,
-          "The proxy is handling too many requests.",
-          "rate_limit_error",
-          "overloaded",
-        ),
+      const overloaded = new HttpError(
+        429,
+        "The proxy is handling too many requests.",
+        "rate_limit_error",
+        "overloaded",
       );
+      writeError(response, overloaded);
+      logRequest(overloaded.status);
       return;
     }
     active += 1;
@@ -78,7 +95,6 @@ export function createProxyServer(
       options.requestTimeoutMs,
     );
     timer.unref();
-    const started = Date.now();
     let finished = false;
     const finish = (): void => {
       if (finished) return;
@@ -87,13 +103,7 @@ export function createProxyServer(
       clearTimeout(timer);
       controllers.delete(controller);
       active -= 1;
-      log("info", "http_request", {
-        request_id: requestId,
-        method: request.method,
-        path: requestPathname(request.url),
-        status: response.statusCode,
-        duration_ms: Date.now() - started,
-      });
+      logRequest(response.statusCode);
     };
     const abortRequest = (): void => {
       controller.abort(new Error("client disconnected"));
@@ -117,6 +127,7 @@ export function createProxyServer(
       options.implicitToolContinuation,
       log,
       requestId,
+      url,
     ).catch((cause: unknown) => {
       const error =
         cause instanceof HttpError
@@ -223,19 +234,19 @@ async function route(
   implicitToolContinuation: boolean,
   log: Logger,
   requestId: string,
+  url: URL | undefined,
 ): Promise<void> {
-  const url = new URL(request.url ?? "/", "http://loopback.invalid");
-  if (request.method === "GET" && url.pathname === "/health") {
+  if (request.method === "GET" && url?.pathname === "/health") {
     writeJson(response, 200, { status: "ok" });
     return;
   }
-  if (request.method === "GET" && url.pathname === "/ready") {
+  if (request.method === "GET" && url?.pathname === "/ready") {
     writeJson(response, ready ? 200 : 503, {
       status: ready ? "ready" : "not_ready",
     });
     return;
   }
-  if (request.method === "POST" && url.pathname === "/v1/chat/completions") {
+  if (request.method === "POST" && url?.pathname === "/v1/chat/completions") {
     const contentType = request.headers["content-type"]
       ?.split(";", 1)[0]
       ?.trim()
@@ -306,15 +317,6 @@ function validateRequestAuthority(
       "origin",
     );
   return undefined;
-}
-
-/** Returns a query-free request target suitable for default-visible logs. */
-function requestPathname(target: string | undefined): string {
-  try {
-    return new URL(target ?? "/", "http://loopback.invalid").pathname;
-  } catch {
-    return "[invalid-path]";
-  }
 }
 
 /** Accepts only explicit loopback HTTP authorities with an optional valid port. */

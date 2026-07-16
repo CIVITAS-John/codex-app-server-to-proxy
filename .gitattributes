@@ -1,0 +1,4 @@
+# Normalize line endings to LF in the repository and on checkout everywhere,
+# so Prettier's format check and the byte-exact protocol regeneration gate pass
+# identically on Windows runners (which otherwise check out CRLF).
+* text=auto eol=lf

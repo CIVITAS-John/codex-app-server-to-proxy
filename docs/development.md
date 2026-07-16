@@ -4,7 +4,7 @@ This guide is for contributors to `codex-openai-proxy`. User installation, API b
 
 ## Requirements
 
-- Node.js 20, 22, 24, or 26; Node.js 24 is the primary supported LTS
+- Node.js 20 or newer; Node.js 24 is the primary supported LTS
 - npm
 - A ChatGPT login only for opt-in live tests
 
@@ -54,7 +54,7 @@ The protocol cleanliness check seeds a temporary protocol root, regenerates ther
 
 ## Continuous integration
 
-Required CI runs `npm ci` followed by the same `npm run check` command contributors use locally. Linux covers the finite supported Node.js 20, 22, 24, and 26 lines. macOS and Windows cover the primary Node.js 24 LTS. Node.js 20 is retained as the compatibility minimum despite its upstream end of life; new Node.js majors are not automatically supported.
+Required CI runs `npm ci` followed by the same `npm run check` command contributors use locally. Linux exercises Node.js 20, 22, 24, and 26; macOS and Windows exercise the primary Node.js 24 LTS. Node.js 20 is the minimum supported line; the `engines` range accepts newer majors, which are added to the CI matrix as they are validated.
 
 CI sets `CODEX_TEST_COVERAGE` explicitly. The primary Node.js 24 Linux job alone runs coverage and its floors and publishes the offline `coverage/` directory; the other operating-system and Node.js compatibility jobs run the same tests without redundant instrumentation. Omitting the variable locally keeps coverage enabled. Coverage is limited to maintained source and thresholds are based on the Stage 07 baseline. Pull requests never run the live suite.
 

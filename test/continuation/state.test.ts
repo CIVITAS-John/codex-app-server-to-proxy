@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   stat,
   symlink,
@@ -143,6 +144,26 @@ test("leftover atomic-write temporary files cannot replace valid records", async
   );
 
   assert.equal(new ResponseStore(directory).get("response_1")?.state, "ready");
+});
+
+test("construction sweeps temporaries stranded by an interrupted write", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-proxy-state-"));
+  await writeFile(
+    join(directory, `continuations.json.999.${"a".repeat(8)}.tmp`),
+    "abruptly truncated",
+  );
+  await writeFile(
+    join(directory, `continuations.json.1000.${"b".repeat(8)}.tmp`),
+    "abruptly truncated",
+  );
+
+  new ResponseStore(directory);
+
+  const remaining = await readdir(directory);
+  assert.equal(
+    remaining.some((name) => name.endsWith(".tmp")),
+    false,
+  );
 });
 
 test("a failed atomic write preserves disk and rolls back in-memory records", async () => {

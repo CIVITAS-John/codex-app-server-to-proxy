@@ -10,8 +10,10 @@ import { dirname, resolve } from "node:path";
 
 const require = createRequire(import.meta.url);
 /** Protocol tree to mutate; defaults to the checked-in repository path. */
+// `||` (not `??`) so an exported-but-empty override cannot resolve to the CWD
+// and rewrite generated output outside the protocol tree.
 const protocolRoot = resolve(
-  process.env.CODEX_PROTOCOL_OUTPUT_ROOT ?? "protocol",
+  process.env.CODEX_PROTOCOL_OUTPUT_ROOT || "protocol",
 );
 /** Resolves one artifact below the selected protocol output root. */
 const protocolPath = (path) => resolve(protocolRoot, path);

@@ -13,6 +13,33 @@ export const exposedEvents = [
     },
   },
   {
+    method: "item/started",
+    params: {
+      threadId: "thr_fixture",
+      turnId: "turn_fixture",
+      startedAtMs: 0,
+      item: { type: "plan", id: "item_plan", text: "step one" },
+    },
+  },
+  {
+    method: "item/completed",
+    params: {
+      threadId: "thr_fixture",
+      turnId: "turn_fixture",
+      completedAtMs: 1,
+      item: { type: "plan", id: "item_plan", text: "step one" },
+    },
+  },
+  {
+    method: "item/plan/delta",
+    params: {
+      threadId: "thr_fixture",
+      turnId: "turn_fixture",
+      itemId: "item_plan",
+      delta: "step one",
+    },
+  },
+  {
     method: "item/reasoning/summaryPartAdded",
     params: {
       threadId: "thr_fixture",

@@ -114,34 +114,65 @@ const MAX_INGRESS_EVENTS = 1_024;
 /** Maximum approximate JSON bytes retained in one response's ingress queue. */
 const MAX_INGRESS_BYTES = 8 * 1024 * 1024;
 
-/** Maximum distinct unknown methods diagnosed for one HTTP request. */
-const MAX_UNKNOWN_METHODS = 32;
+/** Maximum distinct unexposed methods diagnosed for one app-server transport. */
+const MAX_DIAGNOSTIC_METHODS = 32;
 
-/** Notification methods intentionally consumed or exposed by the proxy. */
-const KNOWN_NOTIFICATION_METHODS = new Set([
-  "error",
-  "item/agentMessage/delta",
-  "item/commandExecution/outputDelta",
-  "item/fileChange/outputDelta",
-  "item/fileChange/patchUpdated",
-  "item/mcpToolCall/progress",
-  "item/reasoning/summaryPartAdded",
-  "item/reasoning/summaryTextDelta",
-  "item/reasoning/textDelta",
-  "item/started",
-  "item/completed",
-  "serverRequest/resolved",
-  "thread/tokenUsage/updated",
-  "turn/completed",
+/** Explicit handling selected for one pinned app-server notification method. */
+type NotificationBehavior = "normalize" | "progress" | "ignore" | "diagnose";
+
+/**
+ * Classifies pinned notification methods without making diagnostic recognition
+ * an implicit opt-in to public HTTP output.
+ */
+const NOTIFICATION_BEHAVIORS = new Map<string, NotificationBehavior>([
+  ["error", "normalize"],
+  ["item/agentMessage/delta", "normalize"],
+  ["item/autoApprovalReview/started", "diagnose"],
+  ["item/autoApprovalReview/completed", "diagnose"],
+  ["item/commandExecution/outputDelta", "progress"],
+  ["item/commandExecution/terminalInteraction", "diagnose"],
+  ["item/fileChange/outputDelta", "progress"],
+  ["item/fileChange/patchUpdated", "progress"],
+  ["item/mcpToolCall/progress", "progress"],
+  ["item/plan/delta", "progress"],
+  ["item/reasoning/summaryPartAdded", "ignore"],
+  ["item/reasoning/summaryTextDelta", "normalize"],
+  ["item/reasoning/textDelta", "normalize"],
+  ["item/started", "normalize"],
+  ["item/completed", "normalize"],
+  ["serverRequest/resolved", "ignore"],
+  ["thread/tokenUsage/updated", "normalize"],
+  ["turn/completed", "normalize"],
 ]);
 
-/** Unknown notification methods already diagnosed for each transport generation. */
-const DIAGNOSED_UNKNOWN_METHODS = new WeakMap<JsonRpcTransport, Set<string>>();
+/** Notification methods that the HTTP translation intentionally handles. */
+export const HANDLED_NOTIFICATION_METHODS: ReadonlySet<string> = new Set(
+  [...NOTIFICATION_BEHAVIORS]
+    .filter(([, behavior]) => behavior !== "diagnose")
+    .map(([method]) => method),
+);
+
+/** Returns the explicit behavior, diagnosing unclassified future methods. */
+function notificationBehavior(method: string): NotificationBehavior {
+  return NOTIFICATION_BEHAVIORS.get(method) ?? "diagnose";
+}
+
+/** Unexposed notification methods diagnosed for each transport generation. */
+const DIAGNOSED_NOTIFICATION_METHODS = new WeakMap<
+  JsonRpcTransport,
+  Set<string>
+>();
 
 /** One arrival-ordered app-server notification or dynamic tool request. */
 type IngressEvent =
   | { type: "notification"; method: string; params: unknown }
   | { type: "dynamic_tool"; call: PendingToolCall };
+
+/** One queued ingress event with the retained byte size computed at enqueue. */
+interface QueuedIngress {
+  event: IngressEvent;
+  bytes: number;
+}
 
 /** Dependencies used by one Chat Completions request. */
 export interface ChatHandlerOptions {
@@ -353,7 +384,7 @@ async function execute(
   options: ChatHandlerOptions,
   responseId: string,
 ): Promise<ExecutionSession> {
-  const ingress: IngressEvent[] = [];
+  const ingress: QueuedIngress[] = [];
   let ingressBytes = 0;
   let wake: (() => void) | undefined;
   let transportError: Error | undefined;
@@ -375,15 +406,17 @@ async function execute(
       wake?.();
       return;
     }
-    ingress.push(event);
+    ingress.push({ event, bytes: eventBytes });
     ingressBytes += eventBytes;
     wake?.();
   };
   const onNotification = (method: string, params: unknown): void => {
-    if (!KNOWN_NOTIFICATION_METHODS.has(method)) {
-      diagnoseUnknownNotification(method, params, options.rpc, options.log);
+    const behavior = notificationBehavior(method);
+    if (behavior === "diagnose") {
+      diagnoseUnexposedNotification(method, params, options.rpc, options.log);
       return;
     }
+    if (behavior === "ignore") return;
     // Notifications can arrive while thread/start or turn/start is still
     // resolving. Once both identifiers are established, discard unrelated work
     // before it consumes this request's bounded ingress budget.
@@ -442,7 +475,7 @@ async function execute(
     if (threadId) options.continuations.clearToolOwner(threadId, onToolRequest);
     if (threadId && !suspended) options.continuations.release(threadId);
     if (!suspended)
-      for (const event of ingress)
+      for (const { event } of ingress)
         if (event.type === "dynamic_tool")
           rejectDynamicCall(options, event.call);
   };
@@ -644,11 +677,11 @@ async function execute(
           wake = undefined;
           if (transportError) throw transportError;
           if (queueError) throw queueError;
-          if (ingress[0]?.type === "dynamic_tool") {
+          if (ingress[0]?.event.type === "dynamic_tool") {
             // Let parallel app-server requests arriving in this event-loop turn join the batch.
             await new Promise<void>((resolve) => setImmediate(resolve));
             if (queueError) throw queueError;
-            const captured = ingress.splice(0);
+            const captured = ingress.splice(0).map((queued) => queued.event);
             ingressBytes = 0;
             const calls = captured
               .filter(
@@ -699,11 +732,14 @@ async function execute(
             continue;
           }
           const next = ingress.shift();
-          if (next) ingressBytes -= approximateJsonBytes(next);
           if (!next) continue;
-          if (next.type === "dynamic_tool") continue;
-          if (!matchesTurn(next.params, threadId, turnId)) continue;
-          for (const event of normalizer.normalize(next.method, next.params)) {
+          ingressBytes -= next.bytes;
+          if (next.event.type === "dynamic_tool") continue;
+          if (!matchesTurn(next.event.params, threadId, turnId)) continue;
+          for (const event of normalizer.normalize(
+            next.event.method,
+            next.event.params,
+          )) {
             if (event.error) {
               terminal = true;
               failed = true;
@@ -804,7 +840,6 @@ export class EventNormalizer {
       typeof params.delta === "string"
     )
       return [{ delta: { content: params.delta } }];
-    if (method === "item/reasoning/summaryPartAdded") return [];
     if (
       method === "item/reasoning/summaryTextDelta" &&
       typeof params.delta === "string"
@@ -873,11 +908,7 @@ export class EventNormalizer {
         ),
       ];
     }
-    if (
-      KNOWN_NOTIFICATION_METHODS.has(method) &&
-      method.startsWith("item/") &&
-      method !== "item/agentMessage/delta"
-    )
+    if (notificationBehavior(method) === "progress")
       return [this.#internalProgress(method, params)];
     return [];
   }
@@ -948,6 +979,13 @@ export class EventNormalizer {
   }
 }
 
+/** Extracts the turn identifier a notification correlates to, if present. */
+function notificationTurnId(params: Record<string, unknown>): unknown {
+  return typeof params.turnId === "string"
+    ? params.turnId
+    : record(params.turn)?.id;
+}
+
 /** Checks notification correlation without exposing foreign-thread activity. */
 function matchesTurn(
   value: unknown,
@@ -956,9 +994,7 @@ function matchesTurn(
 ): boolean {
   const params = record(value);
   if (!params) return true;
-  const notificationTurnId =
-    typeof params.turnId === "string" ? params.turnId : record(params.turn)?.id;
-  return params.threadId === threadId && notificationTurnId === turnId;
+  return params.threadId === threadId && notificationTurnId(params) === turnId;
 }
 
 /** Rejects a dynamic request that cannot be safely retained or suspended. */
@@ -1408,20 +1444,20 @@ export function serializeSseFrame(data: string): string {
   return `data: ${data}\n\n`;
 }
 
-/** Records safe structural metadata once per unknown method and transport. */
-function diagnoseUnknownNotification(
+/** Records safe structural metadata once per unexposed method and transport. */
+function diagnoseUnexposedNotification(
   method: string,
   params: unknown,
   rpc: JsonRpcTransport,
   log: Logger,
 ): void {
-  let diagnosed = DIAGNOSED_UNKNOWN_METHODS.get(rpc);
+  let diagnosed = DIAGNOSED_NOTIFICATION_METHODS.get(rpc);
   if (!diagnosed) {
     diagnosed = new Set<string>();
-    DIAGNOSED_UNKNOWN_METHODS.set(rpc, diagnosed);
+    DIAGNOSED_NOTIFICATION_METHODS.set(rpc, diagnosed);
   }
-  if (KNOWN_NOTIFICATION_METHODS.has(method) || diagnosed.has(method)) return;
-  if (diagnosed.size >= MAX_UNKNOWN_METHODS) return;
+  if (diagnosed.has(method)) return;
+  if (diagnosed.size >= MAX_DIAGNOSTIC_METHODS) return;
   diagnosed.add(method);
   const value = record(params);
   const keys = value ? Object.keys(value) : [];
@@ -1442,18 +1478,20 @@ function diagnosticFingerprint(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
 
-/** Rejects notifications that do not exactly match established correlation IDs. */
+/**
+ * Rejects notifications already established as belonging to a different turn.
+ * A notification without correlation params cannot be proven unrelated, so it is
+ * kept — matching how the dequeue-side `matchesTurn` treats paramless events.
+ */
 function isEstablishedUnrelatedNotification(
   value: unknown,
   threadId: string | undefined,
   turnId: string | undefined,
 ): boolean {
   const params = record(value);
-  if (!params) return threadId !== undefined || turnId !== undefined;
+  if (!params) return false;
   if (threadId && params.threadId !== threadId) return true;
-  const notificationTurnId =
-    typeof params.turnId === "string" ? params.turnId : record(params.turn)?.id;
-  return Boolean(turnId && notificationTurnId !== turnId);
+  return Boolean(turnId && notificationTurnId(params) !== turnId);
 }
 
 /** Estimates retained ingress size using its JSON representation. */
