@@ -2,38 +2,79 @@
 
 ## Goal
 
-Make the proxy predictable under hostile local input, protocol churn, and operational failure.
+Make the proxy predictable under hostile local input, protocol churn, and operational failure, with a deterministic offline release gate and a separately authorized live compatibility gate.
 
-## Work
+## Implemented baseline
 
-1. Create layered Vitest suites: pure translation units, fake app-server integration, HTTP/SSE conformance, and packed CLI smoke tests.
-    - Use Vitest projects or equivalent explicit configuration to separate fast unit tests, offline integration tests, packed-CLI tests, and opt-in live tests.
-    - Exclude live-test files from every default and required-CI Vitest project; run them only through an explicit live-test script and environment flag.
-    - Define HTTP/SSE conformance once and select either the deterministic fake backend or authenticated real app-server. Keep transport fault injection fake-only.
-2. Run the offline suite across supported Node versions and macOS/Linux/Windows.
-3. Add fuzz/property tests for JSON-RPC framing, SSE serialization, tool argument fragmentation, response mapping, and ignored fields.
-4. Test slow clients, bounded queues, abort races, app-server overload, child crashes, port conflicts, state corruption, same-thread concurrency rejection, continuation preflight/resume races, and shutdown during login/tool calls.
-5. Threat-model loopback DNS rebinding assumptions, CSRF-like browser requests, oversized bodies, path disclosure, log injection, executable substitution, malicious tool names/arguments, and local multi-user state permissions.
-6. Set restrictive state-directory/file permissions where supported and avoid storing message bodies or tool results unless necessary.
-7. Add structured event names and request correlation while redacting prompts, credentials, login data, paths, and tool payloads by default.
-8. Snapshot generated app-server schemas and fail CI on unexplained protocol drift.
-9. Add a compatibility fixture corpus from the official Chat Completions contract without copying sensitive or copyrighted examples.
-10. Document known incompatibilities, extension schemas, timeouts, concurrency limits, restart behavior, and troubleshooting.
-11. Publish Vitest coverage for the offline suites and enforce thresholds only after a measured baseline is recorded, so the runner migration does not disguise lost coverage.
+1. Vitest is the sole maintained test runner. `npm test` builds the source, type-checks maintained tests, and invokes `vitest run` once in non-watch mode.
+    - `vitest.config.js` selects all offline `*.test.ts` files and excludes `*.live.test.ts`.
+    - `vitest.live.config.js` selects only live tests and runs them serially with one worker.
+    - The fake and real app-server backends share the Chat Completions contract in `test/support/chat-contract.ts`. Fault injection remains fake-only.
+    - `test/support/protocol-fixtures.ts` type-checks maintained notifications against the generated `ServerNotification` union and builds complete nested `Turn` values.
+2. The deterministic suites already cover the main implemented contract and many failure paths:
+    - partial JSON-RPC frames, interleaved notifications and responses, malformed frames, overload errors, and transport closure;
+    - streaming and aggregate Chat Completions output, exact usage when reported, dynamic tools, built-in Codex activity normalization, and continuation/restart behavior;
+    - body and request timeouts, Host-header validation, client disconnects, ingress-queue overflow, late SSE failures, duplicate tool results, tool timeouts, same-thread concurrency rejection, resume races, state corruption, and atomic-write rollback;
+    - unsafe bind rejection, app-server initialization failure, elicitation fail-closed behavior, authentication cancellation, and basic signal shutdown; and
+    - the full offline sandbox × web-search policy matrix, managed denials, canonical cwd enforcement, and fresh/resumed request forwarding.
+3. Structured event names and HTTP request IDs are implemented. Default-visible failure summaries redact configured paths, home paths, URLs, and token-like values; full error detail is intentionally available only at `debug` level.
+4. New continuation state directories and files request `0700` and `0600` modes, respectively. Persisted records contain identifiers, bindings, lifecycle state, and dynamic-tool call IDs, but not prompts, message bodies, tool arguments, or tool results.
+5. Generated protocol artifacts, synthetic exposed-event fixtures, the root README, the repository guide, and the protocol contract are checked in. Current tests pin metadata and fixture presence, but do not yet prove a clean regeneration or complete schema compatibility.
+
+## Remaining work
+
+1. Add checked-in CI with two explicit modes.
+    - Define a finite runtime support policy and align `engines`, the README, and CI. Exercise the minimum Node.js 20 line, every retained LTS line, and the current release on Linux; exercise the primary supported LTS on macOS and Windows. Deduplicate overlapping versions rather than creating an unbounded `20+` matrix.
+    - Required pull-request and release CI is deterministic and offline. Run `npm ci` and `npm run check` using the checked-in default Vitest configuration.
+    - Online CI is optional and explicitly dispatched. Require a dedicated environment opt-in such as `CODEX_PROXY_LIVE_TEST=1` in addition to selecting `npm run test:live`; an ordinary required-CI command must be unable to select live tests accidentally.
+    - Type-check both Vitest configuration files. Keep packed-tarball installation and npm bin-shim smoke testing in Stage 08.
+2. Close the remaining deterministic failure-path gaps.
+    - Add a real slow-client/SSE backpressure test that proves bounded buffering and ordered drain behavior.
+    - Assert HTTP `maxRequests` rejection, port conflicts, unexpected child exit and CLI recovery, shutdown during login, and shutdown during a suspended dynamic tool call.
+    - Preserve existing coverage for request-body, ingress-queue, per-thread concurrency, request, tool, login, startup, and shutdown bounds.
+3. Add bounded property tests for JSON-RPC framing, SSE serialization, fragmented dynamic-tool arguments, response aggregation, ignored Chat Completions fields, and canonical binding material. Use deterministic seeds in required CI and retain minimal failing cases as regression fixtures.
+4. Expand the opt-in live contract without duplicating the offline matrix.
+    - Replace the Stage 03-specific live switch with named scenario selection so the live suite can state exactly which compatibility claims it verifies.
+    - Pass the authenticated app-server's actual managed requirements into the live proxy instead of substituting unrestricted requirements.
+    - Allocate one ephemeral root and one external state directory for the live suite, reuse both across proxy/app-server restarts so cwd and continuation bindings remain stable, expose the canonical root to contract scenarios, and remove both paths during suite cleanup.
+    - Define `read-only` plus disabled web search as the live policy prerequisite. If managed requirements disallow either value, report the unsupported prerequisite before starting model work rather than weakening policy or substituting a different mode. A successful Stage 07 live verification record must include this scenario passing.
+    - Add one serial `gpt-5.4-mini` scenario using that explicit safe `x_codex` policy tuple and the ephemeral test root. Require one bounded read-only built-in command, then assert streamed observational `tool_calls` and correlated `tool_results`. The built-in result is already executed Codex activity: it must not produce `finish_reason: "tool_calls"` or be sent back as a client `role: "tool"` message.
+    - Continue the completed response with its nonstandard `previous_response_id`, a new user message, and the identical `x_codex` settings. Verify that `thread/resume` is used and that the response can refer to the prior built-in tool information.
+    - Keep exact policy mapping and denial coverage offline. The live scenario proves that one safe explicit policy reaches and works with the real app-server; it must not claim that one model call validates every sandbox or web-search mode.
+    - The added built-in-tool turn and its continuation permit at most two additional model calls. Raise the suite-wide hard guard from four to six `gpt-5.4-mini` calls and document the expected normal total before running it.
+5. Complete the security review and permission hardening.
+    - Record the threat model for loopback DNS rebinding, hostile or missing Host headers, browser-originated form requests, oversized bodies, log injection, executable substitution, malicious tool names and arguments, path disclosure, and local multi-user state access.
+    - Decide and document the Origin policy. Preserve JSON-only Chat Completions POSTs and exact loopback authorities so browser-simple form requests and non-loopback aliases fail closed.
+    - Tighten or reject pre-existing state directories/files with permissive modes where the platform supports it, then assert resulting permissions without making Windows tests depend on POSIX mode bits.
+    - Audit default logs, snapshots, fixtures, persisted state, and CI artifacts for prompts, credentials, login URLs, filesystem paths, and tool payloads. Keep debug logging as an explicit sensitive-data opt-in.
+6. Make protocol drift visible and reproducible.
+    - Select one Codex version source for runtime resolution, generation, `protocol/VERSION.json`, and `protocol/CONTRACT.md`; remove the current version/ownership contradictions.
+    - Generate schemas with the package-owned Codex executable rather than an arbitrary `codex` on `PATH`, and add an offline clean-tree comparison that fails on unexplained changes.
+    - Type-check the exposed-event JSONL corpus against generated protocol types, including complete nested values, instead of checking method-name parity over `unknown` values.
+    - Add shared typed builders for maintained fake client requests, server requests, responses, and notifications. Validate every fake app-server message against the applicable generated union or method-specific generated type; the existing notification and `Turn` helpers are only the starting point.
+    - Reconcile the maintained schema-version-0 continuation store with the stale version-1 protocol schema documentation.
+    - Preserve unknown app-server events in bounded, redacted diagnostics as documented, or revise the contract before release if the implementation intentionally drops them.
+7. Add a compatibility corpus derived from the official Chat Completions contract without copying sensitive or copyrighted examples. Run published curl and representative generic-client examples against the deterministic fake backend.
+8. Finish user and contributor documentation for known incompatibilities, `x_codex` extension schemas, Host-header behavior, body/concurrency/time limits, overload and restart behavior, troubleshooting, protocol refresh, CI modes, and live-test authorization.
+9. Publish Vitest coverage for offline suites. Record the baseline before setting thresholds, then enforce thresholds without allowing the runner migration or generated files to disguise lost maintained-code coverage.
 
 ## Acceptance criteria
 
-- Required CI is entirely offline and deterministic.
-- `npm test` invokes Vitest once in non-watch mode, and required CI uses the same checked-in Vitest configuration.
-- No test or startup path can bind a non-loopback interface.
-- Security tests prove body, queue, concurrency, and timeout bounds.
+- Required CI is deterministic and offline across the supported Node.js and operating-system matrix. Online CI is optional, explicitly authorized, serial, and never a prerequisite for ordinary pull requests.
+- `npm test` invokes Vitest once in non-watch mode, excludes live tests, and required CI uses that same checked-in configuration.
+- No startup path accepts a non-loopback bind, and every HTTP route rejects non-loopback or malformed Host authorities.
+- Deterministic security tests prove body, queue, concurrency, timeout, disconnect, backpressure, process-failure, and shutdown bounds.
 - Elicitation is absent from advertised capabilities, and injected elicitation requests fail closed without leaving an app-server request pending.
-- Logs and persisted state pass a secrets/path review.
-- Opt-in live tests declare call counts and hard-code `gpt-5.4-mini`; CI cannot run them accidentally.
-- Supported generic HTTP/SSE clients pass the published compatibility examples.
+- Logs, fixtures, CI artifacts, and persisted state pass the secrets/path review; state permission tests pass on supported POSIX platforms.
+- Runtime and generated protocol versions agree, checked-in schemas regenerate cleanly, and every maintained fake app-server message type-checks against generated protocol structures.
+- Opt-in live tests require an environment flag, hard-code `gpt-5.4-mini`, declare a six-call maximum, and cover role-history SSE, a client-defined dynamic-tool round trip, restart continuation, explicit safe policy selection, built-in tool streaming, and continuation after built-in tool information.
+- Published compatibility examples pass through the fake backend with generic HTTP/SSE clients.
+- Offline coverage is published from a recorded baseline and meets the adopted thresholds.
 
-## Test-runner decision
+## Decisions and stage boundary
 
-Vitest is the sole test runner for maintained automated suites.
+Vitest remains the sole runner for maintained automated suites. The default configuration is the required offline gate; the dedicated live configuration is a separately authorized compatibility smoke and never substitutes for deterministic fault coverage.
 
-The shared Chat Completions contract runs through `npm test` with a fake app-server and through the dedicated `npm run test:live` opt-in with real Codex. The live configuration is serial, bounded to four `gpt-5.4-mini` call attempts, and excluded from required CI.
+Codex built-in tools are observational, already-executed activity. Their function-shaped `tool_calls` and nonstandard direct `tool_results` remain distinct from client-defined dynamic tools, which alone suspend with `finish_reason: "tool_calls"` and require a later `role: "tool"` request.
+
+Stage 07 owns source-tree quality, security, compatibility, schema-drift, coverage, and CI gates. Stage 08 owns `npm pack`, clean packed installation, and proof through the generated npm bin shim.
