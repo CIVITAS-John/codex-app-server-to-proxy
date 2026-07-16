@@ -1,6 +1,15 @@
-import { parseServeOptions } from "../core/config.js";
-import { createLogger, logFailure } from "../core/logger.js";
-import { canonicalizeRoot } from "../core/policy.js";
+import {
+  DEFAULT_STATE_DIR_DESCRIPTION,
+  parseServeOptions,
+  resolveServeOptions,
+  type ParsedServeOptions,
+  type ServeOptions,
+} from "../core/config.js";
+import {
+  createLogger,
+  type Logger,
+  type RedactionContext,
+} from "../core/logger.js";
 import { createProxyServer } from "../http/server.js";
 import { startAppServer, type AppServer } from "../app-server/app-server.js";
 import { ensureAuthenticated } from "../app-server/auth.js";
@@ -26,7 +35,7 @@ Options:
   --body-limit <bytes>          Maximum request body (default: 1048576)
   --max-requests <count>        Maximum concurrent requests (default: 100)
   --log-level <level>           debug, info, warn, or error (default: info)
-  --state-dir <directory>       State directory (default: <root>/.codex-openai-proxy)`;
+  --state-dir <directory>       State directory (default: ${DEFAULT_STATE_DIR_DESCRIPTION})`;
 
 /** Runs the CLI lifecycle and returns its eventual process exit code. */
 export async function run(argv: readonly string[]): Promise<number> {
@@ -37,11 +46,31 @@ export async function run(argv: readonly string[]): Promise<number> {
   if (argv[0] !== "serve")
     throw new Error(`Unknown command: ${argv[0]}\n\n${usage}`);
   const parsed = parseServeOptions(argv.slice(1));
-  const canonicalRoot = await canonicalizeRoot(parsed.root);
-  // The state directory is intentionally kept outside the root (see config.ts),
-  // so it is used verbatim; only the root is canonicalized here.
-  const options = { ...parsed, root: canonicalRoot };
-  const log = createLogger(options.logLevel);
+  let log = createLogger(parsed.logLevel, undefined, redactionContext(parsed));
+  try {
+    const options = await resolveServeOptions(parsed);
+    log = createLogger(options.logLevel, undefined, redactionContext(options));
+    return await runServer(options, log);
+  } catch (error) {
+    log.failure("startup_failed", {}, error);
+    return 1;
+  }
+}
+
+/** Derives one redaction context from parsed or finalized configuration. */
+function redactionContext(
+  options: Pick<ParsedServeOptions, "root" | "codexPath" | "stateDir">,
+): RedactionContext {
+  return {
+    root: options.root,
+    sensitivePaths: [options.stateDir, options.codexPath].filter(
+      (path): path is string => path !== undefined,
+    ),
+  };
+}
+
+/** Runs the proxy lifecycle after configuration has been fully resolved. */
+async function runServer(options: ServeOptions, log: Logger): Promise<number> {
   const proxy = createProxyServer(options, log);
   const address = await proxy.listen();
   log("info", "server_listening", {
@@ -100,7 +129,7 @@ export async function run(argv: readonly string[]): Promise<number> {
         recovering = false;
         return;
       } catch (error) {
-        logFailure(log, "app_server_restart_failed", { attempt }, error, options.root);
+        log.failure("app_server_restart_failed", { attempt }, error);
       }
     }
     recovering = false;
@@ -134,7 +163,7 @@ export async function run(argv: readonly string[]): Promise<number> {
             resolve(0);
           },
           (error: unknown) => {
-            logFailure(log, "shutdown_failed", {}, error, options.root);
+            log.failure("shutdown_failed", {}, error);
             resolve(1);
           },
         );

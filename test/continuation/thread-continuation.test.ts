@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
 import { test } from "vitest";
-import { parseServeOptions } from "../../src/core/config.js";
+import {
+  parseServeOptions,
+  resolveServeOptions,
+} from "../../src/core/config.js";
 import { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
 import { createLogger } from "../../src/core/logger.js";
 import { createProxyServer, type ProxyServer } from "../../src/http/server.js";
@@ -123,14 +126,16 @@ async function startProxy(
   const configuredRoot = join(directory, "workspace");
   await mkdir(configuredRoot, { recursive: true });
   const root = await realpath(configuredRoot);
-  const options = parseServeOptions([
-    "--port",
-    "0",
-    "--root",
-    root,
-    "--state-dir",
-    directory,
-  ]);
+  const options = await resolveServeOptions(
+    parseServeOptions([
+      "--port",
+      "0",
+      "--root",
+      root,
+      "--state-dir",
+      directory,
+    ]),
+  );
   if (record) {
     const defaultHash = defaultPolicyHash(configuredRoot);
     new ResponseStore(directory).put({

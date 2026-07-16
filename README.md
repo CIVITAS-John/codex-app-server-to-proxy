@@ -161,7 +161,7 @@ Continuations must repeat the same effective `x_codex` settings. A change is rej
 
 > **Project trust side effect:** Starting a new thread with `workspace-write` and a `cwd` can cause app-server to mark that project as trusted in the user's `config.toml`. Set `--root` to the narrowest appropriate boundary; the proxy will not cause app-server to trust a directory outside it.
 
-> **State directory placement:** Under `workspace-write` the Codex agent can write anywhere in the effective `cwd`. The proxy therefore keeps its continuation store outside the root by default (under `~/.codex-openai-proxy`, namespaced per root). Pointing `--state-dir` back inside the root lets a writable-sandbox turn modify the store, so keep it outside the root.
+> **State directory placement:** Under `workspace-write` the Codex agent can write anywhere in the effective `cwd`. The proxy therefore derives its continuation store from the canonical root and keeps it outside that root by default (under `~/.codex-openai-proxy`, namespaced per root). Startup fails if a broad root would contain the default store. Relative `--state-dir` values are resolved against the canonical root. Pointing `--state-dir` back inside the root explicitly lets a writable-sandbox turn modify the store, so keep it outside the root.
 
 ## Usage metadata
 

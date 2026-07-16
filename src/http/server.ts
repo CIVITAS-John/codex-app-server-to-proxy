@@ -8,7 +8,7 @@ import {
 import type { Socket } from "node:net";
 import { HttpError, writeError, writeJson } from "./errors.js";
 import type { ServeOptions } from "../core/config.js";
-import { logFailure, type Logger } from "../core/logger.js";
+import type { Logger } from "../core/logger.js";
 import type { JsonRpcTransport } from "../app-server/json-rpc.js";
 import {
   UNRESTRICTED_POLICY_REQUIREMENTS,
@@ -127,7 +127,7 @@ export function createProxyServer(
                 "internal_error",
               );
       if (!(cause instanceof HttpError))
-        logFailure(log, "request_failed", { request_id: requestId }, cause, options.root);
+        log.failure("request_failed", { request_id: requestId }, cause);
       writeError(response, error);
     });
   });

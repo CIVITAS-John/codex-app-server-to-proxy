@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
 import { test } from "vitest";
-import { parseServeOptions } from "../../src/core/config.js";
+import {
+  parseServeOptions,
+  resolveServeOptions,
+} from "../../src/core/config.js";
 import { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
 import { createLogger } from "../../src/core/logger.js";
 import { createProxyServer, type ProxyServer } from "../../src/http/server.js";
@@ -193,14 +196,16 @@ async function startProxy(
   toolTimeoutMs = 5_000,
 ): Promise<{ origin: string; proxy: ProxyServer }> {
   const proxy = createProxyServer(
-    parseServeOptions([
-      "--port",
-      "0",
-      "--state-dir",
-      stateDir,
-      "--tool-timeout",
-      `${toolTimeoutMs}ms`,
-    ]),
+    await resolveServeOptions(
+      parseServeOptions([
+        "--port",
+        "0",
+        "--state-dir",
+        stateDir,
+        "--tool-timeout",
+        `${toolTimeoutMs}ms`,
+      ]),
+    ),
     silentLogger,
   );
   proxy.setTransport(fake.transport, UNRESTRICTED_POLICY_REQUIREMENTS);

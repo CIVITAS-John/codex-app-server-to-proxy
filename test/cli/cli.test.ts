@@ -5,7 +5,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "vitest";
-import { APP_SERVER_RECOVERY_DELAYS_MS } from "../../src/cli/cli.js";
+import { APP_SERVER_RECOVERY_DELAYS_MS, usage } from "../../src/cli/cli.js";
 import { repoRootPath } from "../support/repo-root.js";
 
 test("CLI recovery uses the documented bounded retry schedule", () => {
@@ -13,6 +13,8 @@ test("CLI recovery uses the documented bounded retry schedule", () => {
     APP_SERVER_RECOVERY_DELAYS_MS,
     [1_000, 3_000, 5_000, 10_000],
   );
+  assert.match(usage, /per-root under ~\/\.codex-openai-proxy/);
+  assert.equal(usage.includes("<root>/.codex-openai-proxy"), false);
 });
 
 test("CLI rejects unsafe binds before opening a socket", async () => {
@@ -29,6 +31,40 @@ test("CLI rejects unsafe binds before opening a socket", async () => {
   assert.equal(code, 1);
   assert.match(stderr, /startup_failed/);
   assert.match(stderr, /Only 127\.0\.0\.1/);
+});
+
+test("CLI redacts configured paths from initial startup failures", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-proxy-redact-test-"));
+  const missingCodex = join(directory, "secret-client", "missing-codex");
+  try {
+    const child = spawn(
+      process.execPath,
+      [
+        "dist/bin.js",
+        "serve",
+        "--port",
+        "0",
+        "--root",
+        ".",
+        "--state-dir",
+        join(directory, "state"),
+        "--codex-path",
+        missingCodex,
+      ],
+      { cwd: repoRootPath, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let stderr = "";
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    const [code] = await once(child, "exit");
+    assert.equal(code, 1);
+    assert.match(stderr, /startup_failed/);
+    assert.match(stderr, /\[REDACTED_PATH\]/);
+    assert.equal(stderr.includes(missingCodex), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("CLI exits cleanly after a termination signal", async () => {

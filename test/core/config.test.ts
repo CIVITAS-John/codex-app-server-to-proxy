@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
+import { realpathSync } from "node:fs";
+import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { homedir } from "node:os";
+import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { test } from "vitest";
 import {
   normalizeLoopbackHost,
   parseServeOptions,
+  resolveServeOptions,
 } from "../../src/core/config.js";
 
 test("loopback validation accepts only exact safe forms", () => {
@@ -28,36 +32,71 @@ test("loopback validation accepts only exact safe forms", () => {
   }
 });
 
-test("serve options have safe documented defaults and reject ambiguity", () => {
-  const parsed = parseServeOptions([], "/tmp/project");
-  assert.equal(parsed.host, "127.0.0.1");
-  assert.equal(parsed.port, 8787);
-  assert.equal(parsed.root, "/tmp/project");
-  assert.equal(parsed.toolTimeoutMs, 300_000);
-  assert.equal(parsed.implicitToolContinuation, true);
-  // The default state directory lives under the user's home, outside the root,
-  // so a writable-sandbox request can never reach the continuation store.
-  assert.ok(
-    parsed.stateDir.startsWith(join(homedir(), ".codex-openai-proxy") + sep),
-  );
-  assert.equal(parsed.stateDir.startsWith(`/tmp/project${sep}`), false);
-  // An explicit relative --state-dir is still resolved against the root.
-  assert.equal(
-    parseServeOptions(["--state-dir", "state"], "/tmp/project").stateDir,
-    "/tmp/project/state",
-  );
-  assert.throws(
-    () => parseServeOptions(["--port", "80", "--port", "81"]),
-    /Duplicate/,
-  );
-  assert.throws(() => parseServeOptions(["--unknown", "x"]), /Unknown/);
-  assert.equal(
-    parseServeOptions(["--implicit-tool-continuation", "false"])
-      .implicitToolContinuation,
-    false,
-  );
-  assert.throws(
-    () => parseServeOptions(["--implicit-tool-continuation", "yes"]),
-    /true or false/,
-  );
+test("serve options have safe documented defaults and reject ambiguity", async () => {
+  const canonicalHome = realpathSync(homedir());
+  const directory = await mkdtemp(join(tmpdir(), "codex-config-test-"));
+  const project = join(directory, "project");
+  const projectLink = join(directory, "project-link");
+  await mkdir(project);
+  await symlink(project, projectLink, "dir");
+  const canonicalProject = realpathSync(project);
+  try {
+    const parsed = parseServeOptions([], project);
+    assert.equal(parsed.host, "127.0.0.1");
+    assert.equal(parsed.port, 8787);
+    assert.equal(parsed.root, project);
+    assert.equal(parsed.toolTimeoutMs, 300_000);
+    assert.equal(parsed.implicitToolContinuation, true);
+    assert.equal(parsed.stateDir, undefined);
+    const finalized = await resolveServeOptions(parsed);
+    // The default state directory is namespaced under the canonical home path
+    // and is lexically outside this canonical project root.
+    assert.ok(
+      finalized.stateDir.startsWith(
+        join(canonicalHome, ".codex-openai-proxy") + sep,
+      ),
+    );
+    assert.equal(
+      finalized.stateDir.startsWith(`${canonicalProject}${sep}`),
+      false,
+    );
+
+    const explicit = parseServeOptions(
+      ["--root", projectLink, "--state-dir", "state"],
+      "/",
+    );
+    assert.equal(explicit.stateDir, "state");
+    const resolvedExplicit = await resolveServeOptions(explicit);
+    assert.equal(resolvedExplicit.root, canonicalProject);
+    assert.equal(resolvedExplicit.stateDir, join(canonicalProject, "state"));
+    assert.equal(
+      (
+        await resolveServeOptions(
+          parseServeOptions(["--root", projectLink], "/"),
+        )
+      ).stateDir,
+      finalized.stateDir,
+    );
+
+    await assert.rejects(
+      resolveServeOptions(parseServeOptions([], homedir())),
+      /default --state-dir falls inside --root/,
+    );
+    assert.throws(
+      () => parseServeOptions(["--port", "80", "--port", "81"]),
+      /Duplicate/,
+    );
+    assert.throws(() => parseServeOptions(["--unknown", "x"]), /Unknown/);
+    assert.equal(
+      parseServeOptions(["--implicit-tool-continuation", "false"])
+        .implicitToolContinuation,
+      false,
+    );
+    assert.throws(
+      () => parseServeOptions(["--implicit-tool-continuation", "yes"]),
+      /true or false/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

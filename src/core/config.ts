@@ -1,9 +1,15 @@
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import { canonicalizeRoot, isPathWithinRoot } from "./policy.js";
 
 /** Default maximum accepted HTTP request-body size. */
 export const DEFAULT_BODY_LIMIT = 1024 * 1024;
+
+/** User-facing description of the root-namespaced state default. */
+export const DEFAULT_STATE_DIR_DESCRIPTION =
+  "per-root under ~/.codex-openai-proxy";
 
 /** Fully validated configuration for the proxy server. */
 export interface ServeOptions {
@@ -19,6 +25,11 @@ export interface ServeOptions {
   maxRequests: number;
   logLevel: LogLevel;
   stateDir: string;
+}
+
+/** Syntactically valid CLI options awaiting canonical root finalization. */
+export interface ParsedServeOptions extends Omit<ServeOptions, "stateDir"> {
+  stateDir?: string | undefined;
 }
 
 /** Supported structured-log severity levels. */
@@ -70,17 +81,39 @@ function boolean(name: string, value: string): boolean {
   throw new Error(`${name} must be true or false.`);
 }
 
-/** Per-root state directory under the user's home, kept outside the root. */
+/** Builds the default per-root state directory from a canonical root. */
 function defaultStateDir(root: string): string {
-  const namespace = createHash("sha256").update(root).digest("hex").slice(0, 16);
-  return join(homedir(), ".codex-openai-proxy", namespace);
+  const namespace = createHash("sha256")
+    .update(root)
+    .digest("hex")
+    .slice(0, 16);
+  return join(realpathSync(homedir()), ".codex-openai-proxy", namespace);
 }
 
-/** Parses and validates all options for the serve command. */
+/** Canonicalizes the root and derives every root-dependent serve option. */
+export async function resolveServeOptions(
+  parsed: ParsedServeOptions,
+): Promise<ServeOptions> {
+  const canonicalRoot = await canonicalizeRoot(parsed.root);
+  const usesDefaultStateDir = parsed.stateDir === undefined;
+  const stateDir =
+    parsed.stateDir === undefined
+      ? defaultStateDir(canonicalRoot)
+      : isAbsolute(parsed.stateDir)
+        ? parsed.stateDir
+        : resolve(canonicalRoot, parsed.stateDir);
+  if (usesDefaultStateDir && isPathWithinRoot(canonicalRoot, stateDir))
+    throw new Error(
+      "The default --state-dir falls inside --root; set --state-dir to a directory outside the root.",
+    );
+  return { ...parsed, root: canonicalRoot, stateDir };
+}
+
+/** Parses and validates CLI syntax without accessing the filesystem. */
 export function parseServeOptions(
   args: readonly string[],
   cwd = process.cwd(),
-): ServeOptions {
+): ParsedServeOptions {
   const values = new Map<string, string>();
   for (let index = 0; index < args.length; index += 1) {
     const token = args[index];
@@ -114,17 +147,6 @@ export function parseServeOptions(
 
   const root = resolve(cwd, values.get("--root") ?? ".");
   const stateValue = values.get("--state-dir");
-  // The default state directory lives outside the root so a writable-sandbox
-  // request (whose writable set is the root) can never reach the proxy's own
-  // continuation store. It is namespaced by root so distinct projects stay
-  // isolated. An explicit --state-dir is honored verbatim; placing one inside
-  // the root re-opens that exposure under `workspace-write`.
-  const stateDir =
-    stateValue === undefined
-      ? defaultStateDir(root)
-      : isAbsolute(stateValue)
-        ? stateValue
-        : resolve(root, stateValue);
   const logLevel = values.get("--log-level") ?? "info";
   if (!["debug", "info", "warn", "error"].includes(logLevel)) {
     throw new Error("--log-level must be debug, info, warn, or error.");
@@ -163,6 +185,6 @@ export function parseServeOptions(
       10_000,
     ),
     logLevel: logLevel as LogLevel,
-    stateDir,
+    ...(stateValue === undefined ? {} : { stateDir: stateValue }),
   };
 }

@@ -8,7 +8,10 @@ import { test } from "vitest";
 import { EventNormalizer, normalizeNotification } from "../../src/http/chat.js";
 import { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
 import { createLogger } from "../../src/core/logger.js";
-import { parseServeOptions } from "../../src/core/config.js";
+import {
+  parseServeOptions,
+  resolveServeOptions,
+} from "../../src/core/config.js";
 import { createProxyServer } from "../../src/http/server.js";
 import {
   protocolNotification,
@@ -329,14 +332,16 @@ async function withChatServer(
   stateDir = `${tmpdir()}/codex-proxy-chat-tests-${process.pid}`,
 ): Promise<void> {
   const proxy = createProxyServer(
-    parseServeOptions([
-      "--port",
-      "0",
-      "--state-dir",
-      stateDir,
-      "--request-timeout",
-      requestTimeout,
-    ]),
+    await resolveServeOptions(
+      parseServeOptions([
+        "--port",
+        "0",
+        "--state-dir",
+        stateDir,
+        "--request-timeout",
+        requestTimeout,
+      ]),
+    ),
     silentLogger,
   );
   proxy.setTransport(fakeAppServer(), UNRESTRICTED_POLICY_REQUIREMENTS);
@@ -1043,14 +1048,16 @@ test("request policies map exactly, bind continuations, and honor managed denial
   await mkdir(configuredCwd, { recursive: true });
   const root = await realpath(configuredRoot);
   const cwd = await realpath(configuredCwd);
-  const options = parseServeOptions([
-    "--port",
-    "0",
-    "--root",
-    root,
-    "--state-dir",
-    join(directory, "state"),
-  ]);
+  const options = await resolveServeOptions(
+    parseServeOptions([
+      "--port",
+      "0",
+      "--root",
+      root,
+      "--state-dir",
+      join(directory, "state"),
+    ]),
+  );
   const proxy = createProxyServer(options, silentLogger);
   const fake = policyCapturingAppServer();
   proxy.setTransport(fake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
@@ -1271,14 +1278,16 @@ test("request policies map exactly, bind continuations, and honor managed denial
 test("refreshing managed requirements on an unchanged transport takes effect", async () => {
   const directory = await mkdtemp(join(tmpdir(), "codex-policy-refresh-"));
   const root = await realpath(directory);
-  const options = parseServeOptions([
-    "--port",
-    "0",
-    "--root",
-    root,
-    "--state-dir",
-    join(directory, "state"),
-  ]);
+  const options = await resolveServeOptions(
+    parseServeOptions([
+      "--port",
+      "0",
+      "--root",
+      root,
+      "--state-dir",
+      join(directory, "state"),
+    ]),
+  );
   const proxy = createProxyServer(options, silentLogger);
   const fake = policyCapturingAppServer();
   proxy.setTransport(fake.rpc, {

@@ -12,12 +12,25 @@ const priorities: Record<LogLevel, number> = {
 /** Receives one structured log entry. */
 export type LogWriter = (entry: Record<string, unknown>) => void;
 
+/** Paths that default-visible failure summaries must mask. */
+export interface RedactionContext {
+  root: string;
+  sensitivePaths: readonly string[];
+}
+
+/** Structured logger with failure reporting bound to one redaction context. */
+export interface Logger {
+  (entryLevel: LogLevel, event: string, fields?: Record<string, unknown>): void;
+  failure(event: string, fields: Record<string, unknown>, error: unknown): void;
+}
+
 /** Creates a structured logger filtered at the configured level. */
 export function createLogger(
   level: LogLevel,
   write: LogWriter = defaultWriter,
-) {
-  return (
+  redaction: RedactionContext = { root: "", sensitivePaths: [] },
+): Logger {
+  const log = ((
     entryLevel: LogLevel,
     event: string,
     fields: Record<string, unknown> = {},
@@ -29,31 +42,23 @@ export function createLogger(
       event,
       ...fields,
     });
+  }) as Logger;
+  log.failure = (
+    event: string,
+    fields: Record<string, unknown>,
+    error: unknown,
+  ): void => {
+    const message = error instanceof Error ? error.message : String(error);
+    log("error", event, {
+      ...fields,
+      error: redact(message, redaction.root, redaction.sensitivePaths),
+    });
+    log("debug", `${event}_detail`, { ...fields, error: message });
   };
+  return log;
 }
 
 /** Writes structured logs to stderr as newline-delimited JSON. */
 function defaultWriter(entry: Record<string, unknown>): void {
   process.stderr.write(`${JSON.stringify(entry)}\n`);
-}
-
-/** Structured logger returned by createLogger. */
-export type Logger = ReturnType<typeof createLogger>;
-
-/**
- * Logs a failure so default `info` deployments still get a diagnostic: a
- * redacted error summary at `error` level, plus the full untrimmed detail at
- * `debug`. The redaction keeps the configured root and other local paths out of
- * the always-visible entry while preserving them under `--log-level debug`.
- */
-export function logFailure(
-  log: Logger,
-  event: string,
-  fields: Record<string, unknown>,
-  error: unknown,
-  root: string,
-): void {
-  const message = error instanceof Error ? error.message : String(error);
-  log("error", event, { ...fields, error: redact(message, root) });
-  log("debug", `${event}_detail`, { ...fields, error: message });
 }

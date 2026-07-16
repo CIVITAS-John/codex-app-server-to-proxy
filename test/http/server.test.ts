@@ -5,7 +5,11 @@ import { once } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
-import { parseServeOptions, type ServeOptions } from "../../src/core/config.js";
+import {
+  parseServeOptions,
+  resolveServeOptions,
+  type ServeOptions,
+} from "../../src/core/config.js";
 import { createLogger } from "../../src/core/logger.js";
 import { createProxyServer, type ProxyServer } from "../../src/http/server.js";
 
@@ -13,14 +17,18 @@ import { createProxyServer, type ProxyServer } from "../../src/http/server.js";
 const silentLogger = createLogger("error", () => {});
 
 /** Builds safe ephemeral listener options for a server test. */
-function options(overrides: Partial<ServeOptions> = {}): ServeOptions {
+async function options(
+  overrides: Partial<ServeOptions> = {},
+): Promise<ServeOptions> {
   return {
-    ...parseServeOptions([
-      "--port",
-      "0",
-      "--state-dir",
-      join(tmpdir(), `codex-proxy-server-test-${process.pid}`),
-    ]),
+    ...(await resolveServeOptions(
+      parseServeOptions([
+        "--port",
+        "0",
+        "--state-dir",
+        join(tmpdir(), `codex-proxy-server-test-${process.pid}`),
+      ]),
+    )),
     ...overrides,
   };
 }
@@ -30,7 +38,7 @@ async function withServer(
   overrides: Partial<ServeOptions>,
   run: (origin: string, proxy: ProxyServer) => Promise<void>,
 ): Promise<void> {
-  const proxy = createProxyServer(options(overrides), silentLogger);
+  const proxy = createProxyServer(await options(overrides), silentLogger);
   const address = await proxy.listen();
   try {
     await run(

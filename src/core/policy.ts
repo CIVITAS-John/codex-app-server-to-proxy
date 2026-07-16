@@ -418,4 +418,3 @@ function isGranularApproval(value: unknown): boolean {
     )
   );
 }
-

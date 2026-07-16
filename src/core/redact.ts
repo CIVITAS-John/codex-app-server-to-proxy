@@ -1,19 +1,37 @@
 import { homedir } from "node:os";
-import { sep } from "node:path";
+import { isAbsolute, parse, sep } from "node:path";
 
 /** Removes common URL, credential, and local-path forms from diagnostics. */
-export function redact(value: string, root: string): string {
+export function redact(
+  value: string,
+  root: string,
+  sensitivePaths: readonly string[] = [],
+): string {
   const home = homedir();
   let result = value;
-  // Redact the configured root before the home directory: a root nested under
-  // home must be masked as one unit ([REDACTED_CWD]) rather than having its
-  // home prefix rewritten first, which would leak the home-relative tail.
-  // Skip trivially broad roots (empty, the filesystem root, or home itself) to
-  // avoid over-redacting unrelated text.
-  if (root && root !== sep && root !== home)
-    result = result.replaceAll(root, "[REDACTED_CWD]");
+  const replacements = [
+    ...sensitivePaths
+      .filter(
+        (path) =>
+          path.length > 1 &&
+          parse(path).root !== path &&
+          (isAbsolute(path) || path.includes(sep)),
+      )
+      .map((path) => [path, "[REDACTED_PATH]"] as const),
+    ...(root && parse(root).root !== root && root !== home
+      ? ([[root, "[REDACTED_CWD]"]] as const)
+      : []),
+    [home, "[REDACTED_HOME]"] as const,
+  ].sort(([left], [right]) => right.length - left.length);
+  // Replace the most specific paths first so masking a parent never exposes a
+  // sensitive child as a readable relative suffix.
+  const seen = new Set<string>();
+  for (const [path, replacement] of replacements) {
+    if (seen.has(path)) continue;
+    seen.add(path);
+    result = result.replaceAll(path, replacement);
+  }
   return result
-    .replaceAll(home, "[REDACTED_HOME]")
     .replace(/https?:\/\/\S+/gi, "[REDACTED_URL]")
     .replace(/\b(token|code|secret)=\S+/gi, "$1=[REDACTED]");
 }

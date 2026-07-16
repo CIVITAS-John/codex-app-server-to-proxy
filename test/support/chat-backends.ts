@@ -6,7 +6,10 @@ import {
   type AppServer,
 } from "../../src/app-server/app-server.js";
 import { ensureAuthenticated } from "../../src/app-server/auth.js";
-import { parseServeOptions } from "../../src/core/config.js";
+import {
+  parseServeOptions,
+  resolveServeOptions,
+} from "../../src/core/config.js";
 import { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
 import { createLogger } from "../../src/core/logger.js";
 import { createProxyServer, type ProxyServer } from "../../src/http/server.js";
@@ -303,16 +306,18 @@ async function startProxy(
   /** Starts one proxy process view over the retained transport and state directory. */
   const listen = async (): Promise<void> => {
     proxy = createProxyServer(
-      parseServeOptions([
-        "--port",
-        "0",
-        "--request-timeout",
-        "2m",
-        "--shutdown-timeout",
-        "10s",
-        "--state-dir",
-        stateDir,
-      ]),
+      await resolveServeOptions(
+        parseServeOptions([
+          "--port",
+          "0",
+          "--request-timeout",
+          "2m",
+          "--shutdown-timeout",
+          "10s",
+          "--state-dir",
+          stateDir,
+        ]),
+      ),
       silentLogger,
     );
     proxy.setTransport(rpc, UNRESTRICTED_POLICY_REQUIREMENTS);

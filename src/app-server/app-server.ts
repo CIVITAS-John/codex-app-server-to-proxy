@@ -265,4 +265,3 @@ function failClosed(
   }
   log("warn", "app_server_request_declined", { method: request.method });
 }
-
