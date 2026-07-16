@@ -35,7 +35,7 @@ This repository builds `codex-openai-proxy`, a localhost-only TypeScript CLI tha
 - Default tests must be deterministic and offline, using recorded synthetic fixtures or a fake app-server.
 - Build maintained fake app-server messages from the generated protocol structures. Type-check notifications against the generated `ServerNotification` union and use shared typed fixture builders for complete nested values such as `Turn`.
 - Tests must cover partial JSON-RPC frames, interleaved notifications, SSE backpressure, disconnects, duplicate tool results, process exit, and malformed inputs.
-- Live tests must be opt-in through an explicit environment flag, run serially, cap output, and use only `gpt-5.4-mini`.
+- Live tests must be opt-in through explicit selection of the dedicated live configuration, run serially, cap output, and use only `gpt-5.4-mini`.
 - Never run a live test as part of the default `test` script or pull-request CI.
 - Redact login URLs, tokens, filesystem paths, prompts, and tool arguments from snapshots and logs where they could contain sensitive data.
     - A first-run authorization URL may be written once to the interactive terminal as a login fallback, but must not enter structured logs, captured diagnostics, or persisted state.

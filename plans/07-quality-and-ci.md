@@ -26,16 +26,18 @@ Make the proxy predictable under hostile local input, protocol churn, and operat
 1. Add checked-in CI with two explicit modes.
     - Define a finite runtime support policy and align `engines`, the README, and CI. Exercise the minimum Node.js 20 line, every retained LTS line, and the current release on Linux; exercise the primary supported LTS on macOS and Windows. Deduplicate overlapping versions rather than creating an unbounded `20+` matrix.
     - Required pull-request and release CI is deterministic and offline. Run `npm ci` and `npm run check` using the checked-in default Vitest configuration.
-    - Online CI is optional and explicitly dispatched. Require a dedicated environment opt-in such as `CODEX_PROXY_LIVE_TEST=1` in addition to selecting `npm run test:live`; an ordinary required-CI command must be unable to select live tests accidentally.
     - Type-check both Vitest configuration files. Keep packed-tarball installation and npm bin-shim smoke testing in Stage 08.
 2. Close the remaining deterministic failure-path gaps.
     - Add a real slow-client/SSE backpressure test that proves bounded buffering and ordered drain behavior.
-    - Assert HTTP `maxRequests` rejection, port conflicts, unexpected child exit and CLI recovery, shutdown during login, and shutdown during a suspended dynamic tool call.
+    - Assert the HTTP 429 `overloaded` rejection when `maxRequests` is reached; the existing `maxRequests: 1` test proves only that a disconnect releases capacity.
+    - Drive a real unexpected child exit through CLI recovery; the current test pins only the retry-delay schedule constant.
+    - Assert bind-time port-conflict failure, shutdown during an in-flight login, and signal-driven shutdown during a suspended dynamic tool call. Existing suspension coverage disposes the coordinator directly rather than exercising process shutdown.
     - Preserve existing coverage for request-body, ingress-queue, per-thread concurrency, request, tool, login, startup, and shutdown bounds.
 3. Add bounded property tests for JSON-RPC framing, SSE serialization, fragmented dynamic-tool arguments, response aggregation, ignored Chat Completions fields, and canonical binding material. Use deterministic seeds in required CI and retain minimal failing cases as regression fixtures.
 4. Expand the opt-in live contract without duplicating the offline matrix.
-    - Replace the Stage 03-specific live switch with named scenario selection so the live suite can state exactly which compatibility claims it verifies.
+    - Replace the Stage 03-specific `stage03Live` switch and the stale `test:live:hello` script alias with named scenario selection so the live suite can state exactly which compatibility claims it verifies.
     - Pass the authenticated app-server's actual managed requirements into the live proxy instead of substituting unrestricted requirements.
+    - Start the live app-server through the same package-owned executable resolution as the runtime, keeping `CODEX_PATH` as an explicit override. The live backend currently defaults to a bare `codex` on `PATH` while its documentation claims package ownership.
     - Allocate one ephemeral root and one external state directory for the live suite, reuse both across proxy/app-server restarts so cwd and continuation bindings remain stable, expose the canonical root to contract scenarios, and remove both paths during suite cleanup.
     - Define `read-only` plus disabled web search as the live policy prerequisite. If managed requirements disallow either value, report the unsupported prerequisite before starting model work rather than weakening policy or substituting a different mode. A successful Stage 07 live verification record must include this scenario passing.
     - Add one serial `gpt-5.4-mini` scenario using that explicit safe `x_codex` policy tuple and the ephemeral test root. Require one bounded read-only built-in command, then assert streamed observational `tool_calls` and correlated `tool_results`. The built-in result is already executed Codex activity: it must not produce `finish_reason: "tool_calls"` or be sent back as a client `role: "tool"` message.
@@ -48,12 +50,12 @@ Make the proxy predictable under hostile local input, protocol churn, and operat
     - Tighten or reject pre-existing state directories/files with permissive modes where the platform supports it, then assert resulting permissions without making Windows tests depend on POSIX mode bits.
     - Audit default logs, snapshots, fixtures, persisted state, and CI artifacts for prompts, credentials, login URLs, filesystem paths, and tool payloads. Keep debug logging as an explicit sensitive-data opt-in.
 6. Make protocol drift visible and reproducible.
-    - Select one Codex version source for runtime resolution, generation, `protocol/VERSION.json`, and `protocol/CONTRACT.md`; remove the current version/ownership contradictions.
+    - Select one Codex version source for runtime resolution, generation, `protocol/VERSION.json`, and `protocol/CONTRACT.md`; remove the current version/ownership contradictions. Today the artifacts pin `0.144.0-alpha.4`, the package depends on `@openai/codex ^0.144.1`, `VERSION.json` still calls npm executable ownership unestablished, and the runtime version check matches only `/codex/i` without comparing any version.
     - Generate schemas with the package-owned Codex executable rather than an arbitrary `codex` on `PATH`, and add an offline clean-tree comparison that fails on unexplained changes.
     - Type-check the exposed-event JSONL corpus against generated protocol types, including complete nested values, instead of checking method-name parity over `unknown` values.
     - Add shared typed builders for maintained fake client requests, server requests, responses, and notifications. Validate every fake app-server message against the applicable generated union or method-specific generated type; the existing notification and `Turn` helpers are only the starting point.
-    - Reconcile the maintained schema-version-0 continuation store with the stale version-1 protocol schema documentation.
-    - Preserve unknown app-server events in bounded, redacted diagnostics as documented, or revise the contract before release if the implementation intentionally drops them.
+    - Reconcile the maintained schema-version-0 continuation store with the stale version-1 `response-mapping.schema.json` documentation. Beyond the version constant, the documented record shape — `turnId`, `updatedAt`, a `fingerprint` object, and a different status enum — no longer matches the persisted record, and the store already treats the documented version 1 as untrusted.
+    - Preserve unknown app-server events in bounded, redacted diagnostics as documented, or revise the contract before release if the implementation intentionally drops them. The normalizer currently discards unknown notifications with no diagnostic record; only child stderr reaches the bounded redacted debug channel.
 7. Add a compatibility corpus derived from the official Chat Completions contract without copying sensitive or copyrighted examples. Run published curl and representative generic-client examples against the deterministic fake backend.
 8. Finish user and contributor documentation for known incompatibilities, `x_codex` extension schemas, Host-header behavior, body/concurrency/time limits, overload and restart behavior, troubleshooting, protocol refresh, CI modes, and live-test authorization.
 9. Publish Vitest coverage for offline suites. Record the baseline before setting thresholds, then enforce thresholds without allowing the runner migration or generated files to disguise lost maintained-code coverage.
@@ -67,7 +69,7 @@ Make the proxy predictable under hostile local input, protocol churn, and operat
 - Elicitation is absent from advertised capabilities, and injected elicitation requests fail closed without leaving an app-server request pending.
 - Logs, fixtures, CI artifacts, and persisted state pass the secrets/path review; state permission tests pass on supported POSIX platforms.
 - Runtime and generated protocol versions agree, checked-in schemas regenerate cleanly, and every maintained fake app-server message type-checks against generated protocol structures.
-- Opt-in live tests require an environment flag, hard-code `gpt-5.4-mini`, declare a six-call maximum, and cover role-history SSE, a client-defined dynamic-tool round trip, restart continuation, explicit safe policy selection, built-in tool streaming, and continuation after built-in tool information.
+- Opt-in live tests run only through the explicitly selected live configuration, hard-code `gpt-5.4-mini`, declare a six-call maximum, and cover role-history SSE, a client-defined dynamic-tool round trip, restart continuation, explicit safe policy selection, built-in tool streaming, and continuation after built-in tool information.
 - Published compatibility examples pass through the fake backend with generic HTTP/SSE clients.
 - Offline coverage is published from a recorded baseline and meets the adopted thresholds.
 
