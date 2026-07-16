@@ -134,6 +134,8 @@ test("CLI help and unsafe configuration are handled in-process", async () => {
   try {
     assert.equal(await run(["--help"]), 0);
     assert.match(String(stdout.mock.calls[0]?.[0]), /Usage:/);
+    assert.equal(await run(["serve", "--help"]), 0);
+    assert.match(String(stdout.mock.calls[1]?.[0]), /Usage:/);
     await assert.rejects(run(["unknown"]), /Unknown command/);
     const missingRoot = join(
       tmpdir(),

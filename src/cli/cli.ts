@@ -39,7 +39,7 @@ Options:
 
 /** Runs the CLI lifecycle and returns its eventual process exit code. */
 export async function run(argv: readonly string[]): Promise<number> {
-  if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
+  if (argv.length === 0 || argv.includes("--help") || argv.includes("-h")) {
     process.stdout.write(`${usage}\n`);
     return 0;
   }

@@ -284,6 +284,21 @@ test("an incomplete request receives the configured timeout error", async () => 
   });
 });
 
+/**
+ * Polls /health until it reports the expected status, because the server
+ * counts a request against capacity only after accepting it and releases
+ * capacity only after observing the disconnect.
+ */
+async function pollHealth(origin: string, expected: number): Promise<Response> {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    const response = await fetch(`${origin}/health`);
+    if (response.status === expected || Date.now() >= deadline) return response;
+    await response.arrayBuffer();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 test("capacity rejects with overloaded and a disconnect releases it", async () => {
   await withServer({ maxRequests: 1 }, async (origin) => {
     const url = new URL(origin);
@@ -295,8 +310,7 @@ test("capacity rejects with overloaded and a disconnect releases it", async () =
         "Content-Type: application/json\r\n" +
         "Content-Length: 2\r\n\r\n",
     );
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    const overloaded = await fetch(`${origin}/health`);
+    const overloaded = await pollHealth(origin, 429);
     assert.equal(overloaded.status, 429);
     assert.equal(
       ((await overloaded.json()) as { error: { code: string } }).error.code,
@@ -304,7 +318,7 @@ test("capacity rejects with overloaded and a disconnect releases it", async () =
     );
     socket.destroy();
     await once(socket, "close");
-    const response = await fetch(`${origin}/health`);
+    const response = await pollHealth(origin, 200);
     assert.equal(response.status, 200);
   });
 });
