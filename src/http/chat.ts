@@ -5,6 +5,15 @@ import type { JsonRpcTransport } from "../app-server/json-rpc.js";
 import { HttpError, writeJson } from "./errors.js";
 import type { Logger } from "../core/logger.js";
 import {
+  PolicyError,
+  policyBindingHash,
+  resolveEffectivePolicy,
+  validateRequestPolicy,
+  type EffectivePolicy,
+  type PolicyRequirements,
+  type RequestPolicy,
+} from "../core/policy.js";
+import {
   bindingHash,
   type ContinuationCoordinator,
   type PendingToolCall,
@@ -27,7 +36,13 @@ interface ChatRequest {
   includeUsage: boolean;
   dynamicTools: Array<Record<string, unknown>>;
   previousResponseId?: string;
+  policy: EffectivePolicy;
 }
+
+/** A validated request awaiting filesystem and managed-policy resolution. */
+type ParsedChatRequest = Omit<ChatRequest, "policy"> & {
+  requestPolicy: RequestPolicy;
+};
 
 /** Standard token usage, with details present only when app-server reports them. */
 interface Usage {
@@ -110,6 +125,7 @@ export interface ChatHandlerOptions {
   signal: AbortSignal;
   continuations: ContinuationCoordinator;
   root: string;
+  requirements: PolicyRequirements;
   implicitToolContinuation: boolean;
 }
 
@@ -125,12 +141,40 @@ export async function handleChatCompletion(
   response: ServerResponse,
   options: ChatHandlerOptions,
 ): Promise<void> {
-  const request = validateRequest(
-    body,
-    options.log,
-    options.requestId,
-    options.implicitToolContinuation,
-  );
+  let parsed: ParsedChatRequest;
+  try {
+    parsed = validateRequest(
+      body,
+      options.log,
+      options.requestId,
+      options.implicitToolContinuation,
+    );
+  } catch (error) {
+    if (error instanceof PolicyError) throw policyHttpError(error);
+    throw error;
+  }
+  let policy: EffectivePolicy;
+  try {
+    policy = await resolveEffectivePolicy(
+      parsed.requestPolicy,
+      options.root,
+      options.requirements,
+    );
+  } catch (error) {
+    if (error instanceof PolicyError) throw policyHttpError(error);
+    throw error;
+  }
+  const request: ChatRequest = {
+    model: parsed.model,
+    messages: parsed.messages,
+    stream: parsed.stream,
+    includeUsage: parsed.includeUsage,
+    dynamicTools: parsed.dynamicTools,
+    ...(parsed.previousResponseId
+      ? { previousResponseId: parsed.previousResponseId }
+      : {}),
+    policy,
+  };
   if (
     !request.previousResponseId &&
     request.messages.some((message) => message.role === "tool")
@@ -311,9 +355,9 @@ async function execute(
     [];
   const binding: ThreadBinding = {
     model: request.model,
-    cwd: options.root,
+    cwd: request.policy.cwd,
     toolsHash: bindingHash(request.dynamicTools),
-    policyHash: bindingHash({}),
+    policyHash: policyBindingHash(request.policy),
   };
   const abort = async (): Promise<void> => {
     if (threadId && turnId && !terminal)
@@ -414,7 +458,11 @@ async function execute(
           resumed = asRecord(
             await options.rpc.request(
               "thread/resume",
-              { threadId, excludeTurns: true },
+              {
+                threadId,
+                excludeTurns: true,
+                ...threadPolicyParams(request.policy),
+              },
               options.signal,
             ),
             "thread/resume",
@@ -439,6 +487,7 @@ async function execute(
               threadId,
               model: request.model,
               input: [{ type: "text", text: last.content, text_elements: [] }],
+              ...turnPolicyParams(request.policy),
             },
             options.signal,
           ),
@@ -453,6 +502,7 @@ async function execute(
           {
             model: request.model,
             ephemeral: false,
+            ...threadPolicyParams(request.policy),
             ...(request.dynamicTools.length
               ? { dynamicTools: request.dynamicTools }
               : {}),
@@ -484,6 +534,7 @@ async function execute(
             threadId,
             model: request.model,
             input: [{ type: "text", text: last.content, text_elements: [] }],
+            ...turnPolicyParams(request.policy),
           },
           options.signal,
         ),
@@ -964,7 +1015,7 @@ function validateRequest(
   log: Logger,
   requestId: string,
   implicitToolContinuation: boolean,
-): ChatRequest {
+): ParsedChatRequest {
   const body = record(value);
   if (!body) invalid("Request body must be a JSON object.", null);
   if (typeof body.model !== "string" || body.model.trim() === "")
@@ -982,15 +1033,7 @@ function validateRequest(
       "previous_response_id must be a non-empty string.",
       "previous_response_id",
     );
-  if (
-    body.x_codex !== undefined &&
-    (record(body.x_codex) === undefined ||
-      Object.keys(record(body.x_codex)!).length > 0)
-  )
-    invalid(
-      "x_codex policy fields are not supported in this stage.",
-      "x_codex",
-    );
+  const requestPolicy = validateRequestPolicy(body.x_codex);
   const messages = body.messages.map((entry, index) =>
     validateMessage(entry, index),
   );
@@ -1049,10 +1092,47 @@ function validateRequest(
     stream: body.stream === true,
     includeUsage,
     dynamicTools,
+    requestPolicy,
     ...(typeof body.previous_response_id === "string"
       ? { previousResponseId: body.previous_response_id }
       : {}),
   };
+}
+
+/** Builds explicit thread start/resume settings for one effective policy. */
+function threadPolicyParams(policy: EffectivePolicy): Record<string, unknown> {
+  return {
+    cwd: policy.cwd,
+    sandbox: policy.sandbox,
+    approvalPolicy: policy.approvalPolicy,
+    ...(policy.approvalsReviewer
+      ? { approvalsReviewer: policy.approvalsReviewer }
+      : {}),
+    config: { web_search: policy.webSearch },
+  };
+}
+
+/** Builds sticky turn overrides so prior thread state is never inherited. */
+function turnPolicyParams(policy: EffectivePolicy): Record<string, unknown> {
+  return {
+    cwd: policy.cwd,
+    approvalPolicy: policy.approvalPolicy,
+    ...(policy.approvalsReviewer
+      ? { approvalsReviewer: policy.approvalsReviewer }
+      : {}),
+    sandboxPolicy: policy.sandboxPolicy,
+  };
+}
+
+/** Converts a safe policy failure to the public OpenAI error envelope. */
+function policyHttpError(error: PolicyError): HttpError {
+  return new HttpError(
+    400,
+    error.message,
+    "invalid_request_error",
+    error.code,
+    error.param,
+  );
 }
 
 /** Validates one role-preserving, text-only message. */

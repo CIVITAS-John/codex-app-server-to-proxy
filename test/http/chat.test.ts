@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
 import { tmpdir } from "node:os";
@@ -14,6 +14,7 @@ import {
   protocolNotification,
   protocolTurn,
 } from "../support/protocol-fixtures.js";
+import { UNRESTRICTED_POLICY_REQUIREMENTS } from "../../src/core/policy.js";
 
 /** Suppresses expected HTTP diagnostics in Chat Completions tests. */
 const silentLogger = createLogger("error", () => {});
@@ -116,6 +117,50 @@ function fakeAppServer(
     }
   });
   return rpc;
+}
+
+/** Captures exact policy-bearing RPC params for one completed fake turn. */
+function policyCapturingAppServer(): {
+  rpc: JsonRpcTransport;
+  messages: Array<Record<string, unknown>>;
+} {
+  const fromServer = new PassThrough();
+  const toServer = new PassThrough();
+  const rpc = new JsonRpcTransport(fromServer, toServer);
+  const messages: Array<Record<string, unknown>> = [];
+  const send = (value: unknown): void => {
+    fromServer.write(`${JSON.stringify(value)}\n`);
+  };
+  createInterface({ input: toServer }).on("line", (line) => {
+    const message = JSON.parse(line) as Record<string, unknown>;
+    if (typeof message.method !== "string") return;
+    messages.push(message);
+    const id = message.id as number;
+    if (message.method === "thread/start")
+      send({ id, result: { thread: { id: "thr_policy" } } });
+    else if (message.method === "thread/read")
+      send({
+        id,
+        result: {
+          thread: { id: "thr_policy", status: { type: "idle" } },
+        },
+      });
+    else if (message.method === "thread/resume")
+      send({ id, result: { thread: { id: "thr_policy" } } });
+    else if (message.method === "turn/start") {
+      send({ id, result: { turn: { id: "turn_policy" } } });
+      send(
+        protocolNotification({
+          method: "turn/completed",
+          params: {
+            threadId: "thr_policy",
+            turn: protocolTurn("turn_policy", "completed"),
+          },
+        }),
+      );
+    }
+  });
+  return { rpc, messages };
 }
 
 /** Creates a fake turn with queued tool requests followed by an ingress failure. */
@@ -980,6 +1025,238 @@ test("suspension persistence failure rejects every captured responder", async ()
       directory,
     );
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("request policies map exactly, bind continuations, and honor managed denials", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-policy-http-"));
+  const configuredRoot = join(directory, "root");
+  const configuredCwd = join(configuredRoot, "project");
+  await mkdir(configuredCwd, { recursive: true });
+  const root = await realpath(configuredRoot);
+  const cwd = await realpath(configuredCwd);
+  const options = parseServeOptions([
+    "--port",
+    "0",
+    "--root",
+    root,
+    "--state-dir",
+    join(directory, "state"),
+  ]);
+  const proxy = createProxyServer(options, silentLogger);
+  const fake = policyCapturingAppServer();
+  proxy.setTransport(fake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
+  proxy.setReady(true);
+  const address = await proxy.listen();
+  const host = address.address.includes(":")
+    ? `[${address.address}]`
+    : address.address;
+  const origin = `http://${host}:${address.port}`;
+  const request = {
+    model: "m",
+    messages: [{ role: "user", content: "policy" }],
+    x_codex: {
+      cwd,
+      sandbox: "workspace-write",
+      web_search: "indexed",
+    },
+  };
+  try {
+    const first = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    assert.equal(first.status, 200);
+    const firstBody = (await first.json()) as { id: string };
+    const thread = fake.messages.find(
+      (message) => message.method === "thread/start",
+    );
+    assert.deepEqual(thread?.params, {
+      model: "m",
+      ephemeral: false,
+      cwd,
+      sandbox: "workspace-write",
+      approvalPolicy: "never",
+      approvalsReviewer: "auto_review",
+      config: { web_search: "indexed" },
+    });
+    const turn = fake.messages.find(
+      (message) => message.method === "turn/start",
+    );
+    assert.deepEqual(turn?.params, {
+      threadId: "thr_policy",
+      model: "m",
+      input: [{ type: "text", text: "policy", text_elements: [] }],
+      cwd,
+      approvalPolicy: "never",
+      approvalsReviewer: "auto_review",
+      sandboxPolicy: {
+        type: "workspaceWrite",
+        writableRoots: [cwd],
+        networkAccess: false,
+        excludeTmpdirEnvVar: false,
+        excludeSlashTmp: false,
+      },
+    });
+
+    const continued = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...request,
+        previous_response_id: firstBody.id,
+        messages: [{ role: "user", content: "continue" }],
+      }),
+    });
+    assert.equal(continued.status, 200);
+    const continuedBody = (await continued.json()) as { id: string };
+    const resume = fake.messages.find(
+      (message) => message.method === "thread/resume",
+    );
+    assert.deepEqual(resume?.params, {
+      threadId: "thr_policy",
+      excludeTurns: true,
+      cwd,
+      sandbox: "workspace-write",
+      approvalPolicy: "never",
+      approvalsReviewer: "auto_review",
+      config: { web_search: "indexed" },
+    });
+    const continuedTurn = fake.messages
+      .filter((message) => message.method === "turn/start")
+      .at(-1);
+    assert.deepEqual(continuedTurn?.params, {
+      threadId: "thr_policy",
+      model: "m",
+      input: [{ type: "text", text: "continue", text_elements: [] }],
+      cwd,
+      approvalPolicy: "never",
+      approvalsReviewer: "auto_review",
+      sandboxPolicy: {
+        type: "workspaceWrite",
+        writableRoots: [cwd],
+        networkAccess: false,
+        excludeTmpdirEnvVar: false,
+        excludeSlashTmp: false,
+      },
+    });
+
+    const beforeContinuation = fake.messages.length;
+    const changed = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...request,
+        previous_response_id: continuedBody.id,
+        x_codex: { ...request.x_codex, sandbox: "read-only" },
+      }),
+    });
+    assert.equal(changed.status, 409);
+    assert.equal(
+      ((await changed.json()) as { error: { code: string } }).error.code,
+      "continuation_policy_mismatch",
+    );
+    assert.equal(fake.messages.length, beforeContinuation);
+
+    const changedWeb = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...request,
+        previous_response_id: continuedBody.id,
+        x_codex: { ...request.x_codex, web_search: "disabled" },
+      }),
+    });
+    assert.equal(changedWeb.status, 409);
+    assert.equal(
+      ((await changedWeb.json()) as { error: { code: string } }).error.code,
+      "continuation_policy_mismatch",
+    );
+    assert.equal(fake.messages.length, beforeContinuation);
+
+    const managedFake = policyCapturingAppServer();
+    proxy.setTransport(managedFake.rpc, {
+      ...UNRESTRICTED_POLICY_REQUIREMENTS,
+      allowedApprovalPolicies: ["on-request"],
+      allowedApprovalsReviewers: ["user"],
+    });
+    const changedManagedPolicy = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...request,
+        previous_response_id: continuedBody.id,
+      }),
+    });
+    assert.equal(changedManagedPolicy.status, 409);
+    assert.equal(
+      (
+        (await changedManagedPolicy.json()) as {
+          error: { code: string };
+        }
+      ).error.code,
+      "continuation_policy_mismatch",
+    );
+    assert.deepEqual(managedFake.messages, []);
+
+    const disabledFake = policyCapturingAppServer();
+    proxy.setTransport(disabledFake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
+    const disabled = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        messages: [{ role: "user", content: "offline" }],
+      }),
+    });
+    assert.equal(disabled.status, 200);
+    assert.deepEqual(
+      disabledFake.messages.find((message) => message.method === "thread/start")
+        ?.params,
+      {
+        model: "m",
+        ephemeral: false,
+        cwd: root,
+        sandbox: "read-only",
+        approvalPolicy: "never",
+        approvalsReviewer: "auto_review",
+        config: { web_search: "disabled" },
+      },
+    );
+    assert.deepEqual(
+      disabledFake.messages.find((message) => message.method === "turn/start")
+        ?.params,
+      {
+        threadId: "thr_policy",
+        model: "m",
+        input: [{ type: "text", text: "offline", text_elements: [] }],
+        cwd: root,
+        approvalPolicy: "never",
+        approvalsReviewer: "auto_review",
+        sandboxPolicy: { type: "readOnly", networkAccess: false },
+      },
+    );
+
+    const deniedFake = policyCapturingAppServer();
+    proxy.setTransport(deniedFake.rpc, {
+      ...UNRESTRICTED_POLICY_REQUIREMENTS,
+      allowedSandboxModes: ["read-only"],
+    });
+    const denied = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    assert.equal(denied.status, 400);
+    assert.equal(
+      ((await denied.json()) as { error: { code: string } }).error.code,
+      "sandbox_not_allowed",
+    );
+    assert.deepEqual(deniedFake.messages, []);
+  } finally {
+    await proxy.close();
     await rm(directory, { recursive: true, force: true });
   }
 });

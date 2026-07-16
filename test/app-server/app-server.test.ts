@@ -28,7 +28,28 @@ test("app-server initializes in order and declines elicitation without advertisi
   const capture = join(directory, "capture.jsonl");
   await writeFile(
     executable,
-    `#!${process.execPath}\nconst fs=require('fs'); const path=require('path'); const capture=path.join(path.dirname(process.argv[1]),'capture.jsonl');\nif(process.argv.includes('--version')) { console.log('codex-cli 1.2.3'); process.exit(0); }\nconst rl=require('readline').createInterface({input:process.stdin}); let initialized=false;\nrl.on('line', line => { const m=JSON.parse(line); fs.appendFileSync(capture, line+'\\n'); if(m.method==='initialize') console.log(JSON.stringify({id:m.id,result:{}})); else if(m.method==='initialized'&&!initialized) { initialized=true; console.log(JSON.stringify({id:'elicit',method:'mcpServer/elicitation/request',params:{mode:'url'}})); } });\n`,
+    `#!${process.execPath}
+const fs=require('fs'); const path=require('path');
+const capture=path.join(path.dirname(process.argv[1]),'capture.jsonl');
+if(process.argv.includes('--version')) { console.log('codex-cli 1.2.3'); process.exit(0); }
+const rl=require('readline').createInterface({input:process.stdin}); let initialized=false;
+rl.on('line', line => {
+  const m=JSON.parse(line); fs.appendFileSync(capture, line+'\\n');
+  if(m.method==='initialize') console.log(JSON.stringify({id:m.id,result:{}}));
+  else if(m.method==='initialized'&&!initialized) {
+    initialized=true;
+    for (const request of [
+      {id:'elicit',method:'mcpServer/elicitation/request',params:{mode:'url'}},
+      {id:'command',method:'item/commandExecution/requestApproval',params:{}},
+      {id:'file',method:'item/fileChange/requestApproval',params:{}},
+      {id:'permissions',method:'item/permissions/requestApproval',params:{}},
+      {id:'apply',method:'applyPatchApproval',params:{}},
+      {id:'exec',method:'execCommandApproval',params:{}},
+    ]) console.log(JSON.stringify(request));
+  }
+  else if(m.method==='configRequirements/read') console.log(JSON.stringify({id:m.id,result:{requirements:null}}));
+});
+`,
     "utf8",
   );
   await chmod(executable, 0o755);
@@ -39,8 +60,15 @@ test("app-server initializes in order and declines elicitation without advertisi
     startupTimeoutMs: 1_000,
     shutdownTimeoutMs: 100,
     log: createLogger("debug", (entry) => logs.push(JSON.stringify(entry))),
+    diagnosticLogging: true,
   });
   try {
+    assert.deepEqual(app.requirements, {
+      allowedApprovalPolicies: null,
+      allowedApprovalsReviewers: null,
+      allowedSandboxModes: null,
+      allowedWebSearchModes: null,
+    });
     await new Promise((resolve) => setTimeout(resolve, 30));
     const messages = (await readFile(capture, "utf8"))
       .trim()
@@ -55,9 +83,29 @@ test("app-server initializes in order and declines elicitation without advertisi
     assert.deepEqual(params.capabilities, { experimentalApi: true });
     assert.equal(params.clientInfo.name, "codex-openai-proxy");
     assert.deepEqual(messages[2], {
+      id: 2,
+      method: "configRequirements/read",
+    });
+    const response = (id: string): Record<string, unknown> | undefined =>
+      messages.find((message) => message.id === id);
+    assert.deepEqual(response("elicit"), {
       id: "elicit",
       result: { action: "decline", content: null },
     });
+    for (const id of ["command", "file"])
+      assert.deepEqual(response(id), {
+        id,
+        result: { decision: "decline" },
+      });
+    assert.deepEqual(response("permissions"), {
+      id: "permissions",
+      result: { permissions: {}, scope: "turn" },
+    });
+    for (const id of ["apply", "exec"])
+      assert.deepEqual(response(id), {
+        id,
+        result: { decision: "denied" },
+      });
     app.child.stderr.emit("data", `${homedir()}/private-file`);
     assert.doesNotMatch(logs.join(""), new RegExp(homedir()));
     assert.match(logs.join(""), /\[REDACTED_HOME\]/);

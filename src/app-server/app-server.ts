@@ -4,8 +4,13 @@ import {
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
 import { once } from "node:events";
-import { JsonRpcTransport, type ServerRequest } from "./json-rpc.js";
+import { JsonRpcTransport, RpcError, type ServerRequest } from "./json-rpc.js";
 import type { Logger } from "../core/logger.js";
+import {
+  parsePolicyRequirements,
+  UNRESTRICTED_POLICY_REQUIREMENTS,
+  type PolicyRequirements,
+} from "../core/policy.js";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -37,6 +42,7 @@ export function resolveCodexExecutable(configuredPath: string): string {
 /** Owns the initialized app-server process and its JSON-RPC transport. */
 export interface AppServer {
   rpc: JsonRpcTransport;
+  requirements: PolicyRequirements;
   child: ChildProcessWithoutNullStreams;
   stop(): Promise<void>;
 }
@@ -48,6 +54,7 @@ export interface StartAppServerOptions {
   startupTimeoutMs: number;
   shutdownTimeoutMs: number;
   log: Logger;
+  diagnosticLogging?: boolean;
   spawnProcess?: typeof spawn;
 }
 
@@ -70,11 +77,15 @@ export async function startAppServer(
   });
   await waitForSpawn(child);
   const rpc = new JsonRpcTransport(child.stdout, child.stdin);
-  child.stderr.setEncoding("utf8").on("data", (chunk: string) =>
+  child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
     options.log("warn", "app_server_stderr", {
-      message: redact(chunk).trim().slice(0, 2_000),
-    }),
-  );
+      message: "[REDACTED_DIAGNOSTIC]",
+    });
+    if (options.diagnosticLogging)
+      options.log("debug", "app_server_stderr_detail", {
+        message: redact(chunk, options.root).trim().slice(0, 2_000),
+      });
+  });
   rpc.on("malformed", () =>
     options.log("error", "app_server_malformed_output"),
   );
@@ -86,6 +97,7 @@ export async function startAppServer(
     options.log("error", "app_server_exited", { code, signal });
   });
 
+  let requirements: PolicyRequirements;
   try {
     await requestWithTimeout(
       rpc,
@@ -101,6 +113,7 @@ export async function startAppServer(
       options.startupTimeoutMs,
     );
     rpc.notify("initialized");
+    requirements = await readConfigRequirements(rpc, options.startupTimeoutMs);
   } catch (error) {
     await stopChild(child, rpc, options.shutdownTimeoutMs);
     throw error;
@@ -108,11 +121,33 @@ export async function startAppServer(
 
   return {
     rpc,
+    requirements,
     child,
     async stop() {
       await stopChild(child, rpc, options.shutdownTimeoutMs);
     },
   };
+}
+
+/** Reads optional managed constraints without hiding malformed responses. */
+async function readConfigRequirements(
+  rpc: JsonRpcTransport,
+  timeoutMs: number,
+): Promise<PolicyRequirements> {
+  let value: unknown;
+  try {
+    value = await requestWithTimeout(
+      rpc,
+      "configRequirements/read",
+      undefined,
+      timeoutMs,
+    );
+  } catch (error) {
+    if (error instanceof RpcError && error.rpcCode === -32601)
+      return UNRESTRICTED_POLICY_REQUIREMENTS;
+    throw error;
+  }
+  return parsePolicyRequirements(value);
 }
 
 /** Verifies that a configured executable identifies itself as Codex. */
@@ -200,6 +235,19 @@ function failClosed(
     rpc.respond(request.id, { answers: {} });
   } else if (request.method === "mcpServer/elicitation/request") {
     rpc.respond(request.id, { action: "decline", content: null });
+  } else if (
+    request.method === "item/commandExecution/requestApproval" ||
+    request.method === "item/fileChange/requestApproval"
+  ) {
+    rpc.respond(request.id, { decision: "decline" });
+  } else if (
+    request.method === "applyPatchApproval" ||
+    request.method === "execCommandApproval"
+  ) {
+    rpc.respond(request.id, { decision: "denied" });
+  } else if (request.method === "item/permissions/requestApproval") {
+    // Omitting every requested permission is the protocol's explicit denial.
+    rpc.respond(request.id, { permissions: {}, scope: "turn" });
   } else {
     rpc.respondError(request.id, {
       code: -32601,
@@ -210,10 +258,11 @@ function failClosed(
 }
 
 /** Removes common URL and credential forms from app-server diagnostics. */
-function redact(value: string): string {
+function redact(value: string, root: string): string {
   const home = homedir();
   return value
     .replaceAll(home, "[REDACTED_HOME]")
+    .replaceAll(root, "[REDACTED_CWD]")
     .replace(/https?:\/\/\S+/gi, "[REDACTED_URL]")
     .replace(/\b(token|code|secret)=\S+/gi, "$1=[REDACTED]");
 }

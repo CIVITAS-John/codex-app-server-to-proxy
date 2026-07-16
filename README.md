@@ -2,7 +2,7 @@
 
 `codex-openai-proxy` lets software written for the OpenAI Chat Completions API talk to Codex through a local HTTP endpoint. It runs `codex app-server`, uses your ChatGPT login, and keeps the listener on your machine.
 
-The project is under active development. Text completions, streaming, function tools, usage metadata, and thread continuation are implemented. Per-request Codex policy selection is planned but not yet available.
+The project is under active development. Text completions, streaming, function tools, usage metadata, thread continuation, and per-request Codex policy selection are implemented.
 
 ## Start the proxy
 
@@ -137,7 +137,29 @@ Client-defined dynamic functions still suspend with `finish_reason: "tool_calls"
 
 ### Select Codex policy
 
-Per-request working directory, sandbox, and web-search selection are planned `x_codex` request extensions. The current build rejects non-empty request `x_codex` values rather than pretending to apply them. The CLI-wide `--root` option remains the effective working-directory boundary.
+Working-directory, sandbox, and web-search controls are nonstandard `x_codex` request extensions:
+
+```json
+{
+  "model": "gpt-5.4-mini",
+  "messages": [{ "role": "user", "content": "Review this project." }],
+  "x_codex": {
+    "cwd": "/absolute/path/to/project",
+    "sandbox": "workspace-write",
+    "web_search": "disabled"
+  }
+}
+```
+
+`cwd` must be an existing absolute directory whose resolved path is the configured root or one of its descendants. Symlink escapes, sibling directories, relative paths, files, and nonexistent paths are rejected. Omit it to use the root.
+
+`sandbox` accepts `read-only`, `workspace-write`, or `danger-full-access` and defaults to `read-only`. Full access is never selected implicitly and cannot bypass managed app-server requirements. `web_search` accepts `disabled`, `cached`, `indexed`, or `live` and defaults to `disabled`. The proxy applies web-search configuration per Codex thread and never edits shared Codex configuration to simulate a request setting.
+
+Approval policy is proxy-owned and non-interactive. The proxy prefers `never`, selects `auto_review` when managed policy permits it, and immediately declines any unexpected approval request with the method's supported response. Organization or machine requirements are loaded from app-server and disallowed selections fail instead of falling back.
+
+Continuations must repeat the same effective `x_codex` settings. A change is rejected with `continuation_cwd_mismatch` or `continuation_policy_mismatch` before the thread is resumed.
+
+> **Project trust side effect:** Starting a new thread with `workspace-write` and a `cwd` can cause app-server to mark that project as trusted in the user's `config.toml`. Set `--root` to the narrowest appropriate boundary; the proxy will not cause app-server to trust a directory outside it.
 
 ## Usage metadata
 
@@ -153,7 +175,7 @@ The launch directory is the default root for Codex work. Set a narrower boundary
 npx codex-openai-proxy serve --root /absolute/path/to/project
 ```
 
-The proxy writes structured JSON logs to stderr. Run `npx codex-openai-proxy --help` for all server, timeout, capacity, logging, state, and Codex executable options.
+The proxy writes structured JSON logs to stderr. Default logs omit working directories and command details. `--log-level debug` is the opt-in diagnostic mode and may reveal the configured root or redacted app-server diagnostic context, so capture it carefully. Run `npx codex-openai-proxy --help` for all server, timeout, capacity, logging, state, and Codex executable options.
 
 ## Project documentation
 

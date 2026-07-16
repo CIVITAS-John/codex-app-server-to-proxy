@@ -1,6 +1,7 @@
-import { access, constants, stat } from "node:fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { parseServeOptions } from "../core/config.js";
 import { createLogger } from "../core/logger.js";
+import { canonicalizeRoot } from "../core/policy.js";
 import { createProxyServer } from "../http/server.js";
 import { startAppServer, type AppServer } from "../app-server/app-server.js";
 import { ensureAuthenticated } from "../app-server/auth.js";
@@ -36,17 +37,32 @@ export async function run(argv: readonly string[]): Promise<number> {
   }
   if (argv[0] !== "serve")
     throw new Error(`Unknown command: ${argv[0]}\n\n${usage}`);
-  const options = parseServeOptions(argv.slice(1));
-  await assertDirectory(options.root, "--root");
+  const parsed = parseServeOptions(argv.slice(1));
+  const canonicalRoot = await canonicalizeRoot(parsed.root);
+  const stateRelative = relative(parsed.root, parsed.stateDir);
+  const stateInsideRoot =
+    stateRelative === "" ||
+    (!isAbsolute(stateRelative) &&
+      stateRelative !== ".." &&
+      !stateRelative.startsWith(`..${sep}`));
+  const options = {
+    ...parsed,
+    root: canonicalRoot,
+    stateDir: stateInsideRoot
+      ? resolve(canonicalRoot, stateRelative)
+      : parsed.stateDir,
+  };
   const log = createLogger(options.logLevel);
   const proxy = createProxyServer(options, log);
   const address = await proxy.listen();
   log("info", "server_listening", {
     host: address.address,
     port: address.port,
-    root: options.root,
+    default_sandbox: "read-only",
+    default_web_search: "disabled",
     ready: false,
   });
+  log("debug", "server_root", { root: options.root });
 
   let appServer: AppServer | undefined;
   let lifecycleStopping = false;
@@ -58,6 +74,7 @@ export async function run(argv: readonly string[]): Promise<number> {
       startupTimeoutMs: options.toolTimeoutMs,
       shutdownTimeoutMs: options.shutdownTimeoutMs,
       log,
+      diagnosticLogging: options.logLevel === "debug",
     });
     try {
       await ensureAuthenticated({
@@ -88,13 +105,16 @@ export async function run(argv: readonly string[]): Promise<number> {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
       try {
         appServer = await initializeAppServer();
-        proxy.setTransport(appServer.rpc);
+        proxy.setTransport(appServer.rpc, appServer.requirements);
         proxy.setReady(true);
         log("info", "app_server_restarted", { attempt });
         recovering = false;
         return;
       } catch (error) {
         log("error", "app_server_restart_failed", {
+          attempt,
+        });
+        log("debug", "app_server_restart_failed_detail", {
           attempt,
           error: error instanceof Error ? error.message : String(error),
         });
@@ -105,16 +125,15 @@ export async function run(argv: readonly string[]): Promise<number> {
   };
   try {
     appServer = await initializeAppServer();
-    proxy.setTransport(appServer.rpc);
+    proxy.setTransport(appServer.rpc, appServer.requirements);
     proxy.setReady(true);
-    log("info", "app_server_ready");
   } catch (error) {
     await appServer?.stop().catch(() => undefined);
     await proxy.close().catch(() => undefined);
     throw error;
   }
 
-  return await new Promise<number>((resolve) => {
+  const shutdown = new Promise<number>((resolve) => {
     let stopping = false;
     const stop = (signal: NodeJS.Signals): void => {
       if (stopping) return;
@@ -132,7 +151,8 @@ export async function run(argv: readonly string[]): Promise<number> {
             resolve(0);
           },
           (error: unknown) => {
-            log("error", "shutdown_failed", {
+            log("error", "shutdown_failed");
+            log("debug", "shutdown_failed_detail", {
               error: error instanceof Error ? error.message : String(error),
             });
             resolve(1);
@@ -142,11 +162,7 @@ export async function run(argv: readonly string[]): Promise<number> {
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
   });
-}
-
-/** Validates that a CLI path names a readable directory. */
-async function assertDirectory(path: string, option: string): Promise<void> {
-  await access(path, constants.R_OK);
-  if (!(await stat(path)).isDirectory())
-    throw new Error(`${option} must name a readable directory.`);
+  // Announce readiness only after shutdown handlers can observe an immediate signal.
+  log("info", "app_server_ready");
+  return await shutdown;
 }

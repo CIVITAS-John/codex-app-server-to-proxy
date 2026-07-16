@@ -10,6 +10,10 @@ import { HttpError, writeError, writeJson } from "./errors.js";
 import type { ServeOptions } from "../core/config.js";
 import type { Logger } from "../core/logger.js";
 import type { JsonRpcTransport } from "../app-server/json-rpc.js";
+import {
+  UNRESTRICTED_POLICY_REQUIREMENTS,
+  type PolicyRequirements,
+} from "../core/policy.js";
 import { handleChatCompletion } from "./chat.js";
 import {
   ContinuationCoordinator,
@@ -22,7 +26,10 @@ export interface ProxyServer {
   listen(): Promise<{ address: string; port: number }>;
   close(): Promise<void>;
   setReady(ready: boolean): void;
-  setTransport(transport: JsonRpcTransport | undefined): void;
+  setTransport(
+    transport: JsonRpcTransport | undefined,
+    requirements?: PolicyRequirements,
+  ): void;
 }
 
 /** Creates a loopback proxy with bounded concurrency and request lifetimes. */
@@ -32,6 +39,7 @@ export function createProxyServer(
 ): ProxyServer {
   let ready = false;
   let transport: JsonRpcTransport | undefined;
+  let requirements = UNRESTRICTED_POLICY_REQUIREMENTS;
   let continuations: ContinuationCoordinator | undefined;
   const continuationStore = new ResponseStore(options.stateDir);
   let active = 0;
@@ -93,6 +101,7 @@ export function createProxyServer(
       transport,
       continuations,
       options.root,
+      requirements,
       options.implicitToolContinuation,
       log,
       requestId,
@@ -113,11 +122,13 @@ export function createProxyServer(
                 "server_error",
                 "internal_error",
               );
-      if (!(cause instanceof HttpError))
-        log("error", "request_failed", {
+      if (!(cause instanceof HttpError)) {
+        log("error", "request_failed", { request_id: requestId });
+        log("debug", "request_failed_detail", {
           request_id: requestId,
           error: cause instanceof Error ? cause.message : String(cause),
         });
+      }
       writeError(response, error);
     });
   });
@@ -134,12 +145,13 @@ export function createProxyServer(
     setReady(value) {
       ready = value;
     },
-    setTransport(value) {
+    setTransport(value, nextRequirements = UNRESTRICTED_POLICY_REQUIREMENTS) {
       if (transport === value) return;
       continuations?.dispose();
       if (transport && transport !== value)
         transport.close(new Error("app-server transport replaced"));
       transport = value;
+      requirements = nextRequirements;
       continuations = value
         ? new ContinuationCoordinator(
             continuationStore,
@@ -195,6 +207,7 @@ async function route(
   transport: JsonRpcTransport | undefined,
   continuations: ContinuationCoordinator | undefined,
   root: string,
+  requirements: PolicyRequirements,
   implicitToolContinuation: boolean,
   log: Logger,
   requestId: string,
@@ -252,6 +265,7 @@ async function route(
       signal,
       continuations,
       root,
+      requirements,
       implicitToolContinuation,
     });
     return;

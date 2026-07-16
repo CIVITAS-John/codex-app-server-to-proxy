@@ -36,7 +36,16 @@ test("CLI exits cleanly after a termination signal", async () => {
   const fake = join(directory, "codex");
   await writeFile(
     fake,
-    `#!${process.execPath}\nif (process.argv.includes('--version')) { console.log('codex-cli 1.0.0'); process.exit(0); }\nconst rl=require('readline').createInterface({input:process.stdin});\nrl.on('line', line => { const m=JSON.parse(line); if(m.method==='initialize') console.log(JSON.stringify({id:m.id,result:{}})); if(m.method==='account/read') console.log(JSON.stringify({id:m.id,result:{account:{type:'chatgpt'},requiresOpenaiAuth:true}})); });\n`,
+    `#!${process.execPath}
+if (process.argv.includes('--version')) { console.log('codex-cli 1.0.0'); process.exit(0); }
+const rl=require('readline').createInterface({input:process.stdin});
+rl.on('line', line => {
+  const m=JSON.parse(line);
+  if(m.method==='initialize') console.log(JSON.stringify({id:m.id,result:{}}));
+  if(m.method==='configRequirements/read') console.log(JSON.stringify({id:m.id,result:{requirements:null}}));
+  if(m.method==='account/read') console.log(JSON.stringify({id:m.id,result:{account:{type:'chatgpt'},requiresOpenaiAuth:true}}));
+});
+`,
     "utf8",
   );
   await chmod(fake, 0o755);
@@ -66,5 +75,8 @@ test("CLI exits cleanly after a termination signal", async () => {
   assert.equal(code, 0);
   assert.equal(signal, null);
   assert.match(stderr, /shutdown_complete/);
+  assert.match(stderr, /"default_sandbox":"read-only"/);
+  assert.match(stderr, /"default_web_search":"disabled"/);
+  assert.equal(stderr.includes(repoRootPath), false);
   await rm(directory, { recursive: true });
 });

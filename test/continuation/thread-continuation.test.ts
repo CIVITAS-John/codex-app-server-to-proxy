@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -10,6 +10,7 @@ import { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
 import { createLogger } from "../../src/core/logger.js";
 import { createProxyServer, type ProxyServer } from "../../src/http/server.js";
 import { bindingHash, ResponseStore } from "../../src/continuation/state.js";
+import { policyBindingHash } from "../../src/core/policy.js";
 import {
   protocolNotification,
   protocolTurn,
@@ -17,6 +18,18 @@ import {
 
 /** Suppresses expected diagnostics from rejected continuation requests. */
 const silentLogger = createLogger("error", () => {});
+
+/** Returns the Stage 06 safe-default continuation policy binding. */
+function defaultPolicyHash(cwd: string): string {
+  return policyBindingHash({
+    cwd,
+    sandbox: "read-only",
+    webSearch: "disabled",
+    approvalPolicy: "never",
+    approvalsReviewer: "auto_review",
+    sandboxPolicy: { type: "readOnly", networkAccess: false },
+  });
+}
 
 /** A configurable fake used to prove continuation preflight never starts a thread. */
 class ContinuationAppServer {
@@ -104,7 +117,9 @@ async function startProxy(
   fake: ContinuationAppServer,
   record?: Parameters<ResponseStore["put"]>[0],
 ): Promise<{ origin: string; proxy: ProxyServer; root: string }> {
-  const root = join(directory, "workspace");
+  const configuredRoot = join(directory, "workspace");
+  await mkdir(configuredRoot, { recursive: true });
+  const root = await realpath(configuredRoot);
   const options = parseServeOptions([
     "--port",
     "0",
@@ -113,7 +128,17 @@ async function startProxy(
     "--state-dir",
     directory,
   ]);
-  if (record) new ResponseStore(directory).put(record);
+  if (record) {
+    const defaultHash = defaultPolicyHash(configuredRoot);
+    new ResponseStore(directory).put({
+      ...record,
+      cwd: record.cwd === configuredRoot ? root : record.cwd,
+      policyHash:
+        record.policyHash === defaultHash
+          ? defaultPolicyHash(root)
+          : record.policyHash,
+    });
+  }
   const proxy = createProxyServer(options, silentLogger);
   proxy.setTransport(fake.transport);
   proxy.setReady(true);
@@ -190,12 +215,12 @@ test("model, cwd, tool, and policy binding mismatches fail before thread/read", 
       model: "m",
       cwd: join(directory, "workspace"),
       toolsHash: bindingHash([]),
-      policyHash: bindingHash({}),
+      policyHash: defaultPolicyHash(join(directory, "workspace")),
       ...item.patch,
     });
     try {
       const response = await post(running.origin, responseId);
-      assert.equal(response.status, 409);
+      assert.equal(response.status, 409, await response.clone().text());
       assert.equal(await errorCode(response), item.code);
       assert.deepEqual(fake.methods, []);
     } finally {
@@ -219,7 +244,7 @@ test("terminal mappings fail as JSON before streaming headers or thread work", a
       model: "m",
       cwd: join(directory, "workspace"),
       toolsHash: bindingHash([]),
-      policyHash: bindingHash({}),
+      policyHash: defaultPolicyHash(join(directory, "workspace")),
     });
     try {
       const response = await post(
@@ -264,7 +289,7 @@ test("ready continuation rejects trailing tool results before thread work", asyn
     model: "m",
     cwd: join(directory, "workspace"),
     toolsHash: bindingHash([]),
-    policyHash: bindingHash({}),
+    policyHash: defaultPolicyHash(join(directory, "workspace")),
   });
   try {
     const response = await fetch(`${running.origin}/v1/chat/completions`, {
@@ -311,7 +336,7 @@ test("non-resumable thread/read states fail closed without resume, turn, or repl
       model: "m",
       cwd: join(directory, "workspace"),
       toolsHash: bindingHash([]),
-      policyHash: bindingHash({}),
+      policyHash: defaultPolicyHash(join(directory, "workspace")),
     });
     try {
       const response = await post(running.origin, responseId);
@@ -340,7 +365,7 @@ test("concurrent ordinary requests for one active thread return an immediate 409
     model: "m",
     cwd: join(directory, "workspace"),
     toolsHash: bindingHash([]),
-    policyHash: bindingHash({}),
+    policyHash: defaultPolicyHash(join(directory, "workspace")),
   });
   try {
     const first = post(running.origin, "response_busy");

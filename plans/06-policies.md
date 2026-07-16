@@ -31,3 +31,15 @@ Expose per-request execution controls without weakening app-server or managed po
 - Network/web-search disabled requests do not silently fall back to live search.
 - `danger-full-access` can only be selected explicitly and cannot bypass stricter effective policy.
 - Live policy smoke tests, if required, use `gpt-5.4-mini` and the minimum number of calls.
+
+## Implementation status
+
+Stage 06 is complete through the deterministic offline gate. `x_codex` accepts canonical root-bounded `cwd`, all three generated sandbox modes, and all four generated web-search modes (`disabled`, `cached`, `indexed`, and `live`). The safe defaults are the configured root, `read-only`, and `disabled`; startup logs expose the latter two without logging the root. `--log-level debug` is the explicit diagnostic opt-in that may include root context.
+
+The proxy reads `configRequirements/read` after initialization when the method is available and enforces sandbox, approval-policy, approval-reviewer, and web-search allowlists. Approval policy remains proxy-owned: it prefers the stricter `never`, falls back only to a managed-allowed supported policy, uses `auto_review` when permitted, and sends method-specific declines for every unexpected approval request.
+
+Fresh threads and resumed threads receive canonical cwd, sandbox, approval, and per-thread `config.web_search` settings. Every new turn receives explicit cwd, approval, and full sandbox-policy overrides. Continuation records bind the complete effective setting set, so changes fail before `thread/read` and cannot reinterpret prior tool activity.
+
+The pinned generated protocol added the `indexed` web-search mode beyond the earlier checked-in `x_codex` schema. Stage 06 exposes it as a compatibility addition because the same per-thread `config.web_search` mapping applies to every generated mode. Deterministic tests prove exact forwarding and no shared-configuration mutation. No live policy smoke test or model call was run, so actual provider-side search behavior remains an explicit opt-in verification item rather than an offline claim.
+
+Starting `thread/start` with a writable sandbox can mark the selected cwd as trusted in the user's `config.toml`. The README now calls out that side effect prominently; canonical root containment bounds which projects the proxy can cause app-server to trust.
