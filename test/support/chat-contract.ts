@@ -7,6 +7,12 @@ export const CONTRACT_MODEL = "gpt-5.4-mini";
 /** Hard model-turn guard for the explicitly selected Stage 07 live scenarios. */
 export const MAX_LIVE_MODEL_CALLS = 6;
 
+/** Safe root-relative file read by the live built-in command scenario. */
+export const OBSERVATION_FIXTURE = ".codex-contract-observation";
+
+/** Canonical bounded command used to read the observation fixture. */
+export const OBSERVATION_COMMAND = `cat ${OBSERVATION_FIXTURE}`;
+
 /** Maximum model turns allowed by the comprehensive offline contract. */
 const MAX_OFFLINE_MODEL_CALLS = 10;
 
@@ -32,18 +38,24 @@ const POSIX_SHELL_LAUNCHERS = new Set([
   "/usr/bin/zsh",
 ]);
 
-/** Accepts only direct `pwd` or a bounded POSIX shell `-lc` display wrapper. */
-export function isBoundedPwdCommand(command: string): boolean {
-  if (command === "pwd") return true;
+/** Accepts only the fixture read or a bounded POSIX shell display wrapper. */
+export function isBoundedObservationCommand(command: string): boolean {
+  if (command === OBSERVATION_COMMAND) return true;
 
-  const match = /^(\S+) -lc (pwd|'pwd'|"pwd")$/.exec(command);
-  return match !== null && POSIX_SHELL_LAUNCHERS.has(match[1]!);
+  const match = /^(\S+) -lc (.+)$/.exec(command);
+  if (match === null || !POSIX_SHELL_LAUNCHERS.has(match[1]!)) return false;
+  return [
+    OBSERVATION_COMMAND,
+    `'${OBSERVATION_COMMAND}'`,
+    `"${OBSERVATION_COMMAND}"`,
+  ].includes(match[2]!);
 }
 
 /** A ready proxy backed by either a scripted or real app-server. */
 export interface ChatContractBackend {
   origin: string;
   root: string;
+  observationToken: string;
   modelCalls(): number;
   resumeCalls(): number;
   waitForInterrupt(): Promise<void>;
@@ -323,7 +335,7 @@ export function registerChatContract(
       }, 130_000);
 
     if (scenarios.has("safe-policy-built-in-continuation"))
-      test("streams a read-only built-in command and continues its observation", async () => {
+      test("streams a read-only built-in command and retains its result", async () => {
         const policy = {
           cwd: backend!.root,
           sandbox: "read-only",
@@ -336,8 +348,7 @@ export function registerChatContract(
           messages: [
             {
               role: "user",
-              content:
-                "Use the built-in shell command tool to run pwd exactly once. Do not modify files. Then report the observed directory.",
+              content: `Use the built-in shell command tool to run ${OBSERVATION_COMMAND} exactly once. Do not modify files. Do not repeat the command output; after it finishes, give only a brief acknowledgment.`,
             },
           ],
           stream: true,
@@ -371,15 +382,39 @@ export function registerChatContract(
         );
         assert.ok(
           builtInArguments.command !== undefined &&
-            isBoundedPwdCommand(builtInArguments.command),
+            isBoundedObservationCommand(builtInArguments.command),
           "built-in command did not match the bounded contract fixture",
         );
-        assert.ok(results.length > 0, "built-in result was not observed");
         assert.ok(
           results.every((result) =>
             uniqueCalls.some((call) => call.id === result.id),
           ),
           "built-in results were not correlated to observed calls",
+        );
+        const terminalResult = results.find(
+          (result) =>
+            result.id === builtIn.id &&
+            result.result?.status === "completed" &&
+            result.result.exit_code === 0 &&
+            typeof result.result.content === "string" &&
+            result.result.content.trim().length > 0,
+        );
+        assert.ok(
+          terminalResult,
+          "built-in command omitted a successful terminal result",
+        );
+        const terminalContent = terminalResult.result!.content as string;
+        assert.ok(
+          terminalContent.trim() === backend!.observationToken,
+          "built-in command returned unexpected observation content",
+        );
+        const assistantContent = chunks
+          .flatMap((chunk) => chunk.choices ?? [])
+          .map((choice) => choice.delta?.content ?? "")
+          .join("");
+        assert.ok(
+          !assistantContent.includes(backend!.observationToken),
+          "built-in turn disclosed observation content in assistant prose",
         );
         assert.equal(
           chunks.some(
@@ -398,7 +433,7 @@ export function registerChatContract(
             {
               role: "user",
               content:
-                "State the directory observed by the prior built-in command.",
+                "Without running another command, copy the complete stdout from the prior built-in command with trailing whitespace removed. Reply with only that value, without quotes or Markdown.",
             },
           ],
           x_codex: policy,
@@ -410,8 +445,14 @@ export function registerChatContract(
           "built-in continuation",
         );
         assert.ok(
-          (body.choices?.[0]?.message?.content ?? "").includes(backend!.root),
-          "built-in continuation omitted the observed directory",
+          body.choices?.[0]?.message?.content?.trim() ===
+            backend!.observationToken,
+          "built-in continuation did not confirm retained result metadata",
+        );
+        assert.ok(
+          (body.choices?.[0]?.message?.tool_calls?.length ?? 0) === 0 &&
+            (body.choices?.[0]?.message?.tool_results?.length ?? 0) === 0,
+          "built-in continuation exposed unexpected tool activity",
         );
         assert.equal(backend!.resumeCalls(), resumesBefore + 1);
         assert.ok(
@@ -533,7 +574,14 @@ interface StreamChunk {
         id: string;
         function?: { name?: string; arguments?: string };
       }>;
-      tool_results?: Array<{ id: string }>;
+      tool_results?: Array<{
+        id: string;
+        result?: {
+          status?: string;
+          content?: unknown;
+          exit_code?: unknown;
+        };
+      }>;
     };
     finish_reason?: string | null;
   }>;
@@ -568,6 +616,7 @@ interface ToolCompletion {
         type: string;
         function: { name: string; arguments: string };
       }>;
+      tool_results?: Array<{ id: string }>;
     };
   }>;
 }

@@ -1,34 +1,36 @@
 import { describe, expect, test } from "vitest";
-import { isBoundedPwdCommand } from "./chat-contract.js";
+import { isBoundedObservationCommand } from "./chat-contract.js";
 
 /** Exercises the exact command-display boundary used by the live contract. */
-describe("isBoundedPwdCommand", () => {
+describe("isBoundedObservationCommand", () => {
   test.each([
-    "pwd",
-    "sh -lc pwd",
-    "/bin/sh -lc 'pwd'",
-    '/usr/bin/bash -lc "pwd"',
-    "dash -lc pwd",
-    "/bin/ksh -lc 'pwd'",
-    '/usr/bin/zsh -lc "pwd"',
+    "cat .codex-contract-observation",
+    "sh -lc cat .codex-contract-observation",
+    "/bin/sh -lc 'cat .codex-contract-observation'",
+    '/usr/bin/bash -lc "cat .codex-contract-observation"',
+    "dash -lc cat .codex-contract-observation",
+    "/bin/ksh -lc 'cat .codex-contract-observation'",
+    '/usr/bin/zsh -lc "cat .codex-contract-observation"',
   ])("accepts the bounded spelling %s", (command) => {
-    expect(isBoundedPwdCommand(command)).toBe(true);
+    expect(isBoundedObservationCommand(command)).toBe(true);
   });
 
   test.each([
-    " pwd",
-    "pwd ",
-    "/bin/pwd",
-    "fish -lc pwd",
-    "/tmp/sh -lc pwd",
-    "sh -c pwd",
-    "sh -lc pwd extra",
-    "sh -lc 'pwd; whoami'",
-    'sh -lc "pwd && whoami"',
-    "pwd | whoami",
-    "pwd; whoami",
-    "pwd && whoami",
+    " cat .codex-contract-observation",
+    "cat .codex-contract-observation ",
+    "cat /.codex-contract-observation",
+    "cat .codex-contract-observation extra",
+    "fish -lc cat .codex-contract-observation",
+    "/tmp/sh -lc cat .codex-contract-observation",
+    "sh -c cat .codex-contract-observation",
+    "sh -lc cat .codex-contract-observation extra",
+    "sh -lc 'cat .codex-contract-observation; whoami'",
+    'sh -lc "cat .codex-contract-observation && whoami"',
+    "cat .codex-contract-observation | whoami",
+    "cat .codex-contract-observation; whoami",
+    "cat .codex-contract-observation && whoami",
+    "pwd",
   ])("rejects the out-of-contract spelling %s", (command) => {
-    expect(isBoundedPwdCommand(command)).toBe(false);
+    expect(isBoundedObservationCommand(command)).toBe(false);
   });
 });

@@ -1,7 +1,8 @@
+import { randomBytes } from "node:crypto";
 import { PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
 import { tmpdir } from "node:os";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   startAppServer,
@@ -19,7 +20,11 @@ import {
   UNRESTRICTED_POLICY_REQUIREMENTS,
   type PolicyRequirements,
 } from "../../src/core/policy.js";
-import type { ChatContractBackend } from "./chat-contract.js";
+import {
+  OBSERVATION_COMMAND,
+  OBSERVATION_FIXTURE,
+  type ChatContractBackend,
+} from "./chat-contract.js";
 import {
   protocolNotification,
   protocolResponse,
@@ -39,7 +44,10 @@ export async function startFakeChatBackend(
 ): Promise<ChatContractBackend> {
   const environment = await createContractEnvironment();
   return startRestartableBackend(environment, async () => {
-    const scripted = createScriptedTransport(environment.root);
+    const scripted = createScriptedTransport(
+      environment.root,
+      environment.observationToken,
+    );
     return startProxy(
       scripted.rpc,
       async () => scripted.close(),
@@ -104,16 +112,35 @@ interface ContractEnvironment {
   base: string;
   root: string;
   stateDir: string;
+  observationToken: string;
 }
 
 /** Allocates one isolated live-compatible root and sibling state directory. */
 async function createContractEnvironment(): Promise<ContractEnvironment> {
   const base = await mkdtemp(join(tmpdir(), "codex-proxy-contract-"));
-  const root = join(base, "root");
-  const stateDir = join(base, "state");
-  await mkdir(root, { mode: 0o700 });
-  await mkdir(stateDir, { mode: 0o700 });
-  return { base, root: await realpath(root), stateDir };
+  try {
+    const root = join(base, "root");
+    const stateDir = join(base, "state");
+    await mkdir(root, { mode: 0o700 });
+    await mkdir(stateDir, { mode: 0o700 });
+    const canonicalRoot = await realpath(root);
+    const observationToken = `contract-built-in-retained-${randomBytes(16).toString("hex")}`;
+    await writeFile(
+      join(canonicalRoot, OBSERVATION_FIXTURE),
+      `${observationToken}\n`,
+      { mode: 0o600 },
+    );
+    return {
+      base,
+      root: canonicalRoot,
+      stateDir,
+      observationToken,
+    };
+  } catch (error) {
+    // No backend wrapper exists yet to own a partially initialized directory.
+    await rm(base, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 /** Rejects an unsupported safe live-test tuple before starting model work. */
@@ -154,6 +181,7 @@ async function startRestartableBackend(
       return current.origin;
     },
     root: environment.root,
+    observationToken: environment.observationToken,
     modelCalls: () => priorModelCalls + current.modelCalls(),
     resumeCalls: () => priorResumeCalls + current.resumeCalls(),
     waitForInterrupt: () => current.waitForInterrupt(),
@@ -180,7 +208,10 @@ interface ScriptedTransport {
 }
 
 /** Creates deterministic app-server behavior for the shared HTTP contract. */
-function createScriptedTransport(root: string): ScriptedTransport {
+function createScriptedTransport(
+  root: string,
+  observationToken: string,
+): ScriptedTransport {
   const fromServer = new PassThrough();
   const toServer = new PassThrough();
   const rpc = new JsonRpcTransport(fromServer, toServer);
@@ -193,6 +224,7 @@ function createScriptedTransport(root: string): ScriptedTransport {
   >();
   const injected = new Map<string, unknown[]>();
   const pendingTools = new Map<number, { threadId: string; turnId: string }>();
+  const successfulBuiltInThreads = new Set<string>();
   const send = (value: unknown): void => {
     const frame = `${JSON.stringify(value)}\n`;
     const middle = Math.max(1, Math.floor(frame.length / 2));
@@ -336,8 +368,8 @@ function createScriptedTransport(root: string): ScriptedTransport {
         return;
       }
       if (prompt.includes("built-in shell command")) {
-        const itemId = "contract-pwd";
-        const command = "/bin/sh -lc 'pwd'";
+        const itemId = "contract-observation";
+        const command = `/bin/sh -lc '${OBSERVATION_COMMAND}'`;
         const baseItem = {
           type: "commandExecution" as const,
           id: itemId,
@@ -374,13 +406,14 @@ function createScriptedTransport(root: string): ScriptedTransport {
               item: {
                 ...baseItem,
                 status: "completed",
-                aggregatedOutput: `${root}\n`,
+                aggregatedOutput: `${observationToken}\n`,
                 exitCode: 0,
                 durationMs: 1,
               },
             },
           }),
         );
+        successfulBuiltInThreads.add(threadId);
         send(
           protocolNotification({
             method: "item/agentMessage/delta",
@@ -388,7 +421,7 @@ function createScriptedTransport(root: string): ScriptedTransport {
               threadId,
               turnId,
               itemId: "built-in-message",
-              delta: root,
+              delta: "observation-complete",
             },
           }),
         );
@@ -406,8 +439,10 @@ function createScriptedTransport(root: string): ScriptedTransport {
               ? "1\n2\n"
               : prompt.includes("contract-resume-ok")
                 ? "contract-resume-ok"
-                : prompt.includes("prior built-in command")
-                  ? root
+                : prompt.includes("complete stdout from the prior built-in")
+                  ? successfulBuiltInThreads.has(threadId)
+                    ? observationToken
+                    : "contract-built-in-retained-missing"
                   : "Hello",
           },
         }),
@@ -508,6 +543,7 @@ async function startProxy(
         return origin;
       },
       root: environment.root,
+      observationToken: environment.observationToken,
       modelCalls: () => modelCalls,
       resumeCalls: () => resumeCalls,
       async waitForInterrupt() {
