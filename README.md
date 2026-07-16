@@ -13,6 +13,8 @@ npm install
 npm start
 ```
 
+The installation includes the exact Codex CLI version used to generate the checked-in app-server contract. The proxy uses that package-owned executable by default and rejects a `--codex-path` override that reports a different version.
+
 Once published, the CLI will also be available through:
 
 ```sh

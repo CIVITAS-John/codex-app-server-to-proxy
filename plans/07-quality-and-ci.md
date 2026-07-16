@@ -20,6 +20,7 @@ Make the proxy predictable under hostile local input, protocol churn, and operat
 3. Structured event names and HTTP request IDs are implemented. Default-visible failure summaries redact configured paths, home paths, URLs, and token-like values; full error detail is intentionally available only at `debug` level.
 4. New continuation state directories and files request `0700` and `0600` modes, respectively. Persisted records contain identifiers, bindings, lifecycle state, and dynamic-tool call IDs, but not prompts, message bodies, tool arguments, or tool results.
 5. Generated protocol artifacts, synthetic exposed-event fixtures, the root README, the repository guide, and the protocol contract are checked in. Current tests pin metadata and fixture presence, but do not yet prove a clean regeneration or complete schema compatibility.
+6. The exact `@openai/codex 0.144.5` runtime dependency is the single Codex version source. Default startup and protocol generation resolve its declared executable, explicit overrides must report the same version, regeneration recreates both output trees, and `protocol/VERSION.json` records the package pin. This intentionally rejects older or newer Codex executables until their generated contract has been reviewed and checked in.
 
 ## Remaining work
 
@@ -50,8 +51,7 @@ Make the proxy predictable under hostile local input, protocol churn, and operat
     - Tighten or reject pre-existing state directories/files with permissive modes where the platform supports it, then assert resulting permissions without making Windows tests depend on POSIX mode bits.
     - Audit default logs, snapshots, fixtures, persisted state, and CI artifacts for prompts, credentials, login URLs, filesystem paths, and tool payloads. Keep debug logging as an explicit sensitive-data opt-in.
 6. Make protocol drift visible and reproducible.
-    - Select one Codex version source for runtime resolution, generation, `protocol/VERSION.json`, and `protocol/CONTRACT.md`; remove the current version/ownership contradictions. Today the artifacts pin `0.144.0-alpha.4`, the package depends on `@openai/codex ^0.144.1`, `VERSION.json` still calls npm executable ownership unestablished, and the runtime version check matches only `/codex/i` without comparing any version.
-    - Generate schemas with the package-owned Codex executable rather than an arbitrary `codex` on `PATH`, and add an offline clean-tree comparison that fails on unexplained changes.
+    - Add an offline clean-tree comparison that fails on unexplained generated protocol changes.
     - Type-check the exposed-event JSONL corpus against generated protocol types, including complete nested values, instead of checking method-name parity over `unknown` values.
     - Add shared typed builders for maintained fake client requests, server requests, responses, and notifications. Validate every fake app-server message against the applicable generated union or method-specific generated type; the existing notification and `Turn` helpers are only the starting point.
     - Reconcile the maintained schema-version-0 continuation store with the stale version-1 `response-mapping.schema.json` documentation. Beyond the version constant, the documented record shape — `turnId`, `updatedAt`, a `fingerprint` object, and a different status enum — no longer matches the persisted record, and the store already treats the documented version 1 as untrusted.

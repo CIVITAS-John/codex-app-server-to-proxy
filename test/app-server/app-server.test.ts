@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { test } from "vitest";
 import {
+  PINNED_CODEX_VERSION,
   resolveCodexExecutable,
   startAppServer,
 } from "../../src/app-server/app-server.js";
@@ -31,7 +32,7 @@ test("app-server initializes in order and declines elicitation without advertisi
     `#!${process.execPath}
 const fs=require('fs'); const path=require('path');
 const capture=path.join(path.dirname(process.argv[1]),'capture.jsonl');
-if(process.argv.includes('--version')) { console.log('codex-cli 1.2.3'); process.exit(0); }
+if(process.argv.includes('--version')) { console.log('codex-cli ${PINNED_CODEX_VERSION}'); process.exit(0); }
 const rl=require('readline').createInterface({input:process.stdin}); let initialized=false;
 rl.on('line', line => {
   const m=JSON.parse(line); fs.appendFileSync(capture, line+'\\n');
@@ -121,7 +122,7 @@ test("app-server bounds initialization and terminates the child on failure", asy
   const stopped = join(directory, "stopped");
   await writeFile(
     executable,
-    `#!${process.execPath}\nconst fs=require('fs'); const path=require('path');\nif(process.argv.includes('--version')) { console.log('codex-cli 1.2.3'); process.exit(0); }\nprocess.on('SIGTERM', () => { fs.writeFileSync(path.join(path.dirname(process.argv[1]),'stopped'),'yes'); process.exit(0); }); process.stdin.resume();\n`,
+    `#!${process.execPath}\nconst fs=require('fs'); const path=require('path');\nif(process.argv.includes('--version')) { console.log('codex-cli ${PINNED_CODEX_VERSION}'); process.exit(0); }\nprocess.on('SIGTERM', () => { fs.writeFileSync(path.join(path.dirname(process.argv[1]),'stopped'),'yes'); process.exit(0); }); process.stdin.resume();\n`,
     "utf8",
   );
   await chmod(executable, 0o755);
@@ -145,7 +146,7 @@ test("startup fails when managed policy allows no usable approval policy", async
   await writeFile(
     executable,
     `#!${process.execPath}
-if(process.argv.includes('--version')) { console.log('codex-cli 1.2.3'); process.exit(0); }
+if(process.argv.includes('--version')) { console.log('codex-cli ${PINNED_CODEX_VERSION}'); process.exit(0); }
 const rl=require('readline').createInterface({input:process.stdin});
 rl.on('line', line => {
   const m=JSON.parse(line);
@@ -172,4 +173,31 @@ rl.on('line', line => {
       /no supported non-interactive approval policy/.test(error.message),
   );
   await rm(directory, { recursive: true });
+});
+
+test("startup rejects a Codex executable outside the pinned contract", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "app-server-version-test-"));
+  const executable = join(directory, "codex");
+  await writeFile(
+    executable,
+    `#!${process.execPath}\nif(process.argv.includes('--version')) { console.log('codex-cli 0.0.1'); process.exit(0); }\n`,
+    "utf8",
+  );
+  await chmod(executable, 0o755);
+  try {
+    await assert.rejects(
+      startAppServer({
+        codexPath: executable,
+        root: directory,
+        startupTimeoutMs: 1_000,
+        shutdownTimeoutMs: 100,
+        log: createLogger("error", () => {}),
+      }),
+      new RegExp(
+        `Unsupported Codex version 0\\.0\\.1; expected ${PINNED_CODEX_VERSION.replaceAll(".", "\\.")}`,
+      ),
+    );
+  } finally {
+    await rm(directory, { recursive: true });
+  }
 });

@@ -30,7 +30,7 @@ The maintained TypeScript modules are grouped by domain so the public HTTP contr
 
 `test/` mirrors the maintained source domains under `test/cli/`, `test/core/`, `test/app-server/`, `test/http/`, and `test/continuation/`. Cross-domain protocol contract and offline spike coverage lives under `test/contract/` and `test/spike/`. Shared fake backends, repository-path helpers, and typed protocol fixture builders live under `test/support/`.
 
-`protocol/` contains the generated app-server protocol structures consumed by maintained code and tests. Regenerate them with `npm run generate:protocol`; do not hand-edit generated output.
+`protocol/` contains the generated app-server protocol structures consumed by maintained code and tests. The exact `@openai/codex` dependency in `package.json` is the single version source for default runtime startup, generation, and the checked-in contract metadata. Regenerate the artifacts with `npm run generate:protocol` after changing that pin; the command resolves the package-owned executable, rejects an install/version mismatch, recreates both generated trees, and updates `protocol/VERSION.json`. Do not hand-edit generated output.
 
 `docs/codex-app-server.md` is a checked-in protocol reference. `plans/` contains the staged implementation record and compatibility decisions.
 
@@ -57,7 +57,7 @@ The live suite exercises streaming role history, a function-tool round trip, and
 npm run test:live
 ```
 
-Running that dedicated command is the explicit opt-in. It uses an existing ChatGPT login when available and otherwise starts the normal interactive or device-code login flow. Set `CODEX_PATH` to target a specific Codex executable.
+Running that dedicated command is the explicit opt-in. It uses an existing ChatGPT login when available and otherwise starts the normal interactive or device-code login flow. Set `CODEX_PATH` to target a specific Codex executable; an override must report the exact pinned contract version.
 
 Transport framing, malformed-frame handling, process failures, and other fault injection remain fake-only because a live app-server cannot provide those cases deterministically.
 

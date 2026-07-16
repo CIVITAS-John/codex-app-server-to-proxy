@@ -8,7 +8,7 @@ Publish a reproducible npm CLI that can locate a compatible Codex executable and
 
 1. Finalize package metadata, files allow-list, bin mapping, license, provenance, repository links, supported engines, and platform declarations.
 2. Pin or constrain the supported Codex distribution/version based on Stage 01.
-    - If it cannot be installed as an npm dependency, add precise detection and official installation guidance instead of an implicit runtime download.
+    - The exact `@openai/codex 0.144.5` runtime dependency now owns default executable resolution and the generated contract. Stage 08 must preserve that pin through packed-install testing and document that `--codex-path` overrides require the same version.
 3. Ensure installation scripts do not execute downloaded binaries or perform login/network activity.
 4. Add `--version`, `--help`, startup diagnostics, and actionable errors for missing/incompatible Codex, failed login, unavailable port, invalid host, and denied policy.
 5. Test installation from the packed tarball in clean Node 20+ environments on each supported OS, including invocation through the generated npm bin shim.

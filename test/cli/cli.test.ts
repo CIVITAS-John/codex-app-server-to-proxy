@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "vitest";
 import { APP_SERVER_RECOVERY_DELAYS_MS, usage } from "../../src/cli/cli.js";
+import { PINNED_CODEX_VERSION } from "../../src/app-server/app-server.js";
 import { repoRootPath } from "../support/repo-root.js";
 
 test("CLI recovery uses the documented bounded retry schedule", () => {
@@ -73,7 +74,7 @@ test("CLI exits cleanly after a termination signal", async () => {
   await writeFile(
     fake,
     `#!${process.execPath}
-if (process.argv.includes('--version')) { console.log('codex-cli 1.0.0'); process.exit(0); }
+if (process.argv.includes('--version')) { console.log('codex-cli ${PINNED_CODEX_VERSION}'); process.exit(0); }
 const rl=require('readline').createInterface({input:process.stdin});
 rl.on('line', line => {
   const m=JSON.parse(line);

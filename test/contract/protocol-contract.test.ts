@@ -10,11 +10,30 @@ const readJson = async (path: string): Promise<unknown> =>
   JSON.parse(await readFile(new URL(path, root), "utf8"));
 
 test("generated artifacts pin the exact experimental Codex version", async () => {
+  const packageJson = (await readJson("package.json")) as {
+    dependencies: { "@openai/codex": string };
+  };
+  const packageLock = (await readJson("package-lock.json")) as {
+    packages: Record<string, { version?: string }>;
+  };
   const version = (await readJson("protocol/VERSION.json")) as {
+    codexPackage: string;
     codexVersion: string;
+    versionSource: string;
     experimental: boolean;
   };
-  assert.equal(version.codexVersion, "0.144.0-alpha.4");
+  const pinnedVersion = packageJson.dependencies["@openai/codex"];
+  assert.match(pinnedVersion, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
+  assert.equal(
+    packageLock.packages["node_modules/@openai/codex"]?.version,
+    pinnedVersion,
+  );
+  assert.equal(version.codexPackage, "@openai/codex");
+  assert.equal(version.codexVersion, pinnedVersion);
+  assert.equal(
+    version.versionSource,
+    "package.json dependencies.@openai/codex",
+  );
   assert.equal(version.experimental, true);
   const ts = await readdir(new URL("protocol/generated/typescript", root));
   const schemas = await readdir(
@@ -22,6 +41,14 @@ test("generated artifacts pin the exact experimental Codex version", async () =>
   );
   assert(ts.includes("ServerNotification.ts"));
   assert(schemas.includes("codex_app_server_protocol.v2.schemas.json"));
+  const contract = await readFile(
+    new URL("protocol/CONTRACT.md", root),
+    "utf8",
+  );
+  assert.match(
+    contract,
+    new RegExp(`codex-cli ${pinnedVersion.replaceAll(".", "\\.")}`),
+  );
 });
 
 test("every claimed exposed app-server event has a synthetic fixture", async () => {

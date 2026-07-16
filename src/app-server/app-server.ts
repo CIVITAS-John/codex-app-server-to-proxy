@@ -20,25 +20,38 @@ import { redact } from "../core/redact.js";
 /** Identifies this proxy to app-server during initialization. */
 export const CLIENT_NAME = "codex-openai-proxy";
 
-/** Resolves the bundled Codex executable when the default command is used. */
+/** Package metadata that owns the runtime and generated protocol version. */
+interface CodexPackageMetadata {
+  version: string;
+  bin?: string | Record<string, string>;
+}
+
+/** Reads the exact runtime dependency used as the compatibility contract. */
+function codexPackageMetadata(): {
+  packageJsonPath: string;
+  packageJson: CodexPackageMetadata;
+} {
+  const require = createRequire(import.meta.url);
+  const packageJsonPath = require.resolve("@openai/codex/package.json");
+  return {
+    packageJsonPath,
+    packageJson: require(packageJsonPath) as CodexPackageMetadata,
+  };
+}
+
+/** Exact Codex CLI version supported by this proxy build. */
+export const PINNED_CODEX_VERSION = codexPackageMetadata().packageJson.version;
+
+/** Resolves the package-owned Codex executable unless explicitly overridden. */
 export function resolveCodexExecutable(configuredPath: string): string {
   if (configuredPath !== "codex") return configuredPath;
-  try {
-    const require = createRequire(import.meta.url);
-    const packageJsonPath = require.resolve("@openai/codex/package.json");
-    const packageJson = require(packageJsonPath) as {
-      bin?: string | Record<string, string>;
-    };
-    const bin =
-      typeof packageJson.bin === "string"
-        ? packageJson.bin
-        : packageJson.bin?.codex;
-    if (!bin) throw new Error("@openai/codex does not declare a codex binary");
-    return resolve(dirname(packageJsonPath), bin);
-  } catch {
-    // PATH remains a compatibility fallback for development and custom installs.
-    return configuredPath;
-  }
+  const { packageJsonPath, packageJson } = codexPackageMetadata();
+  const bin =
+    typeof packageJson.bin === "string"
+      ? packageJson.bin
+      : packageJson.bin?.codex;
+  if (!bin) throw new Error("@openai/codex does not declare a codex binary");
+  return resolve(dirname(packageJsonPath), bin);
 }
 
 /** Owns the initialized app-server process and its JSON-RPC transport. */
@@ -159,7 +172,7 @@ async function readConfigRequirements(
   return requirements;
 }
 
-/** Verifies that a configured executable identifies itself as Codex. */
+/** Verifies that a configured executable matches the pinned contract version. */
 async function verifyCodex(
   path: string,
   cwd: string,
@@ -180,9 +193,15 @@ async function verifyCodex(
   clearTimeout(timer);
   if (signal === "SIGKILL") throw new Error("Codex version check timed out.");
   if (code !== 0) throw new Error("Codex version check failed.");
-  if (!/codex/i.test(Buffer.concat(output).toString("utf8")))
+  const value = Buffer.concat(output).toString("utf8").trim();
+  const match = /^codex-cli (\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/.exec(value);
+  if (!match)
     throw new Error(
       "The configured executable did not identify itself as Codex.",
+    );
+  if (match[1] !== PINNED_CODEX_VERSION)
+    throw new Error(
+      `Unsupported Codex version ${match[1]}; expected ${PINNED_CODEX_VERSION}.`,
     );
 }
 

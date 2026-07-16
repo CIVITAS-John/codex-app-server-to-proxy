@@ -756,7 +756,7 @@
                 "null"
               ],
               "format": "uint64",
-              "minimum": 0.0
+              "minimum": 0
             },
             "type": {
               "type": "string",
@@ -1706,7 +1706,7 @@
             "null"
           ],
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         },
         "sortDirection": {
           "description": "Optional turn pagination direction; defaults to descending.",
@@ -2675,7 +2675,7 @@
             "null"
           ],
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         },
         "threadId": {
           "type": "string"
@@ -2713,7 +2713,7 @@
           "description": "The number of turns to drop from the end of the thread. Must be >= 1.\n\nThis only modifies the thread's history and does not revert local file changes that have been made by the agent. Clients are responsible for reverting these changes.",
           "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         },
         "threadId": {
           "type": "string"
@@ -2800,7 +2800,7 @@
             "null"
           ],
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         },
         "modelProviders": {
           "description": "Optional provider filter; when set, only sessions recorded under these providers are returned. When present but empty, includes all providers.",
@@ -2893,7 +2893,7 @@
             "null"
           ],
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         },
         "searchTerm": {
           "description": "Required substring/full-text query for thread search.",
@@ -2952,7 +2952,7 @@
             "null"
           ],
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         }
       }
     },
@@ -3006,7 +3006,7 @@
             "null"
           ],
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         },
         "sortDirection": {
           "description": "Optional turn pagination direction; defaults to descending.",
@@ -3046,7 +3046,7 @@
             "null"
           ],
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         },
         "sortDirection": {
           "description": "Optional item pagination direction; defaults to ascending.",
@@ -3472,7 +3472,7 @@
             "null"
           ],
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         },
         "threadId": {
           "description": "Optional thread id used to evaluate app feature gating from that thread's config.",
@@ -3799,12 +3799,12 @@
         "end": {
           "type": "integer",
           "format": "uint",
-          "minimum": 0.0
+          "minimum": 0
         },
         "start": {
           "type": "integer",
           "format": "uint",
-          "minimum": 0.0
+          "minimum": 0
         }
       }
     },
@@ -4442,12 +4442,12 @@
         "numChannels": {
           "type": "integer",
           "format": "uint16",
-          "minimum": 0.0
+          "minimum": 0
         },
         "sampleRate": {
           "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         },
         "samplesPerChannel": {
           "type": [
@@ -4455,7 +4455,7 @@
             "null"
           ],
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         }
       }
     },
@@ -4702,7 +4702,7 @@
             "null"
           ],
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         }
       }
     },
@@ -4730,7 +4730,7 @@
             "null"
           ],
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         },
         "threadId": {
           "description": "Optional loaded thread id. Pass this when showing feature state for an existing thread so enablement is computed from that thread's refreshed config, including project-local config for the thread's cwd.",
@@ -4767,7 +4767,7 @@
             "null"
           ],
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         }
       }
     },
@@ -4887,7 +4887,7 @@
             "null"
           ],
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         },
         "order": {
           "anyOf": [
@@ -4954,7 +4954,7 @@
             "null"
           ],
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0
         },
         "environmentId": {
           "type": "string"
@@ -5049,7 +5049,7 @@
             "null"
           ],
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         },
         "threadId": {
           "type": [
@@ -5363,13 +5363,13 @@
           "description": "Terminal width in character cells.",
           "type": "integer",
           "format": "uint16",
-          "minimum": 0.0
+          "minimum": 0
         },
         "rows": {
           "description": "Terminal height in character cells.",
           "type": "integer",
           "format": "uint16",
-          "minimum": 0.0
+          "minimum": 0
         }
       }
     },
@@ -5424,7 +5424,7 @@
             "null"
           ],
           "format": "uint",
-          "minimum": 0.0
+          "minimum": 0
         },
         "permissionProfile": {
           "description": "Optional active permissions profile id for this command.\n\nDefaults to the user's configured permissions when omitted. Cannot be combined with `sandboxPolicy`.",
@@ -5561,13 +5561,13 @@
           "description": "Terminal width in character cells.",
           "type": "integer",
           "format": "uint16",
-          "minimum": 0.0
+          "minimum": 0
         },
         "rows": {
           "description": "Terminal height in character cells.",
           "type": "integer",
           "format": "uint16",
-          "minimum": 0.0
+          "minimum": 0
         }
       }
     },
@@ -5617,7 +5617,7 @@
             "null"
           ],
           "format": "uint",
-          "minimum": 0.0
+          "minimum": 0
         },
         "processHandle": {
           "description": "Client-supplied, connection-scoped process handle.\n\nDuplicate active handles are rejected on the same connection. The same handle can be reused after the prior process exits.",
@@ -6133,7 +6133,7 @@
                     "null"
                   ],
                   "format": "uint16",
-                  "minimum": 0.0
+                  "minimum": 0
                 }
               }
             }
@@ -6157,7 +6157,7 @@
                     "null"
                   ],
                   "format": "uint16",
-                  "minimum": 0.0
+                  "minimum": 0
                 }
               }
             }
@@ -6181,7 +6181,7 @@
                     "null"
                   ],
                   "format": "uint16",
-                  "minimum": 0.0
+                  "minimum": 0
                 }
               }
             }
@@ -6205,7 +6205,7 @@
                     "null"
                   ],
                   "format": "uint16",
-                  "minimum": 0.0
+                  "minimum": 0
                 }
               }
             }
@@ -6628,12 +6628,12 @@
         "lineEnd": {
           "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         },
         "lineStart": {
           "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         },
         "note": {
           "type": "string"
@@ -7643,7 +7643,7 @@
             "durationMs": {
               "type": "integer",
               "format": "uint64",
-              "minimum": 0.0
+              "minimum": 0
             },
             "id": {
               "type": "string"
@@ -8650,7 +8650,7 @@
             "null"
           ],
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         },
         "processId": {
           "type": "string"
@@ -8661,7 +8661,7 @@
             "null"
           ],
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0
         }
       }
     },
@@ -9231,7 +9231,7 @@
         "timeoutSec": {
           "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0
         },
         "trustStatus": {
           "$ref": "#/definitions/HookTrustStatus"
@@ -14016,7 +14016,7 @@
                 "null"
               ],
               "format": "uint64",
-              "minimum": 0.0
+              "minimum": 0
             },
             "type": {
               "type": "string",
@@ -14272,7 +14272,7 @@
             "null"
           ],
           "format": "uint16",
-          "minimum": 0.0
+          "minimum": 0
         },
         "managedAllowedDomainsOnly": {
           "description": "When true, only managed allowlist entries are respected while managed network enforcement is active.",
@@ -14287,7 +14287,7 @@
             "null"
           ],
           "format": "uint16",
-          "minimum": 0.0
+          "minimum": 0
         },
         "unixSockets": {
           "description": "Canonical unix socket permission map for `experimental_network`.",
@@ -15139,7 +15139,7 @@
             "null"
           ],
           "format": "uint",
-          "minimum": 1.0
+          "minimum": 1
         },
         "read": {
           "description": "This will be removed in favor of `entries`.",
@@ -15516,7 +15516,7 @@
             "port": {
               "type": "integer",
               "format": "uint16",
-              "minimum": 0.0
+              "minimum": 0
             },
             "protocol": {
               "$ref": "#/definitions/NetworkApprovalProtocol"
@@ -16805,13 +16805,13 @@
           "description": "1-based column number (in Unicode scalar values).",
           "type": "integer",
           "format": "uint",
-          "minimum": 0.0
+          "minimum": 0
         },
         "line": {
           "description": "1-based line number.",
           "type": "integer",
           "format": "uint",
-          "minimum": 0.0
+          "minimum": 0
         }
       }
     },
@@ -17042,7 +17042,7 @@
         "extraCount": {
           "type": "integer",
           "format": "uint",
-          "minimum": 0.0
+          "minimum": 0
         },
         "failedScan": {
           "type": "boolean"
@@ -17103,6 +17103,37 @@
         }
       }
     },
+    "FuzzyFileSearchMatchType": {
+      "type": "string",
+      "enum": [
+        "file",
+        "directory"
+      ]
+    },
+    "FuzzyFileSearchSessionUpdatedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "FuzzyFileSearchSessionUpdatedNotification",
+      "type": "object",
+      "required": [
+        "files",
+        "query",
+        "sessionId"
+      ],
+      "properties": {
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/FuzzyFileSearchResult"
+          }
+        },
+        "query": {
+          "type": "string"
+        },
+        "sessionId": {
+          "type": "string"
+        }
+      }
+    },
     "InitializeCapabilities": {
       "description": "Client-declared capabilities negotiated during initialize.",
       "type": "object",
@@ -17133,37 +17164,6 @@
         }
       }
     },
-    "FuzzyFileSearchSessionUpdatedNotification": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "title": "FuzzyFileSearchSessionUpdatedNotification",
-      "type": "object",
-      "required": [
-        "files",
-        "query",
-        "sessionId"
-      ],
-      "properties": {
-        "files": {
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/FuzzyFileSearchResult"
-          }
-        },
-        "query": {
-          "type": "string"
-        },
-        "sessionId": {
-          "type": "string"
-        }
-      }
-    },
-    "FuzzyFileSearchMatchType": {
-      "type": "string",
-      "enum": [
-        "file",
-        "directory"
-      ]
-    },
     "FuzzyFileSearchResult": {
       "description": "Superset of [`codex_file_search::FileMatch`]",
       "type": "object",
@@ -17186,7 +17186,7 @@
           "items": {
             "type": "integer",
             "format": "uint32",
-            "minimum": 0.0
+            "minimum": 0
           }
         },
         "match_type": {
@@ -17201,7 +17201,7 @@
         "score": {
           "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0
         }
       }
     },
@@ -17238,6 +17238,27 @@
         }
       }
     },
+    "ClientInfo": {
+      "type": "object",
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "type": "string"
+        }
+      }
+    },
     "FuzzyFileSearchSessionUpdateParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "title": "FuzzyFileSearchSessionUpdateParams",
@@ -17268,29 +17289,6 @@
         }
       }
     },
-    "InitializeParams": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
-      "title": "InitializeParams",
-      "type": "object",
-      "required": [
-        "clientInfo"
-      ],
-      "properties": {
-        "capabilities": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/InitializeCapabilities"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "clientInfo": {
-          "$ref": "#/definitions/ClientInfo"
-        }
-      }
-    },
     "FuzzyFileSearchParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "title": "FuzzyFileSearchParams",
@@ -17317,24 +17315,26 @@
         }
       }
     },
-    "ClientInfo": {
+    "InitializeParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "InitializeParams",
       "type": "object",
       "required": [
-        "name",
-        "version"
+        "clientInfo"
       ],
       "properties": {
-        "name": {
-          "type": "string"
-        },
-        "title": {
-          "type": [
-            "string",
-            "null"
+        "capabilities": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InitializeCapabilities"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
-        "version": {
-          "type": "string"
+        "clientInfo": {
+          "$ref": "#/definitions/ClientInfo"
         }
       }
     },
