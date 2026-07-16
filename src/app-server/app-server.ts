@@ -8,12 +8,14 @@ import { JsonRpcTransport, RpcError, type ServerRequest } from "./json-rpc.js";
 import type { Logger } from "../core/logger.js";
 import {
   parsePolicyRequirements,
+  selectApprovalPolicy,
+  selectApprovalsReviewer,
   UNRESTRICTED_POLICY_REQUIREMENTS,
   type PolicyRequirements,
 } from "../core/policy.js";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
+import { redact } from "../core/redact.js";
 
 /** Identifies this proxy to app-server during initialization. */
 export const CLIENT_NAME = "codex-openai-proxy";
@@ -147,7 +149,14 @@ async function readConfigRequirements(
       return UNRESTRICTED_POLICY_REQUIREMENTS;
     throw error;
   }
-  return parsePolicyRequirements(value);
+  const requirements = parsePolicyRequirements(value);
+  // Managed requirements are fixed for the process lifetime, so an allowlist
+  // that permits no proxy-supported approval policy or reviewer is a deployment
+  // misconfiguration. Fail startup here rather than surfacing it as a per-request
+  // 400 that misleadingly blames the client's x_codex.
+  selectApprovalPolicy(requirements);
+  selectApprovalsReviewer(requirements);
+  return requirements;
 }
 
 /** Verifies that a configured executable identifies itself as Codex. */
@@ -257,12 +266,3 @@ function failClosed(
   log("warn", "app_server_request_declined", { method: request.method });
 }
 
-/** Removes common URL and credential forms from app-server diagnostics. */
-function redact(value: string, root: string): string {
-  const home = homedir();
-  return value
-    .replaceAll(home, "[REDACTED_HOME]")
-    .replaceAll(root, "[REDACTED_CWD]")
-    .replace(/https?:\/\/\S+/gi, "[REDACTED_URL]")
-    .replace(/\b(token|code|secret)=\S+/gi, "$1=[REDACTED]");
-}

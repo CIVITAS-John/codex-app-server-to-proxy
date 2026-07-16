@@ -50,7 +50,7 @@ test("atomic mappings survive reload and supersede older thread responses", asyn
     version: number;
     records: unknown[];
   };
-  assert.equal(disk.version, 1);
+  assert.equal(disk.version, 0);
   assert.equal(disk.records.length, 2);
 });
 
@@ -69,43 +69,11 @@ test("restart converts pending-tool responder records to expired tombstones", as
   assert.deepEqual(tombstone?.callIds, ["call_1"]);
 });
 
-test("legacy mappings migrate to the current schema and expire pending responders", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "codex-proxy-state-"));
-  const now = Date.now();
-  await writeFile(
-    join(directory, "continuations.json"),
-    JSON.stringify({
-      version: 0,
-      mappings: [
-        {
-          responseId: "response_legacy",
-          threadId: "thread_1",
-          state: "pending_tool",
-          createdAt: now,
-          expiresAt: now + 60_000,
-          callIds: ["call_1"],
-          ...binding,
-        },
-      ],
-    }),
-  );
-
-  assert.equal(
-    new ResponseStore(directory).get("response_legacy")?.state,
-    "expired",
-  );
-  const migrated = JSON.parse(
-    await readFile(join(directory, "continuations.json"), "utf8"),
-  ) as { version: number; records: unknown[] };
-  assert.equal(migrated.version, 1);
-  assert.equal(migrated.records.length, 1);
-});
-
-test("an unknown future schema remains untouched and is never trusted", async () => {
+test("a nonzero schema remains untouched and is never trusted", async () => {
   const directory = await mkdtemp(join(tmpdir(), "codex-proxy-state-"));
   const path = join(directory, "continuations.json");
   const future = JSON.stringify({
-    version: 999,
+    version: 1,
     records: [{ responseId: "unsafe" }],
   });
   await writeFile(path, future);

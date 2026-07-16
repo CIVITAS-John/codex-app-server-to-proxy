@@ -339,7 +339,7 @@ async function withChatServer(
     ]),
     silentLogger,
   );
-  proxy.setTransport(fakeAppServer());
+  proxy.setTransport(fakeAppServer(), UNRESTRICTED_POLICY_REQUIREMENTS);
   proxy.setReady(true);
   const address = await proxy.listen();
   const host = address.address.includes(":")
@@ -709,7 +709,10 @@ test("streaming and aggregate responses share content and exact usage", async ()
 
 test("aggregate tool-only responses use null content", async () => {
   await withChatServer(async (origin, proxy) => {
-    proxy.setTransport(fakeAppServer(true, () => {}, true));
+    proxy.setTransport(
+      fakeAppServer(true, () => {}, true),
+      UNRESTRICTED_POLICY_REQUIREMENTS,
+    );
     const response = await fetch(`${origin}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -735,7 +738,10 @@ test("aggregate tool-only responses use null content", async () => {
 test("late streaming failures emit one error and close without DONE", async () => {
   for (const mode of ["transport", "event"] as const)
     await withChatServer(async (origin, proxy) => {
-      proxy.setTransport(lateFailureAppServer(mode));
+      proxy.setTransport(
+        lateFailureAppServer(mode),
+        UNRESTRICTED_POLICY_REQUIREMENTS,
+      );
       const response = await fetch(`${origin}/v1/chat/completions`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -779,7 +785,7 @@ test("late streaming failures emit one error and close without DONE", async () =
 test("initial SSE write failure disposes eager execution before generator startup", async () => {
   await withChatServer(async (origin, proxy) => {
     const fake = recoverableAppServer();
-    proxy.setTransport(fake.rpc);
+    proxy.setTransport(fake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
     proxy.server.prependOnceListener("request", (_request, response) => {
       response.write = (() => {
         throw new Error("initial SSE write failed");
@@ -846,7 +852,7 @@ test("persistence failure emits an SSE error before finish reason or usage", asy
 
 test("request timeout wakes a silent turn and closes its SSE stream", async () => {
   await withChatServer(async (origin, proxy) => {
-    proxy.setTransport(fakeAppServer(false));
+    proxy.setTransport(fakeAppServer(false), UNRESTRICTED_POLICY_REQUIREMENTS);
     const response = await fetch(`${origin}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -911,6 +917,7 @@ test("client disconnect interrupts an active app-server turn", async () => {
       fakeAppServer(false, () => {
         interrupted = true;
       }),
+      UNRESTRICTED_POLICY_REQUIREMENTS,
     );
     const response = await fetch(`${origin}/v1/chat/completions`, {
       method: "POST",
@@ -936,7 +943,7 @@ test("client disconnect interrupts an active app-server turn", async () => {
 test("ingress overflow interrupts the turn and rejects every queued tool responder", async () => {
   await withChatServer(async (origin, proxy) => {
     const fake = failingIngressAppServer("overflow");
-    proxy.setTransport(fake.rpc);
+    proxy.setTransport(fake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
     const response = await fetch(`${origin}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -960,7 +967,7 @@ test("ingress overflow interrupts the turn and rejects every queued tool respond
 test("dynamic correlation failure rejects every captured responder", async () => {
   await withChatServer(async (origin, proxy) => {
     const fake = failingIngressAppServer("mismatch");
-    proxy.setTransport(fake.rpc);
+    proxy.setTransport(fake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
     const response = await fetch(`${origin}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -987,7 +994,7 @@ test("suspension persistence failure rejects every captured responder", async ()
     await withChatServer(
       async (origin, proxy) => {
         const fake = failingIngressAppServer("suspend");
-        proxy.setTransport(fake.rpc);
+        proxy.setTransport(fake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
         await mkdir(join(directory, "continuations.json"));
         const request = {
           model: "m",
@@ -1255,6 +1262,57 @@ test("request policies map exactly, bind continuations, and honor managed denial
       "sandbox_not_allowed",
     );
     assert.deepEqual(deniedFake.messages, []);
+  } finally {
+    await proxy.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("refreshing managed requirements on an unchanged transport takes effect", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-policy-refresh-"));
+  const root = await realpath(directory);
+  const options = parseServeOptions([
+    "--port",
+    "0",
+    "--root",
+    root,
+    "--state-dir",
+    join(directory, "state"),
+  ]);
+  const proxy = createProxyServer(options, silentLogger);
+  const fake = policyCapturingAppServer();
+  proxy.setTransport(fake.rpc, {
+    ...UNRESTRICTED_POLICY_REQUIREMENTS,
+    allowedSandboxModes: ["read-only"],
+  });
+  proxy.setReady(true);
+  const address = await proxy.listen();
+  const host = address.address.includes(":")
+    ? `[${address.address}]`
+    : address.address;
+  const origin = `http://${host}:${address.port}`;
+  const body = JSON.stringify({
+    model: "m",
+    messages: [{ role: "user", content: "x" }],
+    x_codex: { sandbox: "workspace-write" },
+  });
+  const send = (): Promise<Response> =>
+    fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+  try {
+    const denied = await send();
+    assert.equal(denied.status, 400);
+    assert.equal(
+      ((await denied.json()) as { error: { code: string } }).error.code,
+      "sandbox_not_allowed",
+    );
+    // Same transport instance, relaxed requirements: the refresh must apply
+    // rather than being discarded by the same-transport short-circuit.
+    proxy.setTransport(fake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
+    assert.equal((await send()).status, 200);
   } finally {
     await proxy.close();
     await rm(directory, { recursive: true, force: true });

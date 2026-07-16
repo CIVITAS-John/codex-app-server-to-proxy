@@ -138,3 +138,38 @@ test("app-server bounds initialization and terminates the child on failure", asy
   assert.equal(await readFile(stopped, "utf8"), "yes");
   await rm(directory, { recursive: true });
 });
+
+test("startup fails when managed policy allows no usable approval policy", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "app-server-managed-test-"));
+  const executable = join(directory, "codex");
+  await writeFile(
+    executable,
+    `#!${process.execPath}
+if(process.argv.includes('--version')) { console.log('codex-cli 1.2.3'); process.exit(0); }
+const rl=require('readline').createInterface({input:process.stdin});
+rl.on('line', line => {
+  const m=JSON.parse(line);
+  if(m.method==='initialize') console.log(JSON.stringify({id:m.id,result:{}}));
+  else if(m.method==='configRequirements/read') console.log(JSON.stringify({id:m.id,result:{requirements:{allowedApprovalPolicies:[]}}}));
+});
+`,
+    "utf8",
+  );
+  await chmod(executable, 0o755);
+  // An allowlist that permits no proxy-supported approval policy is a deployment
+  // misconfiguration; it must fail startup rather than surface later as a
+  // per-request 400 blaming the client's x_codex.
+  await assert.rejects(
+    startAppServer({
+      codexPath: executable,
+      root: directory,
+      startupTimeoutMs: 1_000,
+      shutdownTimeoutMs: 100,
+      log: createLogger("error", () => {}),
+    }),
+    (error: unknown) =>
+      error instanceof Error &&
+      /no supported non-interactive approval policy/.test(error.message),
+  );
+  await rm(directory, { recursive: true });
+});

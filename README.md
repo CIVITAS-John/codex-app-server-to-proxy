@@ -103,9 +103,9 @@ Function tools use the normal multi-request Chat Completions flow:
 1. Send the function definitions in `tools`.
 2. Receive an assistant response containing `tool_calls`.
 3. Execute the requested functions in your client.
-4. Send the assistant tool-call message followed by matching `role: "tool"` messages, repeating the same `tools` definition.
+4. Send the assistant tool-call message followed by matching `role: "tool"` messages, repeating the same `tools` definition and the same `x_codex` policy settings from the original request.
 
-By default, the proxy associates tool results with the one pending Codex turn through their `tool_call_id` values. Start it with `--implicit-tool-continuation false` if every tool-result request should instead supply the Codex continuation field described below.
+By default, the proxy associates tool results with the one pending Codex turn through their `tool_call_id` values. Start it with `--implicit-tool-continuation false` if every tool-result request should instead supply the Codex continuation field described below. Either way, a tool-result request that omits or changes the original `x_codex` settings is rejected with `continuation_policy_mismatch` and leaves the pending call intact for a corrected retry.
 
 Pending tool calls are held in memory for five minutes by default. They cannot survive a proxy restart; completed threads can.
 
@@ -160,6 +160,8 @@ Approval policy is proxy-owned and non-interactive. The proxy prefers `never`, s
 Continuations must repeat the same effective `x_codex` settings. A change is rejected with `continuation_cwd_mismatch` or `continuation_policy_mismatch` before the thread is resumed.
 
 > **Project trust side effect:** Starting a new thread with `workspace-write` and a `cwd` can cause app-server to mark that project as trusted in the user's `config.toml`. Set `--root` to the narrowest appropriate boundary; the proxy will not cause app-server to trust a directory outside it.
+
+> **State directory placement:** Under `workspace-write` the Codex agent can write anywhere in the effective `cwd`. The proxy therefore keeps its continuation store outside the root by default (under `~/.codex-openai-proxy`, namespaced per root). Pointing `--state-dir` back inside the root lets a writable-sandbox turn modify the store, so keep it outside the root.
 
 ## Usage metadata
 

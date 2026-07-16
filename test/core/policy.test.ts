@@ -189,6 +189,24 @@ test("safe defaults are explicit and command network stays disabled", async () =
   }
 });
 
+test("a request without cwd returns the root verbatim without re-canonicalizing", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "proxy-policy-rootpass-"));
+  const real = join(directory, "real");
+  const link = join(directory, "link");
+  try {
+    await mkdir(real);
+    await symlink(real, link, "dir");
+    // `link` is a non-canonical root whose realpath is the sibling `real`. The
+    // previous build re-canonicalized the root on every request and rejected it
+    // as cwd_outside_root; a request naming no cwd must now return the root as
+    // given, doing no per-request filesystem work.
+    const effective = await resolveEffectivePolicy({}, link, requirements());
+    assert.equal(effective.cwd, link);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("managed sandbox and web-search denials fail rather than approximate", async () => {
   const directory = await mkdtemp(join(tmpdir(), "proxy-policy-managed-"));
   try {

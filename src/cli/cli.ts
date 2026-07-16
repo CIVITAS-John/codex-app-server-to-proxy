@@ -1,6 +1,5 @@
-import { isAbsolute, relative, resolve, sep } from "node:path";
 import { parseServeOptions } from "../core/config.js";
-import { createLogger } from "../core/logger.js";
+import { createLogger, logFailure } from "../core/logger.js";
 import { canonicalizeRoot } from "../core/policy.js";
 import { createProxyServer } from "../http/server.js";
 import { startAppServer, type AppServer } from "../app-server/app-server.js";
@@ -39,19 +38,9 @@ export async function run(argv: readonly string[]): Promise<number> {
     throw new Error(`Unknown command: ${argv[0]}\n\n${usage}`);
   const parsed = parseServeOptions(argv.slice(1));
   const canonicalRoot = await canonicalizeRoot(parsed.root);
-  const stateRelative = relative(parsed.root, parsed.stateDir);
-  const stateInsideRoot =
-    stateRelative === "" ||
-    (!isAbsolute(stateRelative) &&
-      stateRelative !== ".." &&
-      !stateRelative.startsWith(`..${sep}`));
-  const options = {
-    ...parsed,
-    root: canonicalRoot,
-    stateDir: stateInsideRoot
-      ? resolve(canonicalRoot, stateRelative)
-      : parsed.stateDir,
-  };
+  // The state directory is intentionally kept outside the root (see config.ts),
+  // so it is used verbatim; only the root is canonicalized here.
+  const options = { ...parsed, root: canonicalRoot };
   const log = createLogger(options.logLevel);
   const proxy = createProxyServer(options, log);
   const address = await proxy.listen();
@@ -111,13 +100,7 @@ export async function run(argv: readonly string[]): Promise<number> {
         recovering = false;
         return;
       } catch (error) {
-        log("error", "app_server_restart_failed", {
-          attempt,
-        });
-        log("debug", "app_server_restart_failed_detail", {
-          attempt,
-          error: error instanceof Error ? error.message : String(error),
-        });
+        logFailure(log, "app_server_restart_failed", { attempt }, error, options.root);
       }
     }
     recovering = false;
@@ -151,10 +134,7 @@ export async function run(argv: readonly string[]): Promise<number> {
             resolve(0);
           },
           (error: unknown) => {
-            log("error", "shutdown_failed");
-            log("debug", "shutdown_failed_detail", {
-              error: error instanceof Error ? error.message : String(error),
-            });
+            logFailure(log, "shutdown_failed", {}, error, options.root);
             resolve(1);
           },
         );

@@ -58,6 +58,8 @@ rl.on('line', line => {
       "0",
       "--root",
       ".",
+      "--state-dir",
+      join(directory, "state"),
       "--codex-path",
       fake,
     ],

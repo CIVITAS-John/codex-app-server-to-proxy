@@ -10,7 +10,10 @@ import { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
 import { createLogger } from "../../src/core/logger.js";
 import { createProxyServer, type ProxyServer } from "../../src/http/server.js";
 import { bindingHash, ResponseStore } from "../../src/continuation/state.js";
-import { policyBindingHash } from "../../src/core/policy.js";
+import {
+  policyBindingHash,
+  UNRESTRICTED_POLICY_REQUIREMENTS,
+} from "../../src/core/policy.js";
 import {
   protocolNotification,
   protocolTurn,
@@ -140,7 +143,7 @@ async function startProxy(
     });
   }
   const proxy = createProxyServer(options, silentLogger);
-  proxy.setTransport(fake.transport);
+  proxy.setTransport(fake.transport, UNRESTRICTED_POLICY_REQUIREMENTS);
   proxy.setReady(true);
   const address = await proxy.listen();
   const host = address.address.includes(":")

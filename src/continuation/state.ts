@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -6,9 +5,16 @@ import type {
   ServerRequest,
 } from "../app-server/json-rpc.js";
 import { HttpError } from "../http/errors.js";
+import {
+  bindingHash,
+  canonicalJson,
+  record as asRecord,
+} from "../core/canonical.js";
 
-/** Current on-disk continuation-store schema. */
-const SCHEMA_VERSION = 1;
+export { bindingHash, canonicalJson };
+
+/** Current on-disk continuation-store schema for the unreleased format. */
+const SCHEMA_VERSION = 0;
 
 /** Context that must remain identical over a Codex thread's lifetime. */
 export interface ThreadBinding {
@@ -26,29 +32,6 @@ export interface ResponseRecord extends ThreadBinding {
   createdAt: number;
   expiresAt: number;
   callIds?: string[];
-}
-
-/** Legacy schema migrated in place when first opened by the current proxy. */
-interface LegacyStateFile {
-  version: 0;
-  mappings: ResponseRecord[];
-}
-
-/** Canonicalizes JSON values so equivalent tool definitions hash equally. */
-export function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>).sort(
-      ([a], [b]) => a.localeCompare(b),
-    );
-    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
-}
-
-/** Returns a stable SHA-256 binding for a JSON-compatible value. */
-export function bindingHash(value: unknown): string {
-  return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }
 
 /** Durable atomic response mapping store with bounded retention. */
@@ -137,10 +120,9 @@ export class ResponseStore {
       const records =
         parsed.version === SCHEMA_VERSION && Array.isArray(parsed.records)
           ? parsed.records
-          : parsed.version === 0 && Array.isArray(parsed.mappings)
-            ? (input as LegacyStateFile).mappings
-            : undefined;
-      // Unknown future schemas are left untouched and treated as untrusted.
+          : undefined;
+      // Other schemas are left untouched and treated as untrusted. There is no
+      // compatibility path because this on-disk format has not been released.
       if (!records) return;
       for (const record of records)
         if (isResponseRecord(record))
@@ -445,13 +427,6 @@ export class ContinuationCoordinator {
     }
     this.#pending.clear();
   }
-}
-
-/** Narrows an unknown value to a non-null object record. */
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
 }
 
 /** Validates every persisted field before a record can influence continuation. */

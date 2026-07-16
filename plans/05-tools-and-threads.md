@@ -34,7 +34,7 @@ Support client-defined tools across requests while preserving safe Codex thread 
     - Then inspect the mapped thread through app-server (`thread/read` returns stored status without resuming) and verify that its status and effective policy are resumable.
     - Treat `thread/resume` as the final authoritative check and handle a state change between inspection and resume as a rejected continuation.
 9. Bind continuation records to the canonical tool set, model, cwd, and effective policy. Reject any mismatch.
-10. Add retention, pruning, corruption recovery, and schema migration for the local mapping store.
+10. Add retention, pruning, corruption recovery, and strict schema validation for the local mapping store.
 11. Detect replayed continuation requests and make behavior idempotent where possible; otherwise return a clear conflict.
 12. Serialize access per thread: a thread runs at most one active turn.
     - Immediately reject a request arriving while another turn or pending tool suspension owns the same thread with an OpenAI-shaped HTTP 409 conflict; never queue or interleave it.

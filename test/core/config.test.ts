@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { homedir } from "node:os";
+import { join, sep } from "node:path";
 import { test } from "vitest";
 import {
   normalizeLoopbackHost,
@@ -33,7 +35,17 @@ test("serve options have safe documented defaults and reject ambiguity", () => {
   assert.equal(parsed.root, "/tmp/project");
   assert.equal(parsed.toolTimeoutMs, 300_000);
   assert.equal(parsed.implicitToolContinuation, true);
-  assert.equal(parsed.stateDir, "/tmp/project/.codex-openai-proxy");
+  // The default state directory lives under the user's home, outside the root,
+  // so a writable-sandbox request can never reach the continuation store.
+  assert.ok(
+    parsed.stateDir.startsWith(join(homedir(), ".codex-openai-proxy") + sep),
+  );
+  assert.equal(parsed.stateDir.startsWith(`/tmp/project${sep}`), false);
+  // An explicit relative --state-dir is still resolved against the root.
+  assert.equal(
+    parseServeOptions(["--state-dir", "state"], "/tmp/project").stateDir,
+    "/tmp/project/state",
+  );
   assert.throws(
     () => parseServeOptions(["--port", "80", "--port", "81"]),
     /Duplicate/,

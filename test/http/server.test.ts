@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import net from "node:net";
 import { once } from "node:events";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "vitest";
 import { parseServeOptions, type ServeOptions } from "../../src/core/config.js";
 import { createLogger } from "../../src/core/logger.js";
@@ -12,7 +14,15 @@ const silentLogger = createLogger("error", () => {});
 
 /** Builds safe ephemeral listener options for a server test. */
 function options(overrides: Partial<ServeOptions> = {}): ServeOptions {
-  return { ...parseServeOptions(["--port", "0"]), ...overrides };
+  return {
+    ...parseServeOptions([
+      "--port",
+      "0",
+      "--state-dir",
+      join(tmpdir(), `codex-proxy-server-test-${process.pid}`),
+    ]),
+    ...overrides,
+  };
 }
 
 /** Runs a test callback against an ephemeral proxy and always closes it. */

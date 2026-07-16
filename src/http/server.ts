@@ -8,7 +8,7 @@ import {
 import type { Socket } from "node:net";
 import { HttpError, writeError, writeJson } from "./errors.js";
 import type { ServeOptions } from "../core/config.js";
-import type { Logger } from "../core/logger.js";
+import { logFailure, type Logger } from "../core/logger.js";
 import type { JsonRpcTransport } from "../app-server/json-rpc.js";
 import {
   UNRESTRICTED_POLICY_REQUIREMENTS,
@@ -26,10 +26,14 @@ export interface ProxyServer {
   listen(): Promise<{ address: string; port: number }>;
   close(): Promise<void>;
   setReady(ready: boolean): void;
+  // Requirements are mandatory whenever a live transport is installed so managed
+  // enforcement can never be silently disabled by an omitted argument; clearing
+  // the transport takes no requirements.
   setTransport(
-    transport: JsonRpcTransport | undefined,
-    requirements?: PolicyRequirements,
+    transport: JsonRpcTransport,
+    requirements: PolicyRequirements,
   ): void;
+  setTransport(transport: undefined): void;
 }
 
 /** Creates a loopback proxy with bounded concurrency and request lifetimes. */
@@ -122,13 +126,8 @@ export function createProxyServer(
                 "server_error",
                 "internal_error",
               );
-      if (!(cause instanceof HttpError)) {
-        log("error", "request_failed", { request_id: requestId });
-        log("debug", "request_failed_detail", {
-          request_id: requestId,
-          error: cause instanceof Error ? cause.message : String(cause),
-        });
-      }
+      if (!(cause instanceof HttpError))
+        logFailure(log, "request_failed", { request_id: requestId }, cause, options.root);
       writeError(response, error);
     });
   });
@@ -145,13 +144,18 @@ export function createProxyServer(
     setReady(value) {
       ready = value;
     },
-    setTransport(value, nextRequirements = UNRESTRICTED_POLICY_REQUIREMENTS) {
+    setTransport(
+      value: JsonRpcTransport | undefined,
+      nextRequirements?: PolicyRequirements,
+    ) {
+      // Update requirements before the same-transport short-circuit so a refresh
+      // of managed policy against an unchanged transport still takes effect.
+      requirements = nextRequirements ?? UNRESTRICTED_POLICY_REQUIREMENTS;
       if (transport === value) return;
       continuations?.dispose();
       if (transport && transport !== value)
         transport.close(new Error("app-server transport replaced"));
       transport = value;
-      requirements = nextRequirements;
       continuations = value
         ? new ContinuationCoordinator(
             continuationStore,

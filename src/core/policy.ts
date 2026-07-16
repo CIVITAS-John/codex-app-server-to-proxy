@@ -1,7 +1,7 @@
 import { constants } from "node:fs";
 import { access, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, sep } from "node:path";
-import { createHash } from "node:crypto";
+import { bindingHash, record } from "./canonical.js";
 
 /** Sandbox modes exposed by the x_codex request extension. */
 export type SandboxMode =
@@ -227,7 +227,13 @@ export async function resolveEffectivePolicy(
   root: string,
   requirements: PolicyRequirements,
 ): Promise<EffectivePolicy> {
-  const cwd = await canonicalizeRequestCwd(request.cwd ?? root, root);
+  // `root` is already canonical (the CLI resolves it once via canonicalizeRoot),
+  // so a request that names no cwd needs no per-request filesystem walk. Only a
+  // client-supplied cwd is canonicalized and bounded here.
+  const cwd =
+    request.cwd === undefined
+      ? root
+      : await canonicalizeRequestCwd(request.cwd, root);
   const sandbox = request.sandbox ?? "read-only";
   const webSearch = request.webSearch ?? "disabled";
   requireAllowed(
@@ -268,7 +274,11 @@ export function selectApprovalsReviewer(
   );
 }
 
-/** Chooses the strictest proxy-supported non-interactive approval policy. */
+/**
+ * Chooses the strictest usable non-interactive approval policy, preferring the
+ * least-interactive option app-server allows (`never`, then `on-request`, then
+ * `untrusted`) so the proxy never depends on an interactive approver.
+ */
 export function selectApprovalPolicy(
   requirements: PolicyRequirements,
 ): ApprovalPolicy {
@@ -315,9 +325,7 @@ export function policyBindingInput(
 
 /** Computes a stable continuation hash for canonical effective settings. */
 export function policyBindingHash(policy: EffectivePolicy): string {
-  return createHash("sha256")
-    .update(canonicalJson(policyBindingInput(policy)))
-    .digest("hex");
+  return bindingHash(policyBindingInput(policy));
 }
 
 /** Resolves a requested cwd and enforces canonical root containment. */
@@ -411,23 +419,3 @@ function isGranularApproval(value: unknown): boolean {
   );
 }
 
-/** Canonicalizes JSON-compatible values with sorted object keys. */
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>).sort(
-      ([left], [right]) => left.localeCompare(right),
-    );
-    return `{${entries
-      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value) ?? "null";
-}
-
-/** Narrows a JSON-like value to a non-array object. */
-function record(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}

@@ -10,6 +10,7 @@ import { parseServeOptions } from "../../src/core/config.js";
 import { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
 import { createLogger } from "../../src/core/logger.js";
 import { createProxyServer, type ProxyServer } from "../../src/http/server.js";
+import { UNRESTRICTED_POLICY_REQUIREMENTS } from "../../src/core/policy.js";
 import type { ChatContractBackend } from "./chat-contract.js";
 import { protocolNotification, protocolTurn } from "./protocol-fixtures.js";
 
@@ -314,7 +315,7 @@ async function startProxy(
       ]),
       silentLogger,
     );
-    proxy.setTransport(rpc);
+    proxy.setTransport(rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
     proxy.setReady(true);
     const address = await proxy.listen();
     const host = address.address.includes(":")

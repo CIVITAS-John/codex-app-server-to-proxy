@@ -43,3 +43,9 @@ Fresh threads and resumed threads receive canonical cwd, sandbox, approval, and 
 The pinned generated protocol added the `indexed` web-search mode beyond the earlier checked-in `x_codex` schema. Stage 06 exposes it as a compatibility addition because the same per-thread `config.web_search` mapping applies to every generated mode. Deterministic tests prove exact forwarding and no shared-configuration mutation. No live policy smoke test or model call was run, so actual provider-side search behavior remains an explicit opt-in verification item rather than an offline claim.
 
 Starting `thread/start` with a writable sandbox can mark the selected cwd as trusted in the user's `config.toml`. The README now calls out that side effect prominently; canonical root containment bounds which projects the proxy can cause app-server to trust.
+
+## Post-review hardening
+
+A high-effort review of the offline gate produced follow-up fixes: the continuation store default now lives outside the root (under `~/.codex-openai-proxy`, namespaced per root) so a `workspace-write` turn cannot rewrite `continuations.json`; an approval allowlist with no usable policy or reviewer fails at startup instead of as a per-request 400; requests without `x_codex.cwd` no longer re-canonicalize the root per call; managed requirements are mandatory when installing a live transport; failure logs keep a redacted summary at `info` with full detail at `debug`; and diagnostic redaction masks the root before home so a home-nested root cannot leak. The implicit tool-continuation path is documented as requiring the original `x_codex`.
+
+The continuation store remains schema version 0 because there are no released clients or persisted compatibility guarantees. Only the current `{ version: 0, records }` shape is accepted; migration code was removed, and any other version is left untouched and treated as untrusted.

@@ -13,6 +13,7 @@ import {
   protocolNotification,
   protocolTurn,
 } from "../support/protocol-fixtures.js";
+import { UNRESTRICTED_POLICY_REQUIREMENTS } from "../../src/core/policy.js";
 
 /** Suppresses expected diagnostics in dynamic-tool HTTP tests. */
 const silentLogger = createLogger("error", () => {});
@@ -202,7 +203,7 @@ async function startProxy(
     ]),
     silentLogger,
   );
-  proxy.setTransport(fake.transport);
+  proxy.setTransport(fake.transport, UNRESTRICTED_POLICY_REQUIREMENTS);
   proxy.setReady(true);
   const address = await proxy.listen();
   const host = address.address.includes(":")
@@ -603,6 +604,56 @@ test("a suspension timeout expires the HTTP continuation without sending tool re
     assert.equal(expired.status, 410);
     assert.equal(await errorCode(expired), "expired_tool_continuation");
     assert.deepEqual(fake.results, []);
+  } finally {
+    await proxy.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("implicit tool continuation must repeat the original x_codex policy", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codex-dynamic-tools-"));
+  const fake = new ToolAppServer();
+  const { origin, proxy } = await startProxy(directory, fake);
+  const tools = [
+    { type: "function", function: { name: "first", parameters: {} } },
+    { type: "function", function: { name: "second", parameters: {} } },
+  ];
+  try {
+    const first = (await (
+      await post(origin, {
+        model: "m",
+        tools,
+        x_codex: { sandbox: "workspace-write" },
+        messages: [{ role: "user", content: "use tools" }],
+      })
+    ).json()) as CompletionBody;
+    const calls = first.choices[0]!.message.tool_calls;
+
+    // Implicit continuation (no previous_response_id) that drops x_codex resolves
+    // to the default read-only policy, so its binding no longer matches the
+    // suspension and the tool results are rejected without being delivered.
+    const dropped = await post(origin, {
+      model: "m",
+      tools,
+      messages: toolTranscript(calls),
+    });
+    assert.equal(dropped.status, 409);
+    assert.equal(await errorCode(dropped), "continuation_policy_mismatch");
+    assert.equal(fake.results.length, 0);
+
+    // Repeating the original x_codex on the implicit continuation matches the
+    // suspension and delivers the results.
+    const repeated = await post(origin, {
+      model: "m",
+      tools,
+      x_codex: { sandbox: "workspace-write" },
+      messages: toolTranscript(calls),
+    });
+    assert.equal(repeated.status, 200);
+    assert.deepEqual(
+      fake.results.map((result) => result.id),
+      [902, 901],
+    );
   } finally {
     await proxy.close();
     await rm(directory, { recursive: true, force: true });

@@ -1,4 +1,6 @@
-import { isAbsolute, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 
 /** Default maximum accepted HTTP request-body size. */
 export const DEFAULT_BODY_LIMIT = 1024 * 1024;
@@ -68,6 +70,12 @@ function boolean(name: string, value: string): boolean {
   throw new Error(`${name} must be true or false.`);
 }
 
+/** Per-root state directory under the user's home, kept outside the root. */
+function defaultStateDir(root: string): string {
+  const namespace = createHash("sha256").update(root).digest("hex").slice(0, 16);
+  return join(homedir(), ".codex-openai-proxy", namespace);
+}
+
 /** Parses and validates all options for the serve command. */
 export function parseServeOptions(
   args: readonly string[],
@@ -105,10 +113,18 @@ export function parseServeOptions(
     if (!known.has(name)) throw new Error(`Unknown option: ${name}.`);
 
   const root = resolve(cwd, values.get("--root") ?? ".");
-  const stateValue = values.get("--state-dir") ?? ".codex-openai-proxy";
-  const stateDir = isAbsolute(stateValue)
-    ? stateValue
-    : resolve(root, stateValue);
+  const stateValue = values.get("--state-dir");
+  // The default state directory lives outside the root so a writable-sandbox
+  // request (whose writable set is the root) can never reach the proxy's own
+  // continuation store. It is namespaced by root so distinct projects stay
+  // isolated. An explicit --state-dir is honored verbatim; placing one inside
+  // the root re-opens that exposure under `workspace-write`.
+  const stateDir =
+    stateValue === undefined
+      ? defaultStateDir(root)
+      : isAbsolute(stateValue)
+        ? stateValue
+        : resolve(root, stateValue);
   const logLevel = values.get("--log-level") ?? "info";
   if (!["debug", "info", "warn", "error"].includes(logLevel)) {
     throw new Error("--log-level must be debug, info, warn, or error.");
