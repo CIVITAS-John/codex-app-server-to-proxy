@@ -337,14 +337,15 @@ function createScriptedTransport(root: string): ScriptedTransport {
       }
       if (prompt.includes("built-in shell command")) {
         const itemId = "contract-pwd";
+        const command = "/bin/sh -lc 'pwd'";
         const baseItem = {
           type: "commandExecution" as const,
           id: itemId,
-          command: "pwd",
+          command,
           cwd: root,
           processId: null,
           source: "agent" as const,
-          commandActions: [{ type: "unknown" as const, command: "pwd" }],
+          commandActions: [{ type: "unknown" as const, command }],
           exitCode: null,
           durationMs: null,
         };

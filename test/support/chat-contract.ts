@@ -13,6 +13,33 @@ const MAX_OFFLINE_MODEL_CALLS = 10;
 /** Maximum model turns allowed for the complete tool round trip. */
 const MAX_TOOL_MODEL_CALLS = 2;
 
+/** POSIX shell launchers recognized in app-server command display strings. */
+const POSIX_SHELL_LAUNCHERS = new Set([
+  "sh",
+  "/bin/sh",
+  "/usr/bin/sh",
+  "bash",
+  "/bin/bash",
+  "/usr/bin/bash",
+  "dash",
+  "/bin/dash",
+  "/usr/bin/dash",
+  "ksh",
+  "/bin/ksh",
+  "/usr/bin/ksh",
+  "zsh",
+  "/bin/zsh",
+  "/usr/bin/zsh",
+]);
+
+/** Accepts only direct `pwd` or a bounded POSIX shell `-lc` display wrapper. */
+export function isBoundedPwdCommand(command: string): boolean {
+  if (command === "pwd") return true;
+
+  const match = /^(\S+) -lc (pwd|'pwd'|"pwd")$/.exec(command);
+  return match !== null && POSIX_SHELL_LAUNCHERS.has(match[1]!);
+}
+
 /** A ready proxy backed by either a scripted or real app-server. */
 export interface ChatContractBackend {
   origin: string;
@@ -343,7 +370,8 @@ export function registerChatContract(
           "built-in tool arguments",
         );
         assert.ok(
-          builtInArguments.command === "pwd",
+          builtInArguments.command !== undefined &&
+            isBoundedPwdCommand(builtInArguments.command),
           "built-in command did not match the bounded contract fixture",
         );
         assert.ok(results.length > 0, "built-in result was not observed");
