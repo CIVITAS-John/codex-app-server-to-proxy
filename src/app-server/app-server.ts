@@ -302,10 +302,10 @@ async function stopChild(
 ): Promise<void> {
   rpc.close(new Error("proxy shutting down"));
   if (child.exitCode !== null || child.signalCode !== null) return;
-  // Signal before closing stdin so a child cannot observe EOF and exit before
-  // its graceful-shutdown handler runs, which is especially racy on Linux.
+  // Keep stdin open while signaling: on Linux, closing the pipe can make the
+  // child exit on EOF before its JavaScript SIGTERM handler is dispatched.
+  // Node closes the child's stdio automatically once the process exits.
   child.kill("SIGTERM");
-  child.stdin.end();
   await withDeadline(
     undefined,
     {
