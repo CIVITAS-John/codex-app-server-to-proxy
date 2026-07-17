@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vitest";
 import { ResponseStore } from "../../src/continuation/state.js";
@@ -11,6 +10,7 @@ import {
   protocolClientNotification,
   protocolClientRequest,
 } from "../support/protocol-fixtures.js";
+import { withTempDir } from "../support/temp.js";
 
 /** Repository root used to resolve generated protocol artifacts. */
 const root = repoRootUrl;
@@ -22,17 +22,14 @@ const readJson = async (path: string): Promise<unknown> =>
 async function loadContinuationFixture(
   record: Record<string, unknown>,
 ): Promise<ReturnType<ResponseStore["get"]>> {
-  const directory = await mkdtemp(join(tmpdir(), "codex-schema-contract-"));
-  try {
+  return withTempDir(async (directory) => {
     await writeFile(
       join(directory, "continuations.json"),
       JSON.stringify({ version: 0, records: [record] }),
       { mode: 0o600 },
     );
     return new ResponseStore(directory).get(String(record.responseId));
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  }, "codex-schema-contract-");
 }
 
 test("shared client fixture builders enforce generated wire types", () => {

@@ -4,13 +4,10 @@ import {
   access,
   chmod,
   mkdir,
-  mkdtemp,
   realpath,
-  rm,
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 import { test } from "vitest";
 import {
@@ -30,6 +27,7 @@ import {
   type SandboxMode,
   type WebSearchMode,
 } from "../../src/core/policy.js";
+import { withTempDir } from "../support/temp.js";
 
 /** Every sandbox exposed by the public x_codex extension. */
 const sandboxes: SandboxMode[] = [
@@ -97,8 +95,7 @@ test("x_codex validation accepts only cwd, all sandboxes, and all web modes", ()
 });
 
 test("the complete 3 by 4 policy matrix is mapped without fallback", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "proxy-policy-matrix-"));
-  try {
+  await withTempDir(async (directory) => {
     const root = await canonicalizeRoot(directory);
     for (const sandbox of sandboxes) {
       for (const webSearch of webSearchModes) {
@@ -152,14 +149,11 @@ test("the complete 3 by 4 policy matrix is mapped without fallback", async () =>
         );
       }
     }
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  }, "proxy-policy-matrix-");
 });
 
 test("safe defaults are explicit and command network stays disabled", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "proxy-policy-defaults-"));
-  try {
+  await withTempDir(async (directory) => {
     const root = await canonicalizeRoot(directory);
     const effective = await resolveEffectivePolicy(
       {},
@@ -184,16 +178,13 @@ test("safe defaults are explicit and command network stays disabled", async () =
     assert.deepEqual(sandboxPolicy("danger-full-access", root), {
       type: "dangerFullAccess",
     });
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  }, "proxy-policy-defaults-");
 });
 
 test("a request without cwd returns the root verbatim without re-canonicalizing", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "proxy-policy-rootpass-"));
-  const real = join(directory, "real");
-  const link = join(directory, "link");
-  try {
+  await withTempDir(async (directory) => {
+    const real = join(directory, "real");
+    const link = join(directory, "link");
     await mkdir(real);
     await symlink(real, link, "dir");
     // `link` is a non-canonical root whose realpath is the sibling `real`. The
@@ -202,14 +193,11 @@ test("a request without cwd returns the root verbatim without re-canonicalizing"
     // given, doing no per-request filesystem work.
     const effective = await resolveEffectivePolicy({}, link, requirements());
     assert.equal(effective.cwd, link);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  }, "proxy-policy-rootpass-");
 });
 
 test("managed sandbox and web-search denials fail rather than approximate", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "proxy-policy-managed-"));
-  try {
+  await withTempDir(async (directory) => {
     const root = await canonicalizeRoot(directory);
     const managed = requirements({
       allowedSandboxModes: ["read-only"],
@@ -228,9 +216,7 @@ test("managed sandbox and web-search denials fail rather than approximate", asyn
         .webSearch,
       "indexed",
     );
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  }, "proxy-policy-managed-");
 });
 
 test("approval selection prefers strict usable policies and auto review", async () => {
@@ -270,8 +256,7 @@ test("approval selection prefers strict usable policies and auto review", async 
     /no supported approval reviewer/,
   );
 
-  const directory = await mkdtemp(join(tmpdir(), "proxy-policy-reviewer-"));
-  try {
+  await withTempDir(async (directory) => {
     const root = await canonicalizeRoot(directory);
     const userReviewed = await resolveEffectivePolicy(
       {},
@@ -279,20 +264,17 @@ test("approval selection prefers strict usable policies and auto review", async 
       requirements({ allowedApprovalsReviewers: ["user"] }),
     );
     assert.equal(userReviewed.approvalsReviewer, "user");
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  }, "proxy-policy-reviewer-");
 });
 
 test("root and cwd canonicalization enforce the real root boundary", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "proxy-policy-paths-"));
-  const rootPath = join(directory, "root");
-  const childPath = join(rootPath, "child");
-  const siblingPath = join(directory, "sibling");
-  const prefixPath = join(directory, "root-lookalike");
-  const filePath = join(rootPath, "file.txt");
-  const escapeLink = join(rootPath, "escape");
-  try {
+  await withTempDir(async (directory) => {
+    const rootPath = join(directory, "root");
+    const childPath = join(rootPath, "child");
+    const siblingPath = join(directory, "sibling");
+    const prefixPath = join(directory, "root-lookalike");
+    const filePath = join(rootPath, "file.txt");
+    const escapeLink = join(rootPath, "escape");
     await Promise.all([
       mkdir(childPath, { recursive: true }),
       mkdir(siblingPath),
@@ -323,24 +305,19 @@ test("root and cwd canonicalization enforce the real root boundary", async () =>
       );
     await assert.rejects(canonicalizeRoot("relative/root"), /absolute/);
     await assert.rejects(canonicalizeRoot(filePath), /readable directory/);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  }, "proxy-policy-paths-");
 });
 
 test.skipIf(process.platform === "win32")(
   "platform-specific Windows paths are not mistaken for POSIX absolute paths",
   async () => {
-    const directory = await mkdtemp(join(tmpdir(), "proxy-policy-platform-"));
-    try {
+    await withTempDir(async (directory) => {
       const root = await canonicalizeRoot(directory);
       await rejectsPolicy(
         resolveEffectivePolicy({ cwd: "C:\\workspace" }, root, requirements()),
         "invalid_cwd",
       );
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
+    }, "proxy-policy-platform-");
   },
 );
 
@@ -378,21 +355,22 @@ test("Windows path semantics contain same-drive and UNC descendants", () => {
 test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
   "an unreadable cwd is rejected when the platform enforces its mode bits",
   async () => {
-    const directory = await mkdtemp(join(tmpdir(), "proxy-policy-permission-"));
-    const denied = join(directory, "denied");
-    try {
-      await mkdir(denied);
-      await chmod(denied, 0o000);
-      await assert.rejects(access(denied, constants.R_OK | constants.X_OK));
-      const root = await canonicalizeRoot(directory);
-      await rejectsPolicy(
-        resolveEffectivePolicy({ cwd: denied }, root, requirements()),
-        "invalid_cwd",
-      );
-    } finally {
-      await chmod(denied, 0o700).catch(() => undefined);
-      await rm(directory, { recursive: true, force: true });
-    }
+    await withTempDir(async (directory) => {
+      const denied = join(directory, "denied");
+      try {
+        await mkdir(denied);
+        await chmod(denied, 0o000);
+        await assert.rejects(access(denied, constants.R_OK | constants.X_OK));
+        const root = await canonicalizeRoot(directory);
+        await rejectsPolicy(
+          resolveEffectivePolicy({ cwd: denied }, root, requirements()),
+          "invalid_cwd",
+        );
+      } finally {
+        // Restore access so the shared temporary-directory cleanup can recurse.
+        await chmod(denied, 0o700).catch(() => undefined);
+      }
+    }, "proxy-policy-permission-");
   },
 );
 
@@ -466,8 +444,7 @@ test("requirements parsing treats null as unrestricted and rejects malformed dat
 });
 
 test("binding material is stable and includes every effective policy choice", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "proxy-policy-binding-"));
-  try {
+  await withTempDir(async (directory) => {
     const root = await canonicalizeRoot(directory);
     const baseline = await resolveEffectivePolicy({}, root, requirements());
     assert.deepEqual(policyBindingInput(baseline), {
@@ -487,7 +464,5 @@ test("binding material is stable and includes every effective policy choice", as
     ];
     for (const variant of variants)
       assert.notEqual(policyBindingHash(variant), policyBindingHash(baseline));
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  }, "proxy-policy-binding-");
 });

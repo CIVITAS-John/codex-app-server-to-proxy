@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { realpathSync } from "node:fs";
-import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { mkdir, symlink } from "node:fs/promises";
 import { homedir } from "node:os";
-import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { test } from "vitest";
 import {
@@ -10,6 +9,7 @@ import {
   parseServeOptions,
   resolveServeOptions,
 } from "../../src/core/config.js";
+import { withTempDir } from "../support/temp.js";
 
 test("loopback validation accepts only exact safe forms", () => {
   assert.equal(normalizeLoopbackHost("127.0.0.1"), "127.0.0.1");
@@ -34,13 +34,12 @@ test("loopback validation accepts only exact safe forms", () => {
 
 test("serve options have safe documented defaults and reject ambiguity", async () => {
   const canonicalHome = realpathSync(homedir());
-  const directory = await mkdtemp(join(tmpdir(), "codex-config-test-"));
-  const project = join(directory, "project");
-  const projectLink = join(directory, "project-link");
-  await mkdir(project);
-  await symlink(project, projectLink, "dir");
-  const canonicalProject = realpathSync(project);
-  try {
+  await withTempDir(async (directory) => {
+    const project = join(directory, "project");
+    const projectLink = join(directory, "project-link");
+    await mkdir(project);
+    await symlink(project, projectLink, "dir");
+    const canonicalProject = realpathSync(project);
     const parsed = parseServeOptions([], project);
     assert.equal(parsed.host, "127.0.0.1");
     assert.equal(parsed.port, 8787);
@@ -96,7 +95,5 @@ test("serve options have safe documented defaults and reject ambiguity", async (
       () => parseServeOptions(["--implicit-tool-continuation", "yes"]),
       /true or false/,
     );
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  }, "codex-config-test-");
 });

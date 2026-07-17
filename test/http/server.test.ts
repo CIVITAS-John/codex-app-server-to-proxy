@@ -12,9 +12,7 @@ import {
 } from "../../src/core/config.js";
 import { createLogger } from "../../src/core/logger.js";
 import { createProxyServer, type ProxyServer } from "../../src/http/server.js";
-
-/** Suppresses expected request logs during server tests. */
-const silentLogger = createLogger("error", () => {});
+import { silentLogger } from "../support/logger.js";
 
 /** Builds safe ephemeral listener options for a server test. */
 async function options(

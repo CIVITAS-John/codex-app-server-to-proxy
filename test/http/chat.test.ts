@@ -1,20 +1,13 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 import { once } from "node:events";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
-import { PassThrough } from "node:stream";
-import { createInterface } from "node:readline";
+import { mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
 import { EventNormalizer, normalizeNotification } from "../../src/http/chat.js";
-import { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
 import { createLogger } from "../../src/core/logger.js";
-import {
-  parseServeOptions,
-  resolveServeOptions,
-} from "../../src/core/config.js";
-import { createProxyServer } from "../../src/http/server.js";
+import type { ProxyServer } from "../../src/http/server.js";
 import {
   protocolNotification,
   protocolResponse,
@@ -24,102 +17,363 @@ import {
   protocolThreadStartResponse,
   protocolTurn,
 } from "../support/protocol-fixtures.js";
-import { UNRESTRICTED_POLICY_REQUIREMENTS } from "../../src/core/policy.js";
+import {
+  UNRESTRICTED_POLICY_REQUIREMENTS,
+  type PolicyRequirements,
+} from "../../src/core/policy.js";
+import { startProxyWithTransport } from "../support/http.js";
+import { silentLogger } from "../support/logger.js";
+import { withTempDir } from "../support/temp.js";
+import {
+  completeTurn,
+  createFakeTransport,
+  type FakeTransport,
+} from "../support/transport.js";
 
-/** Suppresses expected HTTP diagnostics in Chat Completions tests. */
-const silentLogger = createLogger("error", () => {});
+/** Minimal fake transport view accepted when replacing an HTTP test transport. */
+type ChatTestTransport = Pick<FakeTransport, "rpc">;
 
 /** Creates an offline fake app-server transport with deliberately split frames. */
 function fakeAppServer(
   complete = true,
   onInterrupt: () => void = () => {},
   requestTool = false,
-): JsonRpcTransport {
-  const fromServer = new PassThrough();
-  const toServer = new PassThrough();
-  const rpc = new JsonRpcTransport(fromServer, toServer);
+): FakeTransport {
   let thread = "";
-  const send = (value: unknown): void => {
-    const frame = `${JSON.stringify(value)}\n`;
-    const middle = Math.max(1, Math.floor(frame.length / 2));
-    fromServer.write(frame.slice(0, middle));
-    fromServer.write(frame.slice(middle));
-  };
-  createInterface({ input: toServer }).on("line", (line) => {
-    const message = JSON.parse(line) as {
-      id: number;
-      method: string;
-      params: Record<string, unknown>;
-    };
-    if (message.method === "thread/start") {
-      thread = "thr_test";
-      send(
-        protocolResponse(
-          "thread/start",
-          message.id,
-          protocolThreadStartResponse(protocolThread(thread)),
-        ),
-      );
-    } else if (message.method === "thread/inject_items") {
-      send(protocolResponse("thread/inject_items", message.id, {}));
-    } else if (message.method === "turn/start") {
-      send(
-        protocolResponse("turn/start", message.id, {
-          turn: protocolTurn("turn_test", "inProgress"),
-        }),
-      );
-      if (requestTool) {
+  return createFakeTransport({
+    fragmentCount: 2,
+    onMessage(rawMessage, send) {
+      const message = rawMessage as {
+        id: number;
+        method: string;
+        params: Record<string, unknown>;
+      };
+      if (message.method === "thread/start") {
+        thread = "thr_test";
         send(
-          protocolServerRequest({
-            id: 8_001,
-            method: "item/tool/call",
+          protocolResponse(
+            "thread/start",
+            message.id,
+            protocolThreadStartResponse(protocolThread(thread)),
+          ),
+        );
+      } else if (message.method === "thread/inject_items") {
+        send(protocolResponse("thread/inject_items", message.id, {}));
+      } else if (message.method === "turn/start") {
+        send(
+          protocolResponse("turn/start", message.id, {
+            turn: protocolTurn("turn_test", "inProgress"),
+          }),
+        );
+        if (requestTool) {
+          send(
+            protocolServerRequest({
+              id: 8_001,
+              method: "item/tool/call",
+              params: {
+                threadId: thread,
+                turnId: "turn_test",
+                callId: "call_lookup",
+                tool: "lookup",
+                namespace: null,
+                arguments: { key: "value" },
+              },
+            }),
+          );
+          return;
+        }
+        send(
+          protocolNotification({
+            method: "item/agentMessage/delta",
             params: {
               threadId: thread,
               turnId: "turn_test",
-              callId: "call_lookup",
-              tool: "lookup",
-              namespace: null,
-              arguments: { key: "value" },
+              itemId: "text",
+              delta: "Hello",
             },
           }),
         );
-        return;
+        if (complete) {
+          completeTurn(send, thread, "turn_test");
+        }
+      } else if (message.method === "turn/interrupt") {
+        onInterrupt();
+        send(protocolResponse("turn/interrupt", message.id, {}));
       }
-      send(
-        protocolNotification({
-          method: "item/agentMessage/delta",
-          params: {
-            threadId: thread,
-            turnId: "turn_test",
-            itemId: "text",
-            delta: "Hello",
-          },
-        }),
-      );
-      if (complete) {
+    },
+  });
+}
+
+/** Captures exact policy-bearing RPC params for one completed fake turn. */
+function policyCapturingAppServer(): {
+  rpc: FakeTransport["rpc"];
+  messages: Array<Record<string, unknown>>;
+} {
+  const messages: Array<Record<string, unknown>> = [];
+  const fake = createFakeTransport({
+    onMessage(message, send) {
+      if (typeof message.method !== "string") return;
+      messages.push(message);
+      const id = message.id as number;
+      if (message.method === "thread/start")
+        send(
+          protocolResponse(
+            "thread/start",
+            id,
+            protocolThreadStartResponse(protocolThread("thr_policy")),
+          ),
+        );
+      else if (message.method === "thread/read")
+        send(
+          protocolResponse("thread/read", id, {
+            thread: protocolThread("thr_policy"),
+          }),
+        );
+      else if (message.method === "thread/resume")
+        send(
+          protocolResponse(
+            "thread/resume",
+            id,
+            protocolThreadResumeResponse(protocolThread("thr_policy")),
+          ),
+        );
+      else if (message.method === "turn/start") {
+        send(
+          protocolResponse("turn/start", id, {
+            turn: protocolTurn("turn_policy", "inProgress"),
+          }),
+        );
         send(
           protocolNotification({
-            method: "thread/tokenUsage/updated",
+            method: "turn/completed",
             params: {
-              threadId: thread,
-              turnId: "turn_test",
-              tokenUsage: {
-                total: {
-                  inputTokens: 4,
-                  cachedInputTokens: 0,
-                  outputTokens: 2,
-                  reasoningOutputTokens: 0,
-                  totalTokens: 6,
-                },
-                last: {
-                  inputTokens: 4,
-                  cachedInputTokens: 0,
-                  outputTokens: 2,
-                  reasoningOutputTokens: 0,
-                  totalTokens: 6,
-                },
-                modelContextWindow: null,
+              threadId: "thr_policy",
+              turn: protocolTurn("turn_policy", "completed"),
+            },
+          }),
+        );
+      }
+    },
+  });
+  return { rpc: fake.rpc, messages };
+}
+
+/** Creates a fake turn with queued tool requests followed by an ingress failure. */
+function failingIngressAppServer(mode: "overflow" | "mismatch" | "suspend"): {
+  rpc: FakeTransport["rpc"];
+  responderErrors: number[];
+  interruptCount(): number;
+} {
+  const responderErrors: number[] = [];
+  let interrupts = 0;
+  const fake = createFakeTransport({
+    onMessage(rawMessage, send) {
+      const message = rawMessage as {
+        id: number;
+        method?: string;
+        error?: unknown;
+      };
+      if (message.method === "thread/start")
+        send(
+          protocolResponse(
+            "thread/start",
+            message.id,
+            protocolThreadStartResponse(protocolThread("thr_overflow")),
+          ),
+        );
+      else if (message.method === "turn/start") {
+        send(
+          protocolResponse("turn/start", message.id, {
+            turn: protocolTurn("turn_overflow", "inProgress"),
+          }),
+        );
+        for (const id of [7001, 7002])
+          send(
+            protocolServerRequest({
+              id,
+              method: "item/tool/call",
+              params: {
+                threadId: "thr_overflow",
+                turnId:
+                  mode === "mismatch" && id === 7002
+                    ? "foreign_turn"
+                    : "turn_overflow",
+                callId: `call_${id}`,
+                tool: "lookup",
+                namespace: null,
+                arguments: { id },
               },
+            }),
+          );
+        if (mode === "overflow")
+          for (let index = 0; index < 1_024; index += 1)
+            send(
+              protocolNotification({
+                method: "item/agentMessage/delta",
+                params: {
+                  threadId: "thr_overflow",
+                  turnId: "turn_overflow",
+                  itemId: "flood",
+                  delta: ".",
+                },
+              }),
+            );
+      } else if (message.method === "turn/interrupt") {
+        interrupts += 1;
+        send(protocolResponse("turn/interrupt", message.id, {}));
+      } else if (message.error !== undefined) responderErrors.push(message.id);
+    },
+  });
+  return {
+    rpc: fake.rpc,
+    responderErrors,
+    interruptCount: () => interrupts,
+  };
+}
+
+/** Creates a turn that fails only after turn/start has committed successfully. */
+function lateFailureAppServer(mode: "transport" | "event"): FakeTransport {
+  const fake = createFakeTransport({
+    onMessage(rawMessage, send) {
+      const message = rawMessage as {
+        id: number;
+        method: string;
+        params: Record<string, unknown>;
+      };
+      if (message.method === "thread/start")
+        send(
+          protocolResponse(
+            "thread/start",
+            message.id,
+            protocolThreadStartResponse(protocolThread("thr_failure")),
+          ),
+        );
+      else if (message.method === "turn/start") {
+        send(
+          protocolResponse("turn/start", message.id, {
+            turn: protocolTurn("turn_failure", "inProgress"),
+          }),
+        );
+        send(
+          protocolNotification({
+            method: "item/agentMessage/delta",
+            params: {
+              threadId: "thr_failure",
+              turnId: "turn_failure",
+              itemId: "partial",
+              delta: "partial",
+            },
+          }),
+        );
+        if (mode === "transport")
+          setImmediate(() => fake.rpc.close(new Error("transport lost")));
+        else
+          send(
+            protocolNotification({
+              method: "error",
+              params: {
+                threadId: "thr_failure",
+                turnId: "turn_failure",
+                willRetry: false,
+                error: {
+                  message: "turn failed",
+                  codexErrorInfo: null,
+                  additionalDetails: null,
+                },
+              },
+            }),
+          );
+      } else if (message.method === "turn/interrupt")
+        send(protocolResponse("turn/interrupt", message.id, {}));
+    },
+  });
+  return fake;
+}
+
+/** Creates a silent first turn and a successful second turn on one thread. */
+function recoverableAppServer(): {
+  rpc: FakeTransport["rpc"];
+  wasInterrupted(): boolean;
+} {
+  let turns = 0;
+  let interrupted = false;
+  const fake = createFakeTransport({
+    onMessage(rawMessage, send) {
+      const message = rawMessage as {
+        id: number;
+        method: string;
+        params: Record<string, unknown>;
+      };
+      if (message.method === "thread/start")
+        send(
+          protocolResponse(
+            "thread/start",
+            message.id,
+            protocolThreadStartResponse(protocolThread("thr_recover")),
+          ),
+        );
+      else if (message.method === "turn/start") {
+        const turnId = `turn_recover_${++turns}`;
+        send(
+          protocolResponse("turn/start", message.id, {
+            turn: protocolTurn(turnId, "inProgress"),
+          }),
+        );
+        if (turns === 1) return;
+        send(
+          protocolNotification({
+            method: "turn/completed",
+            params: {
+              threadId: "thr_recover",
+              turn: protocolTurn(turnId, "completed"),
+            },
+          }),
+        );
+      } else if (message.method === "turn/interrupt") {
+        interrupted = true;
+        send(protocolResponse("turn/interrupt", message.id, {}));
+      }
+    },
+  });
+  return {
+    rpc: fake.rpc,
+    wasInterrupted: () => interrupted,
+  };
+}
+
+/** Creates a completed turn containing duplicate unknown global notifications. */
+function unknownEventAppServer(secret: string): FakeTransport {
+  return createFakeTransport({
+    onMessage(rawMessage, send) {
+      const message = rawMessage as { id: number; method: string };
+      if (message.method === "thread/start")
+        send(
+          protocolResponse(
+            "thread/start",
+            message.id,
+            protocolThreadStartResponse(protocolThread("thr_unknown")),
+          ),
+        );
+      else if (message.method === "turn/start") {
+        send(
+          protocolResponse("turn/start", message.id, {
+            turn: protocolTurn("turn_unknown", "inProgress"),
+          }),
+        );
+        // Unknown future events deliberately cannot satisfy the generated union.
+        for (let index = 0; index < 2; index += 1)
+          send({
+            method: "future/diagnostic",
+            params: { detail: `${secret} https://secret.example/token=abc` },
+          });
+        send(
+          protocolNotification({
+            method: "item/agentMessage/delta",
+            params: {
+              threadId: "thr_unknown",
+              turnId: "turn_unknown",
+              itemId: "message",
+              delta: "Hello",
             },
           }),
         );
@@ -127,489 +381,175 @@ function fakeAppServer(
           protocolNotification({
             method: "turn/completed",
             params: {
-              threadId: thread,
-              turn: protocolTurn("turn_test", "completed"),
+              threadId: "thr_unknown",
+              turn: protocolTurn("turn_unknown", "completed"),
             },
           }),
         );
       }
-    } else if (message.method === "turn/interrupt") {
-      onInterrupt();
-      send(protocolResponse("turn/interrupt", message.id, {}));
-    }
+    },
   });
-  return rpc;
 }
 
-/** Captures exact policy-bearing RPC params for one completed fake turn. */
-function policyCapturingAppServer(): {
-  rpc: JsonRpcTransport;
-  messages: Array<Record<string, unknown>>;
-} {
-  const fromServer = new PassThrough();
-  const toServer = new PassThrough();
-  const rpc = new JsonRpcTransport(fromServer, toServer);
-  const messages: Array<Record<string, unknown>> = [];
-  const send = (value: unknown): void => {
-    fromServer.write(`${JSON.stringify(value)}\n`);
-  };
-  createInterface({ input: toServer }).on("line", (line) => {
-    const message = JSON.parse(line) as Record<string, unknown>;
-    if (typeof message.method !== "string") return;
-    messages.push(message);
-    const id = message.id as number;
-    if (message.method === "thread/start")
-      send(
-        protocolResponse(
-          "thread/start",
-          id,
-          protocolThreadStartResponse(protocolThread("thr_policy")),
-        ),
-      );
-    else if (message.method === "thread/read")
-      send(
-        protocolResponse("thread/read", id, {
-          thread: protocolThread("thr_policy"),
-        }),
-      );
-    else if (message.method === "thread/resume")
-      send(
-        protocolResponse(
-          "thread/resume",
-          id,
-          protocolThreadResumeResponse(protocolThread("thr_policy")),
-        ),
-      );
-    else if (message.method === "turn/start") {
-      send(
-        protocolResponse("turn/start", id, {
-          turn: protocolTurn("turn_policy", "inProgress"),
-        }),
-      );
-      send(
-        protocolNotification({
-          method: "turn/completed",
-          params: {
-            threadId: "thr_policy",
-            turn: protocolTurn("turn_policy", "completed"),
-          },
-        }),
-      );
-    }
-  });
-  return { rpc, messages };
-}
-
-/** Creates a fake turn with queued tool requests followed by an ingress failure. */
-function failingIngressAppServer(mode: "overflow" | "mismatch" | "suspend"): {
-  rpc: JsonRpcTransport;
-  responderErrors: number[];
-  interruptCount(): number;
-} {
-  const fromServer = new PassThrough();
-  const toServer = new PassThrough();
-  const rpc = new JsonRpcTransport(fromServer, toServer);
-  const responderErrors: number[] = [];
-  let interrupts = 0;
-  const send = (value: unknown): void => {
-    fromServer.write(`${JSON.stringify(value)}\n`);
-  };
-  createInterface({ input: toServer }).on("line", (line) => {
-    const message = JSON.parse(line) as {
-      id: number;
-      method?: string;
-      error?: unknown;
-    };
-    if (message.method === "thread/start")
-      send(
-        protocolResponse(
-          "thread/start",
-          message.id,
-          protocolThreadStartResponse(protocolThread("thr_overflow")),
-        ),
-      );
-    else if (message.method === "turn/start") {
-      send(
-        protocolResponse("turn/start", message.id, {
-          turn: protocolTurn("turn_overflow", "inProgress"),
-        }),
-      );
-      for (const id of [7001, 7002])
+/** Creates an ordered multi-megabyte stream that exercises HTTP drain behavior. */
+function backpressureAppServer(): FakeTransport {
+  return createFakeTransport({
+    onMessage(rawMessage, send) {
+      const message = rawMessage as { id: number; method: string };
+      if (message.method === "thread/start")
         send(
-          protocolServerRequest({
-            id,
-            method: "item/tool/call",
-            params: {
-              threadId: "thr_overflow",
-              turnId:
-                mode === "mismatch" && id === 7002
-                  ? "foreign_turn"
-                  : "turn_overflow",
-              callId: `call_${id}`,
-              tool: "lookup",
-              namespace: null,
-              arguments: { id },
-            },
+          protocolResponse(
+            "thread/start",
+            message.id,
+            protocolThreadStartResponse(protocolThread("thr_slow")),
+          ),
+        );
+      else if (message.method === "turn/start") {
+        send(
+          protocolResponse("turn/start", message.id, {
+            turn: protocolTurn("turn_slow", "inProgress"),
           }),
         );
-      if (mode === "overflow")
-        for (let index = 0; index < 1_024; index += 1)
+        for (let index = 0; index < 128; index += 1)
           send(
             protocolNotification({
               method: "item/agentMessage/delta",
               params: {
-                threadId: "thr_overflow",
-                turnId: "turn_overflow",
-                itemId: "flood",
-                delta: ".",
+                threadId: "thr_slow",
+                turnId: "turn_slow",
+                itemId: "message",
+                delta: `${String(index).padStart(3, "0")}:${"x".repeat(32 * 1024)}`,
               },
             }),
           );
-    } else if (message.method === "turn/interrupt") {
-      interrupts += 1;
-      send(protocolResponse("turn/interrupt", message.id, {}));
-    } else if (message.error !== undefined) responderErrors.push(message.id);
-  });
-  return { rpc, responderErrors, interruptCount: () => interrupts };
-}
-
-/** Creates a turn that fails only after turn/start has committed successfully. */
-function lateFailureAppServer(mode: "transport" | "event"): JsonRpcTransport {
-  const fromServer = new PassThrough();
-  const toServer = new PassThrough();
-  const rpc = new JsonRpcTransport(fromServer, toServer);
-  const send = (value: unknown): void => {
-    fromServer.write(`${JSON.stringify(value)}\n`);
-  };
-  createInterface({ input: toServer }).on("line", (line) => {
-    const message = JSON.parse(line) as {
-      id: number;
-      method: string;
-      params: Record<string, unknown>;
-    };
-    if (message.method === "thread/start")
-      send(
-        protocolResponse(
-          "thread/start",
-          message.id,
-          protocolThreadStartResponse(protocolThread("thr_failure")),
-        ),
-      );
-    else if (message.method === "turn/start") {
-      send(
-        protocolResponse("turn/start", message.id, {
-          turn: protocolTurn("turn_failure", "inProgress"),
-        }),
-      );
-      send(
-        protocolNotification({
-          method: "item/agentMessage/delta",
-          params: {
-            threadId: "thr_failure",
-            turnId: "turn_failure",
-            itemId: "partial",
-            delta: "partial",
-          },
-        }),
-      );
-      if (mode === "transport")
-        setImmediate(() => rpc.close(new Error("transport lost")));
-      else
         send(
           protocolNotification({
-            method: "error",
-            params: {
-              threadId: "thr_failure",
-              turnId: "turn_failure",
-              willRetry: false,
-              error: {
-                message: "turn failed",
-                codexErrorInfo: null,
-                additionalDetails: null,
-              },
-            },
-          }),
-        );
-    } else if (message.method === "turn/interrupt")
-      send(protocolResponse("turn/interrupt", message.id, {}));
-  });
-  return rpc;
-}
-
-/** Creates a silent first turn and a successful second turn on one thread. */
-function recoverableAppServer(): {
-  rpc: JsonRpcTransport;
-  wasInterrupted(): boolean;
-} {
-  const fromServer = new PassThrough();
-  const toServer = new PassThrough();
-  const rpc = new JsonRpcTransport(fromServer, toServer);
-  let turns = 0;
-  let interrupted = false;
-  const send = (value: unknown): void => {
-    fromServer.write(`${JSON.stringify(value)}\n`);
-  };
-  createInterface({ input: toServer }).on("line", (line) => {
-    const message = JSON.parse(line) as {
-      id: number;
-      method: string;
-      params: Record<string, unknown>;
-    };
-    if (message.method === "thread/start")
-      send(
-        protocolResponse(
-          "thread/start",
-          message.id,
-          protocolThreadStartResponse(protocolThread("thr_recover")),
-        ),
-      );
-    else if (message.method === "turn/start") {
-      const turnId = `turn_recover_${++turns}`;
-      send(
-        protocolResponse("turn/start", message.id, {
-          turn: protocolTurn(turnId, "inProgress"),
-        }),
-      );
-      if (turns === 1) return;
-      send(
-        protocolNotification({
-          method: "turn/completed",
-          params: {
-            threadId: "thr_recover",
-            turn: protocolTurn(turnId, "completed"),
-          },
-        }),
-      );
-    } else if (message.method === "turn/interrupt") {
-      interrupted = true;
-      send(protocolResponse("turn/interrupt", message.id, {}));
-    }
-  });
-  return { rpc, wasInterrupted: () => interrupted };
-}
-
-/** Creates a completed turn containing duplicate unknown global notifications. */
-function unknownEventAppServer(secret: string): JsonRpcTransport {
-  const fromServer = new PassThrough();
-  const toServer = new PassThrough();
-  const rpc = new JsonRpcTransport(fromServer, toServer);
-  const send = (value: unknown): void => {
-    fromServer.write(`${JSON.stringify(value)}\n`);
-  };
-  createInterface({ input: toServer }).on("line", (line) => {
-    const message = JSON.parse(line) as { id: number; method: string };
-    if (message.method === "thread/start")
-      send(
-        protocolResponse(
-          "thread/start",
-          message.id,
-          protocolThreadStartResponse(protocolThread("thr_unknown")),
-        ),
-      );
-    else if (message.method === "turn/start") {
-      send(
-        protocolResponse("turn/start", message.id, {
-          turn: protocolTurn("turn_unknown", "inProgress"),
-        }),
-      );
-      // Unknown future events deliberately cannot satisfy the generated union.
-      for (let index = 0; index < 2; index += 1)
-        send({
-          method: "future/diagnostic",
-          params: { detail: `${secret} https://secret.example/token=abc` },
-        });
-      send(
-        protocolNotification({
-          method: "item/agentMessage/delta",
-          params: {
-            threadId: "thr_unknown",
-            turnId: "turn_unknown",
-            itemId: "message",
-            delta: "Hello",
-          },
-        }),
-      );
-      send(
-        protocolNotification({
-          method: "turn/completed",
-          params: {
-            threadId: "thr_unknown",
-            turn: protocolTurn("turn_unknown", "completed"),
-          },
-        }),
-      );
-    }
-  });
-  return rpc;
-}
-
-/** Creates an ordered multi-megabyte stream that exercises HTTP drain behavior. */
-function backpressureAppServer(): JsonRpcTransport {
-  const fromServer = new PassThrough();
-  const toServer = new PassThrough();
-  const rpc = new JsonRpcTransport(fromServer, toServer);
-  const send = (value: unknown): void => {
-    fromServer.write(`${JSON.stringify(value)}\n`);
-  };
-  createInterface({ input: toServer }).on("line", (line) => {
-    const message = JSON.parse(line) as { id: number; method: string };
-    if (message.method === "thread/start")
-      send(
-        protocolResponse(
-          "thread/start",
-          message.id,
-          protocolThreadStartResponse(protocolThread("thr_slow")),
-        ),
-      );
-    else if (message.method === "turn/start") {
-      send(
-        protocolResponse("turn/start", message.id, {
-          turn: protocolTurn("turn_slow", "inProgress"),
-        }),
-      );
-      for (let index = 0; index < 128; index += 1)
-        send(
-          protocolNotification({
-            method: "item/agentMessage/delta",
+            method: "turn/completed",
             params: {
               threadId: "thr_slow",
-              turnId: "turn_slow",
-              itemId: "message",
-              delta: `${String(index).padStart(3, "0")}:${"x".repeat(32 * 1024)}`,
+              turn: protocolTurn("turn_slow", "completed"),
             },
           }),
         );
-      send(
-        protocolNotification({
-          method: "turn/completed",
-          params: {
-            threadId: "thr_slow",
-            turn: protocolTurn("turn_slow", "completed"),
-          },
-        }),
-      );
-    } else if (message.method === "turn/interrupt")
-      send(protocolResponse("turn/interrupt", message.id, {}));
+      } else if (message.method === "turn/interrupt")
+        send(protocolResponse("turn/interrupt", message.id, {}));
+    },
   });
-  return rpc;
 }
 
 /** Creates two active turns while flooding notifications for a third turn. */
-function foreignFloodAppServer(): JsonRpcTransport {
-  const fromServer = new PassThrough();
-  const toServer = new PassThrough();
-  const rpc = new JsonRpcTransport(fromServer, toServer);
+function foreignFloodAppServer(): FakeTransport {
   let nextThread = 0;
   const turns: Array<{ threadId: string; turnId: string }> = [];
-  const send = (value: unknown): void => {
-    fromServer.write(`${JSON.stringify(value)}\n`);
-  };
-  createInterface({ input: toServer }).on("line", (line) => {
-    const message = JSON.parse(line) as {
-      id: number;
-      method: string;
-      params: Record<string, unknown>;
-    };
-    if (message.method === "thread/start") {
-      const threadId = `thr_active_${++nextThread}`;
-      send(
-        protocolResponse(
-          "thread/start",
-          message.id,
-          protocolThreadStartResponse(protocolThread(threadId)),
-        ),
-      );
-    } else if (message.method === "turn/start") {
-      const threadId = String(message.params.threadId);
-      const turnId = `turn_${threadId}`;
-      turns.push({ threadId, turnId });
-      send(
-        protocolResponse("turn/start", message.id, {
-          turn: protocolTurn(turnId, "inProgress"),
-        }),
-      );
-      if (turns.length === 2)
-        setImmediate(() => {
-          for (let index = 0; index < 2_048; index += 1)
-            send(
-              protocolNotification({
+  return createFakeTransport({
+    onMessage(rawMessage, send) {
+      const message = rawMessage as {
+        id: number;
+        method: string;
+        params: Record<string, unknown>;
+      };
+      if (message.method === "thread/start") {
+        const threadId = `thr_active_${++nextThread}`;
+        send(
+          protocolResponse(
+            "thread/start",
+            message.id,
+            protocolThreadStartResponse(protocolThread(threadId)),
+          ),
+        );
+      } else if (message.method === "turn/start") {
+        const threadId = String(message.params.threadId);
+        const turnId = `turn_${threadId}`;
+        turns.push({ threadId, turnId });
+        send(
+          protocolResponse("turn/start", message.id, {
+            turn: protocolTurn(turnId, "inProgress"),
+          }),
+        );
+        if (turns.length === 2)
+          setImmediate(() => {
+            for (let index = 0; index < 2_048; index += 1)
+              send(
+                protocolNotification({
+                  method: "item/agentMessage/delta",
+                  params: {
+                    threadId: "thr_foreign",
+                    turnId: "turn_foreign",
+                    itemId: "foreign_message",
+                    delta: ".",
+                  },
+                }),
+              );
+            // Correlation-less known notifications are malformed wire input. Once
+            // a turn is established they must be rejected before ingress accounting.
+            for (let index = 0; index < 2_048; index += 1)
+              send({
                 method: "item/agentMessage/delta",
-                params: {
-                  threadId: "thr_foreign",
-                  turnId: "turn_foreign",
-                  itemId: "foreign_message",
-                  delta: ".",
-                },
-              }),
-            );
-          // Correlation-less known notifications are malformed wire input. Once
-          // a turn is established they must be rejected before ingress accounting.
-          for (let index = 0; index < 2_048; index += 1)
-            send({
-              method: "item/agentMessage/delta",
-              params: { itemId: "missing_correlation", delta: "." },
-            });
-          for (const active of turns) {
-            send(
-              protocolNotification({
-                method: "item/agentMessage/delta",
-                params: {
-                  ...active,
-                  itemId: `message_${active.threadId}`,
-                  delta: active.threadId,
-                },
-              }),
-            );
-            send(
-              protocolNotification({
-                method: "turn/completed",
-                params: {
-                  threadId: active.threadId,
-                  turn: protocolTurn(active.turnId, "completed"),
-                },
-              }),
-            );
-          }
-        });
-    } else if (message.method === "turn/interrupt")
-      send({ id: message.id, result: {} });
+                params: { itemId: "missing_correlation", delta: "." },
+              });
+            for (const active of turns) {
+              send(
+                protocolNotification({
+                  method: "item/agentMessage/delta",
+                  params: {
+                    ...active,
+                    itemId: `message_${active.threadId}`,
+                    delta: active.threadId,
+                  },
+                }),
+              );
+              send(
+                protocolNotification({
+                  method: "turn/completed",
+                  params: {
+                    threadId: active.threadId,
+                    turn: protocolTurn(active.turnId, "completed"),
+                  },
+                }),
+              );
+            }
+          });
+      } else if (message.method === "turn/interrupt")
+        send({ id: message.id, result: {} });
+    },
   });
-  return rpc;
 }
 
 /** Runs an HTTP assertion against an ephemeral, ready offline proxy. */
 async function withChatServer(
   run: (
     origin: string,
-    proxy: ReturnType<typeof createProxyServer>,
+    proxy: ProxyServer,
+    useTransport: (
+      fake: ChatTestTransport,
+      requirements?: PolicyRequirements,
+    ) => void,
   ) => Promise<void>,
-  requestTimeout = "30s",
+  requestTimeoutMs = 30_000,
   stateDir = `${tmpdir()}/codex-proxy-chat-tests-${process.pid}`,
   logger = silentLogger,
 ): Promise<void> {
-  const proxy = createProxyServer(
-    await resolveServeOptions(
-      parseServeOptions([
-        "--port",
-        "0",
-        "--state-dir",
-        stateDir,
-        "--request-timeout",
-        requestTimeout,
-      ]),
-    ),
-    logger,
-  );
-  proxy.setTransport(fakeAppServer(), UNRESTRICTED_POLICY_REQUIREMENTS);
-  proxy.setReady(true);
-  const address = await proxy.listen();
-  const host = address.address.includes(":")
-    ? `[${address.address}]`
-    : address.address;
+  const initial = fakeAppServer();
+  let proxy: ProxyServer | undefined;
   try {
-    await run(`http://${host}:${address.port}`, proxy);
+    const started = await startProxyWithTransport(initial.rpc, {
+      root: await realpath("."),
+      stateDir,
+      requestTimeoutMs,
+      log: logger,
+    });
+    proxy = started.proxy;
+    const useTransport = (
+      fake: ChatTestTransport,
+      requirements = UNRESTRICTED_POLICY_REQUIREMENTS,
+    ): void => {
+      proxy!.setTransport(fake.rpc, requirements);
+    };
+    await run(started.origin, proxy, useTransport);
   } finally {
-    await proxy.close();
+    proxy?.setReady(false);
+    proxy?.setTransport(undefined);
+    await proxy?.close();
   }
 }
 
@@ -1051,11 +991,8 @@ test("streaming and aggregate responses share content and exact usage", async ()
 });
 
 test("aggregate tool-only responses use null content", async () => {
-  await withChatServer(async (origin, proxy) => {
-    proxy.setTransport(
-      fakeAppServer(true, () => {}, true),
-      UNRESTRICTED_POLICY_REQUIREMENTS,
-    );
+  await withChatServer(async (origin, _proxy, useTransport) => {
+    useTransport(fakeAppServer(true, () => {}, true));
     const response = await fetch(`${origin}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1080,11 +1017,8 @@ test("aggregate tool-only responses use null content", async () => {
 
 test("late streaming failures emit one error and close without DONE", async () => {
   for (const mode of ["transport", "event"] as const)
-    await withChatServer(async (origin, proxy) => {
-      proxy.setTransport(
-        lateFailureAppServer(mode),
-        UNRESTRICTED_POLICY_REQUIREMENTS,
-      );
+    await withChatServer(async (origin, _proxy, useTransport) => {
+      useTransport(lateFailureAppServer(mode));
       const response = await fetch(`${origin}/v1/chat/completions`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1126,9 +1060,9 @@ test("late streaming failures emit one error and close without DONE", async () =
 });
 
 test("initial SSE write failure disposes eager execution before generator startup", async () => {
-  await withChatServer(async (origin, proxy) => {
+  await withChatServer(async (origin, proxy, useTransport) => {
     const fake = recoverableAppServer();
-    proxy.setTransport(fake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
+    useTransport(fake);
     proxy.server.prependOnceListener("request", (_request, response) => {
       response.write = (() => {
         throw new Error("initial SSE write failed");
@@ -1162,8 +1096,7 @@ test("initial SSE write failure disposes eager execution before generator startu
 });
 
 test("persistence failure emits an SSE error before finish reason or usage", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "codex-persist-failure-"));
-  try {
+  await withTempDir(async (directory) => {
     await withChatServer(
       async (origin) => {
         // Atomic rename cannot replace a directory, deterministically forcing
@@ -1185,17 +1118,15 @@ test("persistence failure emits an SSE error before finish reason or usage", asy
         assert.doesNotMatch(body, /"usage":/);
         assert.doesNotMatch(body, /\[DONE\]/);
       },
-      "30s",
+      30_000,
       directory,
     );
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  }, "codex-persist-failure-");
 });
 
 test("request timeout wakes a silent turn and closes its SSE stream", async () => {
-  await withChatServer(async (origin, proxy) => {
-    proxy.setTransport(fakeAppServer(false), UNRESTRICTED_POLICY_REQUIREMENTS);
+  await withChatServer(async (origin, _proxy, useTransport) => {
+    useTransport(fakeAppServer(false));
     const response = await fetch(`${origin}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1208,7 +1139,7 @@ test("request timeout wakes a silent turn and closes its SSE stream", async () =
     const body = await response.text();
     assert.match(body, /"code":"app_server_error"/);
     assert.doesNotMatch(body, /\[DONE\]/);
-  }, "50ms");
+  }, 50);
 });
 
 test("rejects ambiguous history and unknown continuation before app-server work", async () => {
@@ -1254,13 +1185,12 @@ test("rejects ambiguous history and unknown continuation before app-server work"
 });
 
 test("client disconnect interrupts an active app-server turn", async () => {
-  await withChatServer(async (origin, proxy) => {
+  await withChatServer(async (origin, _proxy, useTransport) => {
     let interrupted = false;
-    proxy.setTransport(
+    useTransport(
       fakeAppServer(false, () => {
         interrupted = true;
       }),
-      UNRESTRICTED_POLICY_REQUIREMENTS,
     );
     const response = await fetch(`${origin}/v1/chat/completions`, {
       method: "POST",
@@ -1284,17 +1214,13 @@ test("client disconnect interrupts an active app-server turn", async () => {
 });
 
 test("unknown app-server events produce one transport-scoped safe diagnostic", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "codex-unknown-event-"));
-  const secret = `${await realpath(".")} https://secret.example/token=abc`;
-  const entries: Array<Record<string, unknown>> = [];
-  const logger = createLogger("debug", (entry) => entries.push(entry));
-  try {
+  await withTempDir(async (directory) => {
+    const secret = `${await realpath(".")} https://secret.example/token=abc`;
+    const entries: Array<Record<string, unknown>> = [];
+    const logger = createLogger("debug", (entry) => entries.push(entry));
     await withChatServer(
-      async (origin, proxy) => {
-        proxy.setTransport(
-          unknownEventAppServer(secret),
-          UNRESTRICTED_POLICY_REQUIREMENTS,
-        );
+      async (origin, _proxy, useTransport) => {
+        useTransport(unknownEventAppServer(secret));
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const response = await fetch(`${origin}/v1/chat/completions`, {
             method: "POST",
@@ -1315,7 +1241,7 @@ test("unknown app-server events produce one transport-scoped safe diagnostic", a
           );
         }
       },
-      "30s",
+      30_000,
       join(directory, "state"),
       logger,
     );
@@ -1328,17 +1254,12 @@ test("unknown app-server events produce one transport-scoped safe diagnostic", a
     assert.deepEqual(diagnostics[0]?.field_fingerprints, ["9c0211c51d04574f"]);
     assert.equal("request_id" in diagnostics[0]!, false);
     assert.equal(JSON.stringify(entries).includes(secret), false);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  }, "codex-unknown-event-");
 });
 
 test("a paused real SSE client drains bounded frames in order", async () => {
-  await withChatServer(async (origin, proxy) => {
-    proxy.setTransport(
-      backpressureAppServer(),
-      UNRESTRICTED_POLICY_REQUIREMENTS,
-    );
+  await withChatServer(async (origin, proxy, useTransport) => {
+    useTransport(backpressureAppServer());
     let drains = 0;
     let maxWritableLength = 0;
     proxy.server.prependOnceListener("request", (_request, response) => {
@@ -1412,13 +1333,13 @@ test("a paused real SSE client drains bounded frames in order", async () => {
       maxWritableLength < 128 * 1024,
       `buffer grew to ${maxWritableLength}`,
     );
-  }, "60s");
+  }, 60_000);
 }, 70_000);
 
 test("ingress overflow interrupts the turn and rejects every queued tool responder", async () => {
-  await withChatServer(async (origin, proxy) => {
+  await withChatServer(async (origin, _proxy, useTransport) => {
     const fake = failingIngressAppServer("overflow");
-    proxy.setTransport(fake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
+    useTransport(fake);
     const response = await fetch(`${origin}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1440,11 +1361,8 @@ test("ingress overflow interrupts the turn and rejects every queued tool respond
 });
 
 test("concurrent foreign notifications do not consume ingress capacity", async () => {
-  await withChatServer(async (origin, proxy) => {
-    proxy.setTransport(
-      foreignFloodAppServer(),
-      UNRESTRICTED_POLICY_REQUIREMENTS,
-    );
+  await withChatServer(async (origin, _proxy, useTransport) => {
+    useTransport(foreignFloodAppServer());
     const request = (content: string): Promise<Response> =>
       fetch(`${origin}/v1/chat/completions`, {
         method: "POST",
@@ -1468,9 +1386,9 @@ test("concurrent foreign notifications do not consume ingress capacity", async (
 });
 
 test("dynamic correlation failure rejects every captured responder", async () => {
-  await withChatServer(async (origin, proxy) => {
+  await withChatServer(async (origin, _proxy, useTransport) => {
     const fake = failingIngressAppServer("mismatch");
-    proxy.setTransport(fake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
+    useTransport(fake);
     const response = await fetch(`${origin}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1492,12 +1410,11 @@ test("dynamic correlation failure rejects every captured responder", async () =>
 });
 
 test("suspension persistence failure rejects every captured responder", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "codex-suspend-failure-"));
-  try {
+  await withTempDir(async (directory) => {
     await withChatServer(
-      async (origin, proxy) => {
+      async (origin, _proxy, useTransport) => {
         const fake = failingIngressAppServer("suspend");
-        proxy.setTransport(fake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
+        useTransport(fake);
         await mkdir(join(directory, "continuations.json"));
         const request = {
           model: "m",
@@ -1531,297 +1448,281 @@ test("suspension persistence failure rejects every captured responder", async ()
         });
         assert.equal(retried.status, 200);
       },
-      "30s",
+      30_000,
       directory,
     );
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  }, "codex-suspend-failure-");
 });
 
 test("request policies map exactly, bind continuations, and honor managed denials", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "codex-policy-http-"));
-  const configuredRoot = join(directory, "root");
-  const configuredCwd = join(configuredRoot, "project");
-  await mkdir(configuredCwd, { recursive: true });
-  const root = await realpath(configuredRoot);
-  const cwd = await realpath(configuredCwd);
-  const options = await resolveServeOptions(
-    parseServeOptions([
-      "--port",
-      "0",
-      "--root",
-      root,
-      "--state-dir",
-      join(directory, "state"),
-    ]),
-  );
-  const proxy = createProxyServer(options, silentLogger);
-  const fake = policyCapturingAppServer();
-  proxy.setTransport(fake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
-  proxy.setReady(true);
-  const address = await proxy.listen();
-  const host = address.address.includes(":")
-    ? `[${address.address}]`
-    : address.address;
-  const origin = `http://${host}:${address.port}`;
-  const request = {
-    model: "m",
-    messages: [{ role: "user", content: "policy" }],
-    x_codex: {
-      cwd,
-      sandbox: "workspace-write",
-      web_search: "indexed",
-    },
-  };
-  try {
-    const first = await fetch(`${origin}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(request),
-    });
-    assert.equal(first.status, 200);
-    const firstBody = (await first.json()) as { id: string };
-    const thread = fake.messages.find(
-      (message) => message.method === "thread/start",
-    );
-    assert.deepEqual(thread?.params, {
-      model: "m",
-      ephemeral: false,
-      cwd,
-      sandbox: "workspace-write",
-      approvalPolicy: "never",
-      approvalsReviewer: "auto_review",
-      config: { web_search: "indexed" },
-    });
-    const turn = fake.messages.find(
-      (message) => message.method === "turn/start",
-    );
-    assert.deepEqual(turn?.params, {
-      threadId: "thr_policy",
-      model: "m",
-      input: [{ type: "text", text: "policy", text_elements: [] }],
-      cwd,
-      approvalPolicy: "never",
-      approvalsReviewer: "auto_review",
-      sandboxPolicy: {
-        type: "workspaceWrite",
-        writableRoots: [cwd],
-        networkAccess: false,
-        excludeTmpdirEnvVar: false,
-        excludeSlashTmp: false,
-      },
-    });
-
-    const continued = await fetch(`${origin}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        ...request,
-        previous_response_id: firstBody.id,
-        messages: [{ role: "user", content: "continue" }],
-      }),
-    });
-    assert.equal(continued.status, 200);
-    const continuedBody = (await continued.json()) as { id: string };
-    const resume = fake.messages.find(
-      (message) => message.method === "thread/resume",
-    );
-    assert.deepEqual(resume?.params, {
-      threadId: "thr_policy",
-      excludeTurns: true,
-      cwd,
-      sandbox: "workspace-write",
-      approvalPolicy: "never",
-      approvalsReviewer: "auto_review",
-      config: { web_search: "indexed" },
-    });
-    const continuedTurn = fake.messages
-      .filter((message) => message.method === "turn/start")
-      .at(-1);
-    assert.deepEqual(continuedTurn?.params, {
-      threadId: "thr_policy",
-      model: "m",
-      input: [{ type: "text", text: "continue", text_elements: [] }],
-      cwd,
-      approvalPolicy: "never",
-      approvalsReviewer: "auto_review",
-      sandboxPolicy: {
-        type: "workspaceWrite",
-        writableRoots: [cwd],
-        networkAccess: false,
-        excludeTmpdirEnvVar: false,
-        excludeSlashTmp: false,
-      },
-    });
-
-    const beforeContinuation = fake.messages.length;
-    const changed = await fetch(`${origin}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        ...request,
-        previous_response_id: continuedBody.id,
-        x_codex: { ...request.x_codex, sandbox: "read-only" },
-      }),
-    });
-    assert.equal(changed.status, 409);
-    assert.equal(
-      ((await changed.json()) as { error: { code: string } }).error.code,
-      "continuation_policy_mismatch",
-    );
-    assert.equal(fake.messages.length, beforeContinuation);
-
-    const changedWeb = await fetch(`${origin}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        ...request,
-        previous_response_id: continuedBody.id,
-        x_codex: { ...request.x_codex, web_search: "disabled" },
-      }),
-    });
-    assert.equal(changedWeb.status, 409);
-    assert.equal(
-      ((await changedWeb.json()) as { error: { code: string } }).error.code,
-      "continuation_policy_mismatch",
-    );
-    assert.equal(fake.messages.length, beforeContinuation);
-
-    const managedFake = policyCapturingAppServer();
-    proxy.setTransport(managedFake.rpc, {
-      ...UNRESTRICTED_POLICY_REQUIREMENTS,
-      allowedApprovalPolicies: ["on-request"],
-      allowedApprovalsReviewers: ["user"],
-    });
-    const changedManagedPolicy = await fetch(`${origin}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        ...request,
-        previous_response_id: continuedBody.id,
-      }),
-    });
-    assert.equal(changedManagedPolicy.status, 409);
-    assert.equal(
-      (
-        (await changedManagedPolicy.json()) as {
-          error: { code: string };
-        }
-      ).error.code,
-      "continuation_policy_mismatch",
-    );
-    assert.deepEqual(managedFake.messages, []);
-
-    const disabledFake = policyCapturingAppServer();
-    proxy.setTransport(disabledFake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
-    const disabled = await fetch(`${origin}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
+  await withTempDir(async (directory) => {
+    const configuredRoot = join(directory, "root");
+    const configuredCwd = join(configuredRoot, "project");
+    await mkdir(configuredCwd, { recursive: true });
+    const root = await realpath(configuredRoot);
+    const cwd = await realpath(configuredCwd);
+    const fake = policyCapturingAppServer();
+    let proxy: ProxyServer | undefined;
+    try {
+      const started = await startProxyWithTransport(fake.rpc, {
+        root,
+        stateDir: join(directory, "state"),
+      });
+      proxy = started.proxy;
+      const origin = started.origin;
+      const request = {
         model: "m",
-        messages: [{ role: "user", content: "offline" }],
-      }),
-    });
-    assert.equal(disabled.status, 200);
-    assert.deepEqual(
-      disabledFake.messages.find((message) => message.method === "thread/start")
-        ?.params,
-      {
+        messages: [{ role: "user", content: "policy" }],
+        x_codex: {
+          cwd,
+          sandbox: "workspace-write",
+          web_search: "indexed",
+        },
+      };
+      const first = await fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request),
+      });
+      assert.equal(first.status, 200);
+      const firstBody = (await first.json()) as { id: string };
+      const thread = fake.messages.find(
+        (message) => message.method === "thread/start",
+      );
+      assert.deepEqual(thread?.params, {
         model: "m",
         ephemeral: false,
-        cwd: root,
-        sandbox: "read-only",
+        cwd,
+        sandbox: "workspace-write",
         approvalPolicy: "never",
         approvalsReviewer: "auto_review",
-        config: { web_search: "disabled" },
-      },
-    );
-    assert.deepEqual(
-      disabledFake.messages.find((message) => message.method === "turn/start")
-        ?.params,
-      {
+        config: { web_search: "indexed" },
+      });
+      const turn = fake.messages.find(
+        (message) => message.method === "turn/start",
+      );
+      assert.deepEqual(turn?.params, {
         threadId: "thr_policy",
         model: "m",
-        input: [{ type: "text", text: "offline", text_elements: [] }],
-        cwd: root,
+        input: [{ type: "text", text: "policy", text_elements: [] }],
+        cwd,
         approvalPolicy: "never",
         approvalsReviewer: "auto_review",
-        sandboxPolicy: { type: "readOnly", networkAccess: false },
-      },
-    );
+        sandboxPolicy: {
+          type: "workspaceWrite",
+          writableRoots: [cwd],
+          networkAccess: false,
+          excludeTmpdirEnvVar: false,
+          excludeSlashTmp: false,
+        },
+      });
 
-    const deniedFake = policyCapturingAppServer();
-    proxy.setTransport(deniedFake.rpc, {
-      ...UNRESTRICTED_POLICY_REQUIREMENTS,
-      allowedSandboxModes: ["read-only"],
-    });
-    const denied = await fetch(`${origin}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(request),
-    });
-    assert.equal(denied.status, 400);
-    assert.equal(
-      ((await denied.json()) as { error: { code: string } }).error.code,
-      "sandbox_not_allowed",
-    );
-    assert.deepEqual(deniedFake.messages, []);
-  } finally {
-    await proxy.close();
-    await rm(directory, { recursive: true, force: true });
-  }
+      const continued = await fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...request,
+          previous_response_id: firstBody.id,
+          messages: [{ role: "user", content: "continue" }],
+        }),
+      });
+      assert.equal(continued.status, 200);
+      const continuedBody = (await continued.json()) as { id: string };
+      const resume = fake.messages.find(
+        (message) => message.method === "thread/resume",
+      );
+      assert.deepEqual(resume?.params, {
+        threadId: "thr_policy",
+        excludeTurns: true,
+        cwd,
+        sandbox: "workspace-write",
+        approvalPolicy: "never",
+        approvalsReviewer: "auto_review",
+        config: { web_search: "indexed" },
+      });
+      const continuedTurn = fake.messages
+        .filter((message) => message.method === "turn/start")
+        .at(-1);
+      assert.deepEqual(continuedTurn?.params, {
+        threadId: "thr_policy",
+        model: "m",
+        input: [{ type: "text", text: "continue", text_elements: [] }],
+        cwd,
+        approvalPolicy: "never",
+        approvalsReviewer: "auto_review",
+        sandboxPolicy: {
+          type: "workspaceWrite",
+          writableRoots: [cwd],
+          networkAccess: false,
+          excludeTmpdirEnvVar: false,
+          excludeSlashTmp: false,
+        },
+      });
+
+      const beforeContinuation = fake.messages.length;
+      const changed = await fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...request,
+          previous_response_id: continuedBody.id,
+          x_codex: { ...request.x_codex, sandbox: "read-only" },
+        }),
+      });
+      assert.equal(changed.status, 409);
+      assert.equal(
+        ((await changed.json()) as { error: { code: string } }).error.code,
+        "continuation_policy_mismatch",
+      );
+      assert.equal(fake.messages.length, beforeContinuation);
+
+      const changedWeb = await fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...request,
+          previous_response_id: continuedBody.id,
+          x_codex: { ...request.x_codex, web_search: "disabled" },
+        }),
+      });
+      assert.equal(changedWeb.status, 409);
+      assert.equal(
+        ((await changedWeb.json()) as { error: { code: string } }).error.code,
+        "continuation_policy_mismatch",
+      );
+      assert.equal(fake.messages.length, beforeContinuation);
+
+      const managedFake = policyCapturingAppServer();
+      proxy.setTransport(managedFake.rpc, {
+        ...UNRESTRICTED_POLICY_REQUIREMENTS,
+        allowedApprovalPolicies: ["on-request"],
+        allowedApprovalsReviewers: ["user"],
+      });
+      const changedManagedPolicy = await fetch(
+        `${origin}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            ...request,
+            previous_response_id: continuedBody.id,
+          }),
+        },
+      );
+      assert.equal(changedManagedPolicy.status, 409);
+      assert.equal(
+        (
+          (await changedManagedPolicy.json()) as {
+            error: { code: string };
+          }
+        ).error.code,
+        "continuation_policy_mismatch",
+      );
+      assert.deepEqual(managedFake.messages, []);
+
+      const disabledFake = policyCapturingAppServer();
+      proxy.setTransport(disabledFake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
+      const disabled = await fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "m",
+          messages: [{ role: "user", content: "offline" }],
+        }),
+      });
+      assert.equal(disabled.status, 200);
+      assert.deepEqual(
+        disabledFake.messages.find(
+          (message) => message.method === "thread/start",
+        )?.params,
+        {
+          model: "m",
+          ephemeral: false,
+          cwd: root,
+          sandbox: "read-only",
+          approvalPolicy: "never",
+          approvalsReviewer: "auto_review",
+          config: { web_search: "disabled" },
+        },
+      );
+      assert.deepEqual(
+        disabledFake.messages.find((message) => message.method === "turn/start")
+          ?.params,
+        {
+          threadId: "thr_policy",
+          model: "m",
+          input: [{ type: "text", text: "offline", text_elements: [] }],
+          cwd: root,
+          approvalPolicy: "never",
+          approvalsReviewer: "auto_review",
+          sandboxPolicy: { type: "readOnly", networkAccess: false },
+        },
+      );
+
+      const deniedFake = policyCapturingAppServer();
+      proxy.setTransport(deniedFake.rpc, {
+        ...UNRESTRICTED_POLICY_REQUIREMENTS,
+        allowedSandboxModes: ["read-only"],
+      });
+      const denied = await fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request),
+      });
+      assert.equal(denied.status, 400);
+      assert.equal(
+        ((await denied.json()) as { error: { code: string } }).error.code,
+        "sandbox_not_allowed",
+      );
+      assert.deepEqual(deniedFake.messages, []);
+    } finally {
+      proxy?.setReady(false);
+      proxy?.setTransport(undefined);
+      await proxy?.close();
+    }
+  }, "codex-policy-http-");
 });
 
 test("refreshing managed requirements on an unchanged transport takes effect", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "codex-policy-refresh-"));
-  const root = await realpath(directory);
-  const options = await resolveServeOptions(
-    parseServeOptions([
-      "--port",
-      "0",
-      "--root",
-      root,
-      "--state-dir",
-      join(directory, "state"),
-    ]),
-  );
-  const proxy = createProxyServer(options, silentLogger);
-  const fake = policyCapturingAppServer();
-  proxy.setTransport(fake.rpc, {
-    ...UNRESTRICTED_POLICY_REQUIREMENTS,
-    allowedSandboxModes: ["read-only"],
-  });
-  proxy.setReady(true);
-  const address = await proxy.listen();
-  const host = address.address.includes(":")
-    ? `[${address.address}]`
-    : address.address;
-  const origin = `http://${host}:${address.port}`;
-  const body = JSON.stringify({
-    model: "m",
-    messages: [{ role: "user", content: "x" }],
-    x_codex: { sandbox: "workspace-write" },
-  });
-  const send = (): Promise<Response> =>
-    fetch(`${origin}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body,
-    });
-  try {
-    const denied = await send();
-    assert.equal(denied.status, 400);
-    assert.equal(
-      ((await denied.json()) as { error: { code: string } }).error.code,
-      "sandbox_not_allowed",
-    );
-    // Same transport instance, relaxed requirements: the refresh must apply
-    // rather than being discarded by the same-transport short-circuit.
-    proxy.setTransport(fake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
-    assert.equal((await send()).status, 200);
-  } finally {
-    await proxy.close();
-    await rm(directory, { recursive: true, force: true });
-  }
+  await withTempDir(async (directory) => {
+    const root = await realpath(directory);
+    const fake = policyCapturingAppServer();
+    let proxy: ProxyServer | undefined;
+    try {
+      const started = await startProxyWithTransport(fake.rpc, {
+        root,
+        stateDir: join(directory, "state"),
+        requirements: {
+          ...UNRESTRICTED_POLICY_REQUIREMENTS,
+          allowedSandboxModes: ["read-only"],
+        },
+      });
+      proxy = started.proxy;
+      const body = JSON.stringify({
+        model: "m",
+        messages: [{ role: "user", content: "x" }],
+        x_codex: { sandbox: "workspace-write" },
+      });
+      const send = (): Promise<Response> =>
+        fetch(`${started.origin}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body,
+        });
+      const denied = await send();
+      assert.equal(denied.status, 400);
+      assert.equal(
+        ((await denied.json()) as { error: { code: string } }).error.code,
+        "sandbox_not_allowed",
+      );
+      // Same transport instance, relaxed requirements: the refresh must apply
+      // rather than being discarded by the same-transport short-circuit.
+      proxy.setTransport(fake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
+      assert.equal((await send()).status, 200);
+    } finally {
+      proxy?.setReady(false);
+      proxy?.setTransport(undefined);
+      await proxy?.close();
+    }
+  }, "codex-policy-refresh-");
 });

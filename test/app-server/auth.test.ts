@@ -4,6 +4,7 @@ import { test } from "vitest";
 import { ensureAuthenticated } from "../../src/app-server/auth.js";
 import { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
 import { createLogger } from "../../src/core/logger.js";
+import { silentLogger } from "../support/logger.js";
 import {
   protocolAuthenticatedAccountResponse,
   protocolNotification,
@@ -100,13 +101,10 @@ function fakeRpc(kind: LoginKind): JsonRpcTransport {
   return rpc;
 }
 
-/** Suppresses expected logs during authentication tests. */
-const silent = createLogger("error", () => {});
-
 test("authentication accepts an existing account", async () => {
   await ensureAuthenticated({
     rpc: fakeRpc("logged-in"),
-    log: silent,
+    log: silentLogger,
     timeoutMs: 100,
     interactive: true,
     terminal: () => assert.fail("unexpected terminal output"),
@@ -118,7 +116,7 @@ test("authentication fails closed when the auth requirement is missing", async (
     await assert.rejects(
       ensureAuthenticated({
         rpc: fakeRpc(kind),
-        log: silent,
+        log: silentLogger,
         timeoutMs: 100,
         interactive: false,
         terminal: () => {},
@@ -132,7 +130,7 @@ test("browser login launches without printing the authorization URL", async () =
   let launched = "";
   await ensureAuthenticated({
     rpc: fakeRpc("browser"),
-    log: silent,
+    log: silentLogger,
     timeoutMs: 100,
     interactive: true,
     terminal: (value) => terminal.push(value),
@@ -148,7 +146,7 @@ test("browser login launches without printing the authorization URL", async () =
 test("authentication observes completion delivered with the start response", async () => {
   await ensureAuthenticated({
     rpc: fakeRpc("early"),
-    log: silent,
+    log: silentLogger,
     timeoutMs: 100,
     interactive: true,
     terminal: () => {},
@@ -175,7 +173,7 @@ test("headless auth uses device code and login failures reject", async () => {
   const terminal: string[] = [];
   await ensureAuthenticated({
     rpc: fakeRpc("device"),
-    log: silent,
+    log: silentLogger,
     timeoutMs: 100,
     interactive: false,
     terminal: (value) => terminal.push(value),
@@ -184,7 +182,7 @@ test("headless auth uses device code and login failures reject", async () => {
   await assert.rejects(
     ensureAuthenticated({
       rpc: fakeRpc("failure"),
-      log: silent,
+      log: silentLogger,
       timeoutMs: 100,
       interactive: true,
       terminal: () => {},
@@ -200,7 +198,7 @@ test("authentication supports cancellation and timeout", async () => {
   await assert.rejects(
     ensureAuthenticated({
       rpc: fakeRpc("browser"),
-      log: silent,
+      log: silentLogger,
       timeoutMs: 100,
       interactive: true,
       terminal: () => {},
@@ -212,7 +210,7 @@ test("authentication supports cancellation and timeout", async () => {
   await assert.rejects(
     ensureAuthenticated({
       rpc,
-      log: silent,
+      log: silentLogger,
       timeoutMs: 1,
       interactive: true,
       terminal: () => {},
