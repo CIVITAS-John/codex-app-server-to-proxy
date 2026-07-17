@@ -2,23 +2,14 @@
 
 `codex-openai-proxy` lets software written for the OpenAI Chat Completions API talk to Codex through a local HTTP endpoint. It runs `codex app-server`, uses your ChatGPT login, and keeps the listener on your machine.
 
-The project is under active development. Text completions, streaming, function tools, usage metadata, thread continuation, and per-request Codex policy selection are implemented.
+The package is in prerelease. Text completions, streaming, function tools, usage metadata, thread continuation, and per-request Codex policy selection are implemented.
 
-## Start the proxy
+## Quick start
 
-Node.js 20 or newer is required; Node.js 24 is the primary supported LTS. CI exercises Node.js 20, 22, 24, and 26 on Linux and Node.js 24 on macOS and Windows. Until the package is published, run it from this repository:
-
-```sh
-npm install
-npm start
-```
-
-The installation includes the exact Codex CLI version used to generate the checked-in app-server contract. The proxy uses that package-owned executable by default and rejects a `--codex-path` override that reports a different version.
-
-Once published, the CLI will also be available through:
+Install Node.js 20 or newer, then start the prerelease from the narrowest directory tree Codex should be allowed to use:
 
 ```sh
-npx codex-openai-proxy serve
+npx --yes codex-openai-proxy@next serve --root /absolute/path/to/project
 ```
 
 The proxy listens at `http://127.0.0.1:8787` by default. On first use it starts the ChatGPT login flow. Interactive terminals open the authorization page when possible; non-interactive terminals use device-code login.
@@ -31,6 +22,17 @@ curl http://127.0.0.1:8787/ready
 ```
 
 `/health` reports proxy liveness. `/ready` returns HTTP 503 until app-server initialization and authentication finish, and while the proxy is recovering from an app-server failure.
+
+To install the command instead of using `npx`:
+
+```sh
+npm install --global codex-openai-proxy@next
+codex-openai-proxy serve --root /absolute/path/to/project
+```
+
+After a stable release, omit `@next` from the `npx` and install commands. Installing the package does not start Codex, perform login, or run a proxy install script; those actions begin only when you run `serve`.
+
+The package includes the exact `@openai/codex` version used to generate its app-server contract: `0.144.5`. The proxy uses that package-owned executable by default. An explicit `--codex-path` override must report exactly `codex-cli 0.144.5`; both older and newer overrides are rejected until this package's generated contract is updated.
 
 ## Use an OpenAI client
 
@@ -107,17 +109,17 @@ Function tools use the normal multi-request Chat Completions flow:
 3. Execute the requested functions in your client.
 4. Send the assistant tool-call message followed by matching `role: "tool"` messages, repeating the same `tools` definition and the same `x_codex` policy settings from the original request.
 
-By default, the proxy associates tool results with the one pending Codex turn through their `tool_call_id` values. Start it with `--implicit-tool-continuation false` if every tool-result request should instead supply the Codex continuation field described below. Either way, a tool-result request that omits or changes the original `x_codex` settings is rejected with `continuation_policy_mismatch` and leaves the pending call intact for a corrected retry.
+By default, the proxy associates tool results with the one pending Codex turn through their `tool_call_id` values. Start it with `--implicit-tool-continuation false` if every tool-result request should instead supply the Codex continuation field described below. Either way, a tool-result request whose effective `x_codex` settings differ from the original request is rejected with `continuation_policy_mismatch` and leaves the pending call intact for a corrected retry. Omitted settings are allowed only when they resolve to the same effective values.
 
 Pending tool calls are held in memory for five minutes by default. They cannot survive a proxy restart; completed threads can.
 
-## Codex extensions
+## Codex-specific extensions
 
-Codex-specific behavior is additive. Clients that only need standard Chat Completions fields can ignore it.
+Codex-specific behavior is additive but nonstandard. Clients that require strict Chat Completions response objects must ignore or strip the response extensions described here.
 
 ### Continue a Codex thread
 
-`previous_response_id` is an `x_codex` extension to the request contract, not a standard Chat Completions field. Pass the `id` from the newest completed response to continue its persisted Codex thread:
+`previous_response_id` is a top-level, nonstandard `x_codex` continuation extension; it is not a standard Chat Completions field and is not nested inside the `x_codex` object. Pass the `id` from the newest completed response to continue its persisted Codex thread:
 
 ```json
 {
@@ -131,15 +133,15 @@ A continuation must use the same model and function-tool definitions as the orig
 
 ### Receive Codex activity
 
-The proxy sends Codex activity directly on the assistant delta/message. Text uses the standard `content` shape and calls use the standard `tool_calls` shape. Exposed reasoning uses `reasoning` (never `reasoning_summary`) and results use `tool_results`; these two direct compatibility fields are **not standard Chat Completions fields**. Streaming order is SSE chunk order; non-streaming responses aggregate those fields while preserving text that appeared before a call.
+The proxy sends Codex activity directly on the assistant delta/message. Text uses the standard `content` shape and calls use the standard `tool_calls` shape. Exposed reasoning uses the nonstandard `reasoning` field (never `reasoning_summary`) and results use the nonstandard `tool_results` field. These are Codex-specific direct compatibility extensions, not standard Chat Completions fields and not fields inside a response-side `x_codex` object. Streaming order is SSE chunk order; non-streaming responses aggregate those fields while preserving text that appeared before a call.
 
-Internal app-server commands, file changes, MCP calls, web searches, collaboration calls, and other supported tool-like items are represented as function-shaped calls. A progress or terminal result repeats the matching call in `tool_calls` and places its bounded status/content in `tool_results`, making each result chunk self-correlating. These calls are observational and are already executed by app-server; clients must not execute them. They do not cause `finish_reason: "tool_calls"`.
+Internal app-server commands, file changes, MCP calls, web searches, collaboration calls, and other supported tool-like items are represented as function-shaped calls. The first event announces a call in `tool_calls`. Later progress and terminal events place bounded status/content plus the matching function metadata in nonstandard `tool_results` without repeating complete call arguments; an orphan result also introduces its reconstructable call. These calls are observational and are already executed by app-server; clients must not execute them. They do not cause `finish_reason: "tool_calls"`.
 
-Client-defined dynamic functions still suspend with `finish_reason: "tool_calls"` and require the normal follow-up `role: "tool"` messages. The continuation response begins with the accepted calls and `tool_results` together, then streams later reasoning, text, or internal activity from the same turn. `tool_results` and `reasoning` are nonstandard direct compatibility fields, not `x_codex` response extensions; clients requiring strict standard Chat Completions response objects must ignore or strip them. Request-side `previous_response_id` and policy settings remain explicitly documented `x_codex` extensions where applicable.
+Client-defined dynamic functions still suspend with `finish_reason: "tool_calls"` and require the normal follow-up `role: "tool"` messages. The continuation response begins with the accepted calls and nonstandard `tool_results` together, then streams later nonstandard reasoning, standard text, or internal activity from the same turn. The top-level request extension `previous_response_id` and the policy fields nested under `x_codex` remain distinct from these direct response fields.
 
 ### Select Codex policy
 
-Working-directory, sandbox, and web-search controls are nonstandard `x_codex` request extensions:
+Working-directory, sandbox, and web-search controls are nonstandard request extensions nested under `x_codex`:
 
 ```json
 {
@@ -161,29 +163,31 @@ Approval policy is proxy-owned and non-interactive. The proxy prefers `never`, s
 
 Continuations must repeat the same effective `x_codex` settings. A change is rejected with `continuation_cwd_mismatch` or `continuation_policy_mismatch` before the thread is resumed.
 
-The machine-readable request-extension schema is [protocol/schemas/x-codex.schema.json](protocol/schemas/x-codex.schema.json). `previous_response_id` is a separate nonstandard continuation field; it is not nested below `x_codex`. Response `reasoning` and `tool_results` are also nonstandard direct compatibility fields rather than standard Chat Completions or response-side `x_codex` fields.
+The machine-readable request-extension schema is [protocol/schemas/x-codex.schema.json](https://github.com/CIVITAS-John/codex-app-server-to-proxy/blob/main/protocol/schemas/x-codex.schema.json), shipped inside the installed package at `protocol/schemas/x-codex.schema.json`. `previous_response_id` is the separate top-level nonstandard continuation extension. Response `reasoning` and `tool_results` are nonstandard direct compatibility fields rather than standard Chat Completions fields or fields inside a response-side `x_codex` object.
 
 > **Project trust side effect:** Starting a new thread with `workspace-write` and a `cwd` can cause app-server to mark that project as trusted in the user's `config.toml`. Set `--root` to the narrowest appropriate boundary; the proxy will not cause app-server to trust a directory outside it.
 
 > **State directory placement:** Under `workspace-write` the Codex agent can write anywhere in the effective `cwd`. The proxy therefore derives its continuation store from the canonical root and keeps it outside that root by default (under `~/.codex-openai-proxy`, namespaced per root). Startup fails if a broad root would contain the default store. Relative `--state-dir` values are resolved against the canonical root. Pointing `--state-dir` back inside the root explicitly lets a writable-sandbox turn modify the store, so keep it outside the root.
 
+The versioned on-disk shape is documented by [protocol/schemas/response-mapping.schema.json](https://github.com/CIVITAS-John/codex-app-server-to-proxy/blob/main/protocol/schemas/response-mapping.schema.json), shipped inside the installed package at `protocol/schemas/response-mapping.schema.json`.
+
 ## Usage metadata
 
-When app-server reports exact counts, the proxy returns standard `prompt_tokens`, `completion_tokens`, and `total_tokens`. It also returns cached-input and reasoning-token detail when available. Missing counts are omitted and are never estimated.
+When app-server reports a complete exact last-turn usage record, the proxy returns standard `prompt_tokens`, `completion_tokens`, and `total_tokens`. It also returns cached-input and reasoning-token detail when available. If app-server reports no complete record, the `usage` object is omitted; unavailable optional details are omitted. Malformed partial records fail instead of being estimated.
 
 ## Safety and local operation
 
 The listener accepts only `127.0.0.1`, `::1`, or `localhost`; configuration normalizes `localhost` to `127.0.0.1`. Every route requires an exact `Host` authority of `localhost`, `127.0.0.1`, or `[::1]`, optionally followed by a valid port. Missing, malformed, non-loopback, DNS-alias, and rebinding-style authorities are rejected. Any request carrying an `Origin` header is rejected, including health requests. Chat Completions accepts only JSON POST bodies, so browser-simple form submissions fail closed.
 
-There is no proxy bearer-token check, so any process running as your local user may be able to call it. Continuation state is private to that user where the platform supports POSIX permissions. See the [security model](docs/security.md) for the threat model, audit boundary, and debug-logging policy.
+There is no proxy bearer-token check, so any process running as your local user may be able to call it. Continuation state is private to that user where the platform supports POSIX permissions. See the [security model](https://github.com/CIVITAS-John/codex-app-server-to-proxy/blob/main/docs/security.md) for the threat model, audit boundary, and debug-logging policy.
 
 The launch directory is the default root for Codex work. Set a narrower boundary when needed:
 
 ```sh
-npx codex-openai-proxy serve --root /absolute/path/to/project
+npx --yes codex-openai-proxy@next serve --root /absolute/path/to/project
 ```
 
-The proxy writes structured JSON logs to stderr. Default logs omit working directories and command details. `--log-level debug` is the opt-in diagnostic mode and may reveal the configured root or redacted app-server diagnostic context, so capture it carefully. Run `npx codex-openai-proxy --help` for all server, timeout, capacity, logging, state, and Codex executable options.
+The proxy writes structured JSON logs to stderr. Default logs omit working directories and command details. `--log-level debug` is the opt-in diagnostic mode and may reveal the configured root or redacted app-server diagnostic context, so capture it carefully. Run `npx --yes codex-openai-proxy@next --help` for all server, timeout, capacity, logging, state, and Codex executable options.
 
 ## Limits and recovery
 
@@ -206,19 +210,44 @@ This proxy implements only the focused Chat Completions subset described above. 
 
 - If `/ready` returns 503, inspect the structured terminal logs for authentication, managed-policy, version, or bounded-restart failures.
 - If startup reports an address conflict, choose another loopback `--port` or stop the process already using it.
-- If a Codex override is rejected, use the package-owned executable or provide a host-executable override whose `codex --version` exactly matches the pinned protocol version.
+- If the package-owned Codex executable is missing, reinstall the package for the current platform. If an override is rejected, remove `--codex-path` or supply an executable whose `--version` output reports exactly `codex-cli 0.144.5`.
+- If login fails or times out, keep the terminal open, retry `serve`, and follow the browser or device-code prompt. Inspect only redacted structured logs before enabling debug output.
 - If a policy request is denied, choose a value permitted by the loaded managed requirements; the proxy will not silently weaken or substitute policy.
 - Use `--log-level debug` only for temporary diagnosis. Debug output is a sensitive-data opt-in and should not be attached to issues without review.
 
+## Uninstall and state cleanup
+
+An `npx` invocation does not create a global package installation. Remove an explicit global or project installation with:
+
+```sh
+npm uninstall --global codex-openai-proxy
+# Or, from a project that installed it locally:
+npm uninstall codex-openai-proxy
+```
+
+Uninstalling does not delete continuation mappings. By default they live under `~/.codex-openai-proxy`, with one directory per canonical `--root`. Stop every proxy using the target root before cleanup. Delete only that root's namespace if other roots must remain, or delete `~/.codex-openai-proxy` to remove all default proxy continuation state. If you supplied `--state-dir`, clean that directory instead. Removing a namespace permanently invalidates its `previous_response_id` values but does not remove Codex's own threads or ChatGPT login.
+
+The namespace name is the first 16 hexadecimal characters of the SHA-256 digest of the canonical absolute root. This command prints it without deleting anything:
+
+```sh
+node -e 'const c=require("node:crypto"),f=require("node:fs");const p=f.realpathSync(process.argv[1]);console.log(c.createHash("sha256").update(p).digest("hex").slice(0,16))' /absolute/path/to/project
+```
+
+Inspect `~/.codex-openai-proxy/<printed-namespace>` before deleting it.
+
 ## Verification modes
 
-`npm ci && npm run check` is the deterministic offline gate. It regenerates the pinned protocol in a temporary tree for comparison, type-checks both Vitest configurations, and runs bounded property and compatibility tests. Required CI runs that gate on Node.js 20, 22, 24, and 26 on Linux and Node.js 24 on macOS and Windows. Coverage and its floors run only on the primary Linux Node.js 24 job and remain enabled by default for local `npm test`.
+`npm ci && npm run check` is the deterministic offline gate. It regenerates the pinned protocol in a temporary tree for comparison, type-checks both Vitest configurations, and runs bounded property and compatibility tests. The required CI definition runs that gate on Node.js 20, 22, 24, and 26 on Linux and Node.js 24 on macOS and Windows. Coverage and its floors run only on the primary Linux Node.js 24 job and remain enabled by default for local `npm test`.
+
+`npm run test:package` builds one tarball, seeds an isolated npm cache from the exact Codex packages already installed by `npm ci`, installs that exact proxy tarball in npm offline mode with lifecycle scripts disabled, and invokes the generated npm bin shim against a local fake app-server. The smoke performs no registry request, login, or live model call; its only HTTP traffic is loopback test traffic. The default command cleans up the tarball. Release automation uses `npm run test:package -- --retain` and publishes the retained, tested file rather than rebuilding from the source directory.
+
+`npm run test:package -- --registry-install` is the separate networked packaging check. It uses an isolated empty cache to fetch the exact runtime and current-platform Codex packages, then runs the same tarball/bin-shim smoke. A dispatch-only three-operating-system workflow keeps this registry availability check outside required offline CI.
 
 `npm run test:live` is a separate opt-in compatibility check using the dedicated live configuration. It is serial, uses only `gpt-5.4-mini`, normally makes five model calls, and has a hard maximum of six. The manual online workflow additionally requires explicit environment authorization and a nonempty `CODEX_ACCESS_TOKEN`; headless execution never prints device-code URLs or codes. It is never a pull-request prerequisite.
 
 ## Project documentation
 
-- [Repository guide](docs/development.md) explains the source layout, development commands, tests, and generated protocol files.
-- [Security model](docs/security.md) records the local threat model and audit decisions.
-- [Implementation plan](plans/README.md) tracks product decisions, completed stages, and remaining work.
-- [App-server protocol reference](docs/codex-app-server.md) is the checked-in upstream protocol reference used during implementation.
+- [Repository guide](https://github.com/CIVITAS-John/codex-app-server-to-proxy/blob/main/docs/development.md) explains the source layout, development commands, tests, and generated protocol files.
+- [Security model](https://github.com/CIVITAS-John/codex-app-server-to-proxy/blob/main/docs/security.md) records the local threat model and audit decisions.
+- [Implementation plan](https://github.com/CIVITAS-John/codex-app-server-to-proxy/blob/main/plans/README.md) tracks product decisions, completed stages, and remaining work.
+- [App-server protocol reference](https://github.com/CIVITAS-John/codex-app-server-to-proxy/blob/main/docs/codex-app-server.md) is the checked-in upstream protocol reference used during implementation.

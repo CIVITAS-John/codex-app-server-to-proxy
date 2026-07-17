@@ -2,39 +2,65 @@
 
 ## Goal
 
-Publish a reproducible npm CLI that a clean machine can install without cloning the repository and drive to a successful local request through the generated npm bin shim.
+Publish a reproducible npm CLI that a clean machine can install without cloning the repository and drive through the generated npm bin shim.
 
-## Baseline from the 2026-07-16 pre-stage review
+## Release decisions
 
-- The offline gate passes locally (18 files, 134 tests). The capacity-release race in `test/http/server.test.ts` was fixed with bounded `/health` polling, and `--help` is now recognized after the `serve` command as well as before it.
-- CI workflows are checked in, but the remote matrix has not yet proven the retained lines: Node.js 20, 22, 24, and 26 on Linux and Node.js 24 on macOS and Windows.
-- `npm pack` currently emits 1,065 files (3.8 MB unpacked) because the `files` allow-list ships both generated protocol TypeScript trees. The runtime imports nothing from `protocol/`; only the JSON Schemas and `protocol/VERSION.json` are user-facing.
-- `package.json` declares MIT but the repository has no LICENSE file, so none would be packed. `repository`, `homepage`, `bugs`, `keywords`, `author`, and a releasable version are absent, and `--version` is unimplemented.
-- The README already covers quick start, curl examples, the tool round trip, the `x_codex` reference, the security model, and troubleshooting, but it is written from the unpublished run-from-repository perspective.
+- The first candidate is `codex-openai-proxy@0.1.0-rc.0`, intended for the npm `next` dist-tag. The stable `latest` tag is not part of the prerelease workflow.
+- npm trusted publishing cannot be configured until the package exists. If `codex-openai-proxy` is still unclaimed, the first `0.1.0-rc.0` publication is a one-time bootstrap: an npm package owner authenticated interactively with 2FA publishes the exact locally tested tarball to `next`, records the exception and artifact evidence, and then configures the trusted publisher. This bootstrap is not OIDC publication and has no workflow provenance.
+- Every candidate after the name-reserving bootstrap uses npm trusted publishing from GitHub Actions. The workflow accepts only a prerelease-shaped `v*-*` tag, requires the tag to equal `v${package.version}`, requires the full remote matrix, and publishes the exact tarball that its packed smoke tested with provenance. Rebuilding at `npm publish` time is forbidden.
+- Runtime support remains Node.js 20 or newer. The retained offline matrix is Node.js 20, 22, 24, and 26 on Linux plus Node.js 24 on macOS and Windows.
+- The exact `@openai/codex 0.144.5` runtime dependency owns default executable resolution and the generated app-server contract. An explicit `--codex-path` override must report the same version. Older and newer Codex executables are rejected until their generated contracts are reviewed and checked in.
+- The npm artifact is limited to `dist`, `README.md`, `LICENSE`, `protocol/schemas`, and `protocol/VERSION.json`. Generated protocol TypeScript, tests, fixtures, coverage, plans, scripts, workflows, and local proxy state are not published.
+- Package installation has no proxy install hook. `prepack` builds the publisher's artifact, but installing it never starts Codex, performs login, or invokes the proxy.
+- Removing or deprecating a package version must not delete `~/.codex-openai-proxy` or a custom `--state-dir`. Persisted mappings remain available to a compatible installed version; an incompatible replacement must provide an explicit migration or refuse the store without rewriting it.
 
-## Work
+These decisions make the prerelease intentionally narrow: users get a reproducible package and pinned protocol, while a Codex upgrade, stable npm promotion, or persistence-format change requires a new reviewed release decision.
 
-1. Prove the checked-in offline CI matrix on GitHub Actions before making packaging claims. This is the carried-over Stage 07 gate; no release step may cite a matrix that has not run green remotely.
-2. Finalize package metadata: `repository`, `homepage`, `bugs`, `keywords`, `author`, and the initial release version. Add the MIT LICENSE file so npm includes it automatically, and enable provenance through trusted publishing from CI rather than local `npm publish`.
-3. Trim the `files` allow-list to `dist`, `README.md`, `protocol/schemas`, and `protocol/VERSION.json`. Verify with `npm pack --dry-run` that the generated TypeScript trees, tests, fixtures, coverage, and local state are absent and that README links into `protocol/` still resolve inside the installed package.
-4. Pin or constrain the supported Codex distribution/version based on Stage 01.
-    - The exact `@openai/codex 0.144.5` runtime dependency now owns default executable resolution and the generated contract. Stage 08 must preserve that pin through packed-install testing and document that `--codex-path` overrides require the same version.
-5. Ensure installation scripts do not execute downloaded binaries or perform login/network activity.
-6. Add `--version`, startup diagnostics, and actionable errors for missing/incompatible Codex, failed login, unavailable port, invalid host, and denied policy. `--help` is already implemented for both argument positions and stays covered by CLI tests.
-7. Test installation from a freshly built tarball in clean Node 20+ environments on each supported OS, including invocation through the generated npm bin shim. Delete stale local tarballs first so no smoke test can run against an old artifact.
-8. Rewrite the end-user README from the published-package perspective: `npx` quick start first, curl examples, tool continuation example, `x_codex` reference, security model, troubleshooting, and uninstall/state cleanup instructions covering the per-root `~/.codex-openai-proxy` store.
-9. Create a release checklist covering schema refresh, changelog, offline suite, packed smoke test, opt-in nano live smoke, dependency audit, provenance, and rollback/deprecation.
-10. Publish a prerelease first. Validate install, login, streaming, every retained Stage 01 feature, usage when reported, and restart continuation before a stable tag.
+## Implemented in the source tree
 
-## Acceptance criteria
+- npm metadata identifies the repository, homepage, issue tracker, author, MIT license, prerelease version, supported Node.js range, CLI bin, and exact Codex runtime dependency.
+- The package allow-list excludes source-only generated protocol trees and retains the request-extension and continuation-state JSON Schemas referenced by the published README.
+- `--version` reports the package version, and `--help` succeeds before or after `serve`.
+- Startup failures retain actionable categories for invalid hosts, unavailable ports, incompatible Codex overrides, authentication failures, and denied managed policy while default logs redact sensitive paths and login data.
+- The deterministic packed-package smoke builds one fresh tarball, seeds an isolated npm cache from the exact Codex packages installed by `npm ci`, installs the proxy tarball in npm offline mode with lifecycle scripts disabled, invokes the generated bin shim, checks package contents and metadata, and uses a local fake Codex executable. It performs no registry request, live model call, proxy login, or non-loopback runtime request. The default cleans the tarball; `--retain` preserves it only after the smoke passes.
+- A separate `--registry-install` mode starts with an isolated empty cache, installs the exact runtime and current-platform Codex packages from npm, validates their versions, and runs the same smoke. Its dispatch-only Linux/macOS/Windows workflow is external registry evidence, not part of required offline CI.
+- The checked-in prerelease workflow first requires the full six-line reusable offline matrix and confirms the package already exists for OIDC. It then verifies the version/tag contract, reruns the offline release gate, runs the packed smoke with `--retain`, uploads the exact tested tarball for 14-day evidence retention, and publishes that file to `next` through the npm environment with provenance.
+- The published-user README now starts with the `npx ...@next` path, documents exact Codex override compatibility, preserves curl and tool-continuation guidance, labels every Codex-specific field as nonstandard, and explains uninstall plus per-root state cleanup.
+- [RELEASE.md](../RELEASE.md) is the evidence checklist and rollback runbook. [CHANGELOG.md](../CHANGELOG.md) records the candidate without claiming it has been published.
 
-- The remote offline CI matrix is green on every retained Node.js and operating-system line.
-- A clean user can install and run the CLI without cloning the repository.
-- `npm pack --dry-run` contains only `dist`, the README, the LICENSE, the protocol JSON Schemas, and `protocol/VERSION.json` — no generated TypeScript trees, credentials, fixtures with private data, or local state.
-- Published package metadata resolves: the repository link, license, and provenance attestation are verifiable from the npm registry entry.
-- `--version` reports the package version, and `--help` prints usage from either argument position with exit code 0.
-- Packed-install smoke tests pass on macOS, Linux, and Windows with Node 20+.
-- The packed CLI starts through its installed npm bin shim; source-tree invocation alone is not sufficient evidence.
-- One manual prerelease smoke uses only `gpt-5.4-mini`, declares its expected maximum call count before execution, and records its exact call count.
-- The README accurately labels every compatibility extension and known limitation, and documents uninstall and state cleanup.
-- The release can be rolled back or deprecated without stranding persisted thread mappings.
+## Local evidence from 2026-07-16
+
+- `npm run check` passed 19 offline test files and 155 tests with all coverage thresholds satisfied.
+- `npm run test:package` passed the fresh-tarball install, generated-bin version/help/start, health/readiness, and one synthetic Chat Completions response with zero model calls.
+- `npm pack --dry-run --json --ignore-scripts` reported exactly 51 files, 71,939 bytes packed, and 295,941 bytes unpacked, limited to the documented artifact set plus npm-generated package metadata after the final published README revision.
+- `npm run test:package -- --registry-install` also passed locally against an isolated empty cache; the remote three-operating-system dispatch remains pending.
+
+These local results prove source-tree mechanics for this candidate. They do not prove npm publication, provenance, or remote platform compatibility.
+
+## External evidence still required
+
+- The GitHub Actions offline matrix must finish green on every retained Node.js and operating-system line. A checked-in workflow is not evidence of a remote pass.
+- The dispatch-only registry-backed package smoke must pass on clean macOS, Linux, and Windows runners with Node.js 24. Its results are separate from the required offline matrix.
+- The registry-facing dependency audit must complete against current npm advisory data.
+- The opt-in live smoke must be explicitly authorized, use only `gpt-5.4-mini`, state the expected normal count of five model calls and maximum of six before execution, and record the exact count afterward.
+- If the package name is unclaimed, the one-time owner/2FA bootstrap must be recorded and the trusted publisher configured immediately afterward. Otherwise the candidate must be published through trusted publishing. In both cases its repository, license, tarball integrity, and `next` dist-tag must be verified; provenance is required for every OIDC-published candidate but cannot be claimed for the manual bootstrap.
+- Install, login, streaming, the retained Stage 01 behaviors, usage when reported, and completed-thread continuation across a proxy/app-server restart must be verified from the published prerelease.
+- A stable version and stable-promotion workflow remain pending. Do not move `latest` until prerelease evidence is accepted; the Stage 08 prerelease workflow intentionally cannot publish a stable version.
+
+No remote CI, live, registry, provenance, or stable-promotion result is recorded as passing in this document.
+
+## Acceptance status
+
+| Criterion | Status |
+| --- | --- |
+| Publishable package metadata, license, narrow allow-list, exact Codex pin, `--version`, and published-user docs | Local gate passed |
+| Fresh tarball installation and generated npm bin shim | Local offline smoke passed; remote OS evidence pending |
+| Remote offline Node.js/OS matrix | Pending external evidence |
+| Opt-in `gpt-5.4-mini` live smoke with exact call record | Pending explicit authorization |
+| npm `next` publication, metadata, and integrity | Pending registry publication or one-time bootstrap |
+| Trusted-publishing provenance | Pending for the first OIDC-published candidate; not available for a manual bootstrap |
+| Stable `latest` promotion | Pending prerelease acceptance and a stable workflow decision |
+| Rollback/deprecation without stranding persisted mappings | Runbook defined; exercise only if a published release needs intervention |
+
+Stage 08 source implementation and local acceptance commands are complete. The release itself remains incomplete until every applicable external item in [RELEASE.md](../RELEASE.md) has dated evidence.

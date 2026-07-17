@@ -20,6 +20,16 @@ import { redact } from "../core/redact.js";
 /** Identifies this proxy to app-server during initialization. */
 export const CLIENT_NAME = "codex-openai-proxy";
 
+/** Minimal proxy package metadata used in public version diagnostics. */
+interface ProxyPackageMetadata {
+  version: string;
+}
+
+/** Version of this proxy package and app-server client. */
+export const CLIENT_VERSION = (
+  createRequire(import.meta.url)("../../package.json") as ProxyPackageMetadata
+).version;
+
 /** Package metadata that owns the runtime and generated protocol version. */
 interface CodexPackageMetadata {
   version: string;
@@ -147,7 +157,7 @@ export async function startAppServer(
         clientInfo: {
           name: CLIENT_NAME,
           title: "Codex OpenAI proxy",
-          version: "0.0.0",
+          version: CLIENT_VERSION,
         },
         capabilities: { experimentalApi: true },
       },

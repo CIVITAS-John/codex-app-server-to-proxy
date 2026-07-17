@@ -11,7 +11,12 @@ import {
   type RedactionContext,
 } from "../core/logger.js";
 import { createProxyServer } from "../http/server.js";
-import { startAppServer, type AppServer } from "../app-server/app-server.js";
+import {
+  CLIENT_VERSION,
+  PINNED_CODEX_VERSION,
+  startAppServer,
+  type AppServer,
+} from "../app-server/app-server.js";
 import { ensureAuthenticated } from "../app-server/auth.js";
 
 /** Delays before bounded app-server restart attempts after an unexpected exit. */
@@ -23,6 +28,8 @@ export const APP_SERVER_RECOVERY_DELAYS_MS = [
 export const usage = `Usage: codex-openai-proxy serve [options]
 
 Options:
+  --version                     Print the proxy version
+  --help                        Print this help
   --host <host>                 Loopback host (default: 127.0.0.1)
   --port <port>                 TCP port, or 0 for an ephemeral port (default: 8787)
   --root <directory>            Allowed working-directory root (default: launch directory)
@@ -41,6 +48,10 @@ Options:
 export async function run(argv: readonly string[]): Promise<number> {
   if (argv.length === 0 || argv.includes("--help") || argv.includes("-h")) {
     process.stdout.write(`${usage}\n`);
+    return 0;
+  }
+  if (argv.includes("--version")) {
+    process.stdout.write(`${CLIENT_VERSION}\n`);
     return 0;
   }
   if (argv[0] !== "serve")
@@ -74,6 +85,8 @@ async function runServer(options: ServeOptions, log: Logger): Promise<number> {
   const proxy = createProxyServer(options, log);
   const address = await proxy.listen();
   log("info", "server_listening", {
+    proxy_version: CLIENT_VERSION,
+    codex_version: PINNED_CODEX_VERSION,
     host: address.address,
     port: address.port,
     default_sandbox: "read-only",
@@ -223,7 +236,10 @@ async function runServer(options: ServeOptions, log: Logger): Promise<number> {
     throw error;
   }
   // Announce readiness only after shutdown handlers can observe an immediate signal.
-  log("info", "app_server_ready");
+  log("info", "app_server_ready", {
+    proxy_version: CLIENT_VERSION,
+    codex_version: PINNED_CODEX_VERSION,
+  });
   try {
     return await shutdown;
   } finally {

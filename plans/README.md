@@ -10,7 +10,7 @@ This directory is the source of truth for product decisions, implementation stat
 - Ship only an npm CLI named `codex-openai-proxy`.
 - Bind only to localhost/loopback and require no proxy bearer token.
 - Spawn and supervise `codex app-server` as a child process.
-- Prefer bundling or depending on a supported Codex npm distribution; otherwise discover the executable and provide installation guidance.
+- Depend on exact `@openai/codex 0.144.5` for default executable resolution and the generated contract. An explicit `--codex-path` override must report that same version; older and newer executables are rejected until their contracts are reviewed.
 - Use persisted Codex threads behind the additive `previous_response_id` continuation field.
 - Support text, exposed reasoning, tool calls, tool results, and token usage streaming.
 - Support client-defined dynamic tools across multiple HTTP requests. Keep the app-server tool request pending for the short client round trip, as with a locally executed tool.
@@ -27,6 +27,9 @@ This directory is the source of truth for product decisions, implementation stat
 - Group maintained source by CLI, core, app-server, HTTP, and continuation domains, and mirror those domains under `test/` alongside contract, spike, and shared-support folders.
     - Keep `src/bin.ts` as the root executable shim so compilation continues to publish the CLI at `dist/bin.js`; the restructure changes contributor-facing paths but not the package bin contract.
 - Use mocks by default and only `gpt-5.4-mini` for opt-in live development tests.
+- Reserve the npm package name with one interactive package-owner/2FA publication of the exact tested `0.1.0-rc.0` tarball to `next` only if the package does not yet exist; record that no OIDC provenance is available for this bootstrap. Configure trusted publishing immediately afterward and require every later candidate to publish its exact tested tarball through OIDC. The prerelease workflow rejects stable versions and must not move `latest`.
+- Treat npm deprecation and dist-tag changes as interactive package-owner operations protected by 2FA. Trusted-publishing OIDC authority is limited to publication and does not authorize rollback registry mutations.
+- Preserve per-root continuation state across uninstall, deprecation, and rollback. A persistence-incompatible release must migrate explicitly or leave the prior compatible package available; package lifecycle actions never delete the store.
 
 ## Stage map
 
@@ -43,9 +46,23 @@ This directory is the source of truth for product decisions, implementation stat
 
 ## Current status
 
-Stages 01 through 06 are complete. Stage 07 implementation is complete in the source tree, and its deterministic offline gate passes locally on Node.js 20.19.1; the checked-in CI matrix must still prove the retained Node.js and operating-system lines. The expanded live contract now names three scenarios, normally makes five `gpt-5.4-mini` calls, and enforces a six-call maximum, but it remains awaiting an explicitly authorized run. The most recent live result is the 2026-07-14 two-scenario run under the prior four-call guard: streaming role history, then a function-tool round trip followed by completed-thread continuation after restarting both the proxy and app-server. Stage 08 owns packed-tarball installation and bin-shim proof.
+### Implemented locally
 
-Stage 01 and Stage 02 coverage now runs as type-checked TypeScript through Vitest. The files are split by protocol contract, continuation behavior, offline spike, configuration, HTTP server, and CLI lifecycle. The checked-in default configuration selects offline tests and excludes opt-in live-test filenames. This is a development-only compatibility change: it does not alter the Node.js 20+ runtime or the CLI/API contract, but contributors and CI must use the TypeScript and Vitest configurations.
+Stages 01 through 07 are implemented in the source tree. Stage 08 adds the prerelease package metadata and license, narrow npm allow-list, package-derived `--version`, deterministic fresh-tarball/bin-shim smoke, trusted-publishing prerelease workflow, published-user README, changelog, and release/rollback checklist. The exact Codex dependency and generated contract remain pinned to `0.144.5`.
+
+The default TypeScript/Vitest configuration is deterministic and offline; opt-in live-test filenames are excluded. The expanded live contract names three scenarios, normally makes five `gpt-5.4-mini` calls, and enforces a six-call maximum. On 2026-07-16, `npm run check` passed 19 files and 155 tests with coverage thresholds, the offline `npm run test:package` and local `--registry-install` mode passed, and the final dry pack contained 51 files at 71,939 bytes packed and 295,941 bytes unpacked.
+
+Local implementation is not evidence that npm, GitHub Actions, or every supported platform accepted the candidate. [Stage 08](08-packaging-and-release.md) records the local acceptance evidence separately from the pending external gates.
+
+### External evidence pending
+
+- The checked-in offline CI matrix still must finish green remotely on Node.js 20, 22, 24, and 26 on Linux and Node.js 24 on macOS and Windows.
+- The dispatch-only registry-backed package smoke still must pass on remote Linux, macOS, and Windows runners; this networked evidence is not part of required offline CI.
+- The expanded live contract still awaits an explicitly authorized run with the expected normal count of five `gpt-5.4-mini` calls, maximum of six, and an exact recorded count. Earlier repository notes describe a 2026-07-14 two-scenario run under a prior four-call guard, but they do not record an exact call count, commit, or workflow URL and are not Stage 08 release evidence.
+- The npm prerelease, registry metadata, integrity, and `next` dist-tag still must be verified after publication. If name reservation requires the documented owner/2FA bootstrap, that first artifact will not have OIDC provenance; the trusted publisher and provenance must be verified with the next candidate.
+- Stable publication is intentionally not implemented by the prerelease workflow. A reviewed stable path and accepted prerelease evidence are required before `latest` moves.
+
+No remote CI, live, npm publication, provenance, or stable-promotion check is claimed as passing here. The evidence procedure is [RELEASE.md](../RELEASE.md).
 
 ## Cross-stage rules
 

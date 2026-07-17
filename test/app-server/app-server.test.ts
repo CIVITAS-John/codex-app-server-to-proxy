@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { test } from "vitest";
 import {
+  CLIENT_VERSION,
   PINNED_CODEX_VERSION,
   resolveCodexExecutable,
   resolveCodexInvocation,
@@ -195,10 +196,11 @@ rl.on('line', line => {
       assert.equal(messages[1]?.method, "initialized");
       const params = messages[0]?.params as {
         capabilities: Record<string, unknown>;
-        clientInfo: { name: string };
+        clientInfo: { name: string; version: string };
       };
       assert.deepEqual(params.capabilities, { experimentalApi: true });
       assert.equal(params.clientInfo.name, "codex-openai-proxy");
+      assert.equal(params.clientInfo.version, CLIENT_VERSION);
       assert.deepEqual(messages[2], {
         id: 2,
         method: "configRequirements/read",

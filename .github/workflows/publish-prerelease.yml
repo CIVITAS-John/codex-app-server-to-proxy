@@ -1,0 +1,81 @@
+name: Publish npm prerelease
+
+on:
+  push:
+    tags: ["v*-*"]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-prerelease-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  offline:
+    name: Run the full offline matrix
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Validate and publish with provenance
+    needs: offline
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/codex-openai-proxy
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm ci
+      - name: Validate prerelease tag and package version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node --input-type=module -e '
+            import assert from "node:assert/strict";
+            import { readFile } from "node:fs/promises";
+            const pkg = JSON.parse(await readFile("package.json", "utf8"));
+            assert.match(pkg.version, /^\d+\.\d+\.\d+-[0-9A-Za-z.-]+$/, "package version must be a prerelease");
+            assert.equal(process.env.RELEASE_TAG, `v${pkg.version}`, "tag must exactly match package version");
+          '
+      - name: Run offline release gate
+        run: npm run check
+      - name: Verify npm package bootstrap
+        shell: bash
+        run: |
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          VIEW_ERROR="$RUNNER_TEMP/npm-view-error.log"
+          if npm view "$PACKAGE_NAME" name --json >/dev/null 2>"$VIEW_ERROR"; then
+            exit 0
+          fi
+          if grep -q "E404" "$VIEW_ERROR"; then
+            echo "::error::${PACKAGE_NAME} does not exist on npm. Bootstrap its first release manually, then configure this workflow as its trusted publisher."
+            exit 1
+          fi
+          echo "::error::Unable to verify ${PACKAGE_NAME} on npm because of a registry, network, or authentication failure. This is not a first-release bootstrap signal."
+          exit 1
+      - name: Test and retain the packed npm CLI
+        id: packed
+        shell: bash
+        run: |
+          PACKAGE_TARBALL=$(node -p "const p=require('./package.json'); p.name + '-' + p.version + '.tgz'")
+          npm run test:package -- --retain
+          test -f "$PACKAGE_TARBALL"
+          echo "tarball=./$PACKAGE_TARBALL" >> "$GITHUB_OUTPUT"
+      - name: Retain the tested npm tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball-${{ github.ref_name }}
+          path: ${{ steps.packed.outputs.tarball }}
+          if-no-files-found: error
+          retention-days: 14
+      - name: Publish prerelease through npm trusted publishing
+        run: npm publish "${{ steps.packed.outputs.tarball }}" --provenance --tag next --access public

@@ -11,7 +11,10 @@ import {
   run,
   usage,
 } from "../../src/cli/cli.js";
-import { PINNED_CODEX_VERSION } from "../../src/app-server/app-server.js";
+import {
+  CLIENT_VERSION,
+  PINNED_CODEX_VERSION,
+} from "../../src/app-server/app-server.js";
 import { repoRootPath } from "../support/repo-root.js";
 import {
   protocolAuthenticatedAccountResponse,
@@ -136,6 +139,10 @@ test("CLI help and unsafe configuration are handled in-process", async () => {
     assert.match(String(stdout.mock.calls[0]?.[0]), /Usage:/);
     assert.equal(await run(["serve", "--help"]), 0);
     assert.match(String(stdout.mock.calls[1]?.[0]), /Usage:/);
+    assert.equal(await run(["--version"]), 0);
+    assert.equal(stdout.mock.calls[2]?.[0], `${CLIENT_VERSION}\n`);
+    assert.equal(await run(["serve", "--version"]), 0);
+    assert.equal(stdout.mock.calls[3]?.[0], `${CLIENT_VERSION}\n`);
     await assert.rejects(run(["unknown"]), /Unknown command/);
     const missingRoot = join(
       tmpdir(),
@@ -342,6 +349,11 @@ rl.on('line', line => {
     assert.match(stderr, /shutdown_complete/);
     assert.match(stderr, /"default_sandbox":"read-only"/);
     assert.match(stderr, /"default_web_search":"disabled"/);
+    assert.equal(stderr.includes(`"proxy_version":"${CLIENT_VERSION}"`), true);
+    assert.equal(
+      stderr.includes(`"codex_version":"${PINNED_CODEX_VERSION}"`),
+      true,
+    );
     assert.equal(stderr.includes(repoRootPath), false);
     await rm(directory, { recursive: true });
   },
