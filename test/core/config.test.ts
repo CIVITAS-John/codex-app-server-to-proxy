@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { realpathSync } from "node:fs";
-import { mkdir, symlink } from "node:fs/promises";
+import { mkdir, realpath, symlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, sep } from "node:path";
 import { test } from "vitest";
@@ -54,7 +54,9 @@ test("serve options have safe documented defaults and reject ambiguity", async (
     const projectLink = join(directory, "project-link");
     await mkdir(project);
     await symlink(project, projectLink, "dir");
-    const canonicalProject = realpathSync(project);
+    // Match the promise-based canonicalization used by resolveServeOptions;
+    // Windows may spell the same path differently in sync and async realpath.
+    const canonicalProject = await realpath(project);
     const parsed = parseServeOptions([], project);
     assert.equal(parsed.host, "127.0.0.1");
     assert.equal(parsed.port, 8787);

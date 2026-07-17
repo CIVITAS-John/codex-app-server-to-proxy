@@ -301,9 +301,11 @@ async function stopChild(
   timeoutMs: number,
 ): Promise<void> {
   rpc.close(new Error("proxy shutting down"));
-  child.stdin.end();
   if (child.exitCode !== null || child.signalCode !== null) return;
+  // Signal before closing stdin so a child cannot observe EOF and exit before
+  // its graceful-shutdown handler runs, which is especially racy on Linux.
   child.kill("SIGTERM");
+  child.stdin.end();
   await withDeadline(
     undefined,
     {
