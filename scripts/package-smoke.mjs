@@ -166,6 +166,23 @@ async function waitForEvent(readStderr, event, timeoutMs = 15_000) {
   throw new Error(`Timed out waiting for ${event}:\n${readStderr()}`);
 }
 
+/** Waits for child exit without missing an event that already fired. */
+async function waitForExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  let timer;
+  try {
+    return await Promise.race([
+      once(child, "exit").then(() => true),
+      new Promise((resolve) => {
+        // Keep this deadline referenced so top-level cleanup always settles.
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Stops the shim process and its child process tree on every supported OS. */
 async function stopShim(child) {
   if (child.exitCode !== null || child.signalCode !== null) return;
@@ -176,11 +193,10 @@ async function stopShim(child) {
   } else {
     child.kill("SIGTERM");
   }
-  await Promise.race([
-    once(child, "exit"),
-    delay(5_000, undefined, { ref: false }),
-  ]);
-  if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  if (await waitForExit(child, 5_000)) return;
+  child.kill("SIGKILL");
+  if (!(await waitForExit(child, 5_000)))
+    throw new Error("Installed package shim did not stop.");
 }
 
 /** Creates a deterministic fake for the installed package-owned Codex binary. */
