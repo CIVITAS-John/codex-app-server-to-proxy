@@ -21,6 +21,23 @@ export class HttpError extends Error {
   }
 }
 
+/** Builds the OpenAI-compatible error envelope shared by JSON and SSE output. */
+export function errorEnvelope(
+  message: string,
+  type: ErrorType,
+  code: string,
+  param: string | null,
+): Record<string, unknown> {
+  return {
+    error: {
+      message,
+      type,
+      param,
+      code,
+    },
+  };
+}
+
 /** Builds a tool-correlation error using its narrow status-to-type policy. */
 export function toolCorrelationErrorForStatus(
   status: number,
@@ -60,12 +77,9 @@ export function writeJson(
 
 /** Serializes an HttpError in the OpenAI error envelope. */
 export function writeError(response: ServerResponse, error: HttpError): void {
-  writeJson(response, error.status, {
-    error: {
-      message: error.message,
-      type: error.type,
-      param: error.param,
-      code: error.code,
-    },
-  });
+  writeJson(
+    response,
+    error.status,
+    errorEnvelope(error.message, error.type, error.code, error.param),
+  );
 }
