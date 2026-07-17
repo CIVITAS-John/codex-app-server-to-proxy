@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { JsonRpcTransport } from "../app-server/json-rpc.js";
 import { HttpError, writeJson } from "./errors.js";
 import type { Logger } from "../core/logger.js";
+import { record } from "../core/canonical.js";
 import {
   PolicyError,
   policyBindingHash,
@@ -1571,13 +1572,6 @@ function invalid(message: string, param: string | null): never {
     "invalid_request",
     param,
   );
-}
-
-/** Narrows an unknown value to a record when possible. */
-function record(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
 }
 
 /** Requires an app-server response object. */

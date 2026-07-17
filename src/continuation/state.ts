@@ -38,6 +38,8 @@ export interface ThreadBinding {
 export interface ResponseRecord extends ThreadBinding {
   responseId: string;
   threadId: string;
+  // `corrupt` is a fail-closed persisted sentinel retained for compatibility and
+  // future corruption marking even though current writes do not assign it.
   state: "ready" | "pending_tool" | "expired" | "superseded" | "corrupt";
   createdAt: number;
   expiresAt: number;

@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import type { Writable, Readable } from "node:stream";
 import { createInterface } from "node:readline";
+import { record } from "../core/canonical.js";
 
 /** JSON-RPC error object accepted by respondError. */
 export interface RpcErrorData {
@@ -14,7 +15,6 @@ export class RpcError extends Error {
   constructor(
     public readonly rpcCode: number,
     message: string,
-    public readonly rpcData?: unknown,
   ) {
     super(message);
     this.name = "RpcError";
@@ -131,44 +131,39 @@ export class JsonRpcTransport extends EventEmitter {
       this.close(new Error("app-server emitted malformed JSON"));
       return;
     }
-    if (!isRecord(value)) {
+    const message = record(value);
+    if (!message) {
       this.emit("malformed", line);
       return;
     }
     if (
-      (typeof value.id === "number" || typeof value.id === "string") &&
-      ("result" in value || "error" in value)
+      (typeof message.id === "number" || typeof message.id === "string") &&
+      ("result" in message || "error" in message)
     ) {
       const pending =
-        typeof value.id === "number" ? this.#pending.get(value.id) : undefined;
+        typeof message.id === "number"
+          ? this.#pending.get(message.id)
+          : undefined;
       if (!pending) return;
-      this.#pending.delete(value.id as number);
-      if (isRecord(value.error) && typeof value.error.code === "number")
+      this.#pending.delete(message.id as number);
+      const error = record(message.error);
+      if (error && typeof error.code === "number")
         pending.reject(
-          new RpcError(
-            value.error.code,
-            String(value.error.message ?? "JSON-RPC error"),
-            value.error.data,
-          ),
+          new RpcError(error.code, String(error.message ?? "JSON-RPC error")),
         );
-      else pending.resolve(value.result);
+      else pending.resolve(message.result);
       return;
     }
-    if (typeof value.method !== "string") {
+    if (typeof message.method !== "string") {
       this.emit("malformed", line);
       return;
     }
-    if (typeof value.id === "number" || typeof value.id === "string")
+    if (typeof message.id === "number" || typeof message.id === "string")
       this.emit("request", {
-        id: value.id,
-        method: value.method,
-        params: value.params,
+        id: message.id,
+        method: message.method,
+        params: message.params,
       } satisfies ServerRequest);
-    else this.emit("notification", value.method, value.params);
+    else this.emit("notification", message.method, message.params);
   }
-}
-
-/** Narrows parsed JSON values to non-array objects. */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -24,6 +24,16 @@ export interface Logger {
   failure(event: string, fields: Record<string, unknown>, error: unknown): void;
 }
 
+/** Writes an unconfigured startup failure using the standard log envelope. */
+export function writeStartupError(error: unknown): void {
+  defaultWriter({
+    time: new Date().toISOString(),
+    level: "error",
+    event: "startup_failed",
+    error: error instanceof Error ? error.message : String(error),
+  });
+}
+
 /** Creates a structured logger filtered at the configured level. */
 export function createLogger(
   level: LogLevel,

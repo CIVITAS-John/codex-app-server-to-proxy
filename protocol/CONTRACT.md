@@ -51,7 +51,7 @@ The nonstandard direct compatibility result shape is:
 
 ## Errors and continuation invariants
 
-Errors use `{"error":{"message":"...","type":"invalid_request_error|conflict_error|server_error","param":"field or null","code":"stable_code"}}`. `protocol/fixtures/continuation-cases.json` freezes the continuation statuses and codes. A rejection is read-only: it must not mutate the mapping, invoke `turn/start`, or invoke `thread/start`.
+Errors use `{"error":{"message":"...","type":"invalid_request_error|conflict_error|server_error","param":"field or null","code":"stable_code"}}`. Maintained HTTP continuation tests pin continuation statuses, codes, and the absence of thread or turn work. A rejection does not invoke `turn/start` or `thread/start`; lookup may persist a lazy transition to expired.
 
 Response IDs are `chatcmpl_codex_` plus at least 128 bits of URL-safe cryptographic randomness. The unreleased schema-version-0 store follows `schemas/response-mapping.schema.json`: it contains a wrapper version and flattened response records with thread bindings, lifecycle state, creation/expiry times, and optional dynamic-tool call IDs. The newest completed response ID is stored per thread; any older ID is superseded and branching is rejected. `thread/fork(lastTurnId)` remains unproven and is not a v1 feature.
 

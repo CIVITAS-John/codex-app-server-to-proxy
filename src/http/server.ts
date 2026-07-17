@@ -329,6 +329,16 @@ function isAllowedHost(host: string | undefined): boolean {
   return Number.isInteger(port) && port >= 1 && port <= 65_535;
 }
 
+/** Creates the stable error returned when a request body exceeds its limit. */
+function bodyTooLargeError(): HttpError {
+  return new HttpError(
+    413,
+    "Request body is too large.",
+    "invalid_request_error",
+    "body_too_large",
+  );
+}
+
 /** Reads and parses a size-limited, abortable JSON request body. */
 async function readJsonBody(
   request: IncomingMessage,
@@ -336,13 +346,7 @@ async function readJsonBody(
   signal: AbortSignal,
 ): Promise<unknown> {
   const declared = Number(request.headers["content-length"]);
-  if (Number.isFinite(declared) && declared > limit)
-    throw new HttpError(
-      413,
-      "Request body is too large.",
-      "invalid_request_error",
-      "body_too_large",
-    );
+  if (Number.isFinite(declared) && declared > limit) throw bodyTooLargeError();
   const chunks = await new Promise<Buffer[]>((resolve, reject) => {
     const result: Buffer[] = [];
     let size = 0;
@@ -361,14 +365,7 @@ async function readJsonBody(
       const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
       size += chunk.length;
       if (size > limit) {
-        fail(
-          new HttpError(
-            413,
-            "Request body is too large.",
-            "invalid_request_error",
-            "body_too_large",
-          ),
-        );
+        fail(bodyTooLargeError());
         return;
       }
       result.push(chunk);
