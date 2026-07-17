@@ -18,8 +18,13 @@ import { fileURLToPath } from "node:url";
 /** Repository root containing the package under test. */
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-/** Platform-specific npm executable. */
-const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+/** npm invocation inherited from npm run, with a direct-execution fallback. */
+const npmInvocation = process.env.npm_execpath
+  ? { command: process.execPath, prefixArgs: [process.env.npm_execpath] }
+  : {
+      command: process.platform === "win32" ? "npm.cmd" : "npm",
+      prefixArgs: [],
+    };
 
 /** Spawns a command, routing Windows command shims through cmd.exe explicitly. */
 function spawnCommand(command, args, options = {}) {
@@ -88,6 +93,15 @@ async function run(command, args, options = {}) {
       `${command} ${args.join(" ")} failed (${code ?? signal}):\n${stderr}${stdout}`,
     );
   return { stdout, stderr };
+}
+
+/** Runs npm without relying on Windows command-shim path resolution. */
+async function runNpm(args, options = {}) {
+  return await run(
+    npmInvocation.command,
+    [...npmInvocation.prefixArgs, ...args],
+    options,
+  );
 }
 
 /** Recursively lists package-relative regular files below one path. */
@@ -256,13 +270,11 @@ async function main() {
   try {
     reportPhase("building distributable");
     await removeStaleTarball(expectedTarballName);
-    await run(npmCommand, ["run", "build"], { env: npmEnvironment });
+    await runNpm(["run", "build"], { env: npmEnvironment });
     reportPhase("packing and inspecting exact contents");
-    const packed = await run(
-      npmCommand,
-      ["pack", "--json", "--ignore-scripts"],
-      { env: npmEnvironment },
-    );
+    const packed = await runNpm(["pack", "--json", "--ignore-scripts"], {
+      env: npmEnvironment,
+    });
     const packResult = JSON.parse(packed.stdout)[0];
     assert.equal(packResult.filename, expectedTarballName);
     const expectedFiles = new Set([
@@ -309,8 +321,7 @@ async function main() {
     if (!registryInstall) {
       reportPhase("seeding isolated cache from installed Codex packages");
       for (const packageRoot of [sourceCodexRoot, platformCodexRoot]) {
-        const seedPack = await run(
-          npmCommand,
+        const seedPack = await runNpm(
           [
             "pack",
             packageRoot,
@@ -326,7 +337,7 @@ async function main() {
           JSON.parse(seedPack.stdout)[0].filename,
         );
         codexSeedTarballs.push(seedTarball);
-        await run(npmCommand, ["cache", "add", seedTarball], {
+        await runNpm(["cache", "add", seedTarball], {
           env: npmEnvironment,
         });
       }
@@ -336,8 +347,7 @@ async function main() {
         ? "installing tarball and native Codex package from the registry"
         : "installing tarball from the isolated cache",
     );
-    await run(
-      npmCommand,
+    await runNpm(
       [
         "install",
         "--ignore-scripts",
