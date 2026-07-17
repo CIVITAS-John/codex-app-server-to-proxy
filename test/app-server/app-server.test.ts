@@ -26,6 +26,17 @@ const testWithPosixExecutable = test.skipIf(process.platform === "win32");
 /** Complete generated server requests embedded in the fail-closed fake. */
 const embeddedDeclinedRequests = JSON.stringify([
   protocolServerRequest({
+    id: "input",
+    method: "item/tool/requestUserInput",
+    params: {
+      threadId: "thread_decline",
+      turnId: "turn_decline",
+      itemId: "item_input",
+      questions: [],
+      autoResolutionMs: null,
+    },
+  }),
+  protocolServerRequest({
     id: "elicit",
     method: "mcpServer/elicitation/request",
     params: {
@@ -98,6 +109,8 @@ const embeddedDeclinedRequests = JSON.stringify([
       parsedCmd: [{ type: "unknown", cmd: "pwd" }],
     },
   }),
+  // This deliberately unknown method verifies the generic fail-closed response.
+  { id: "unknown", method: "__proto__", params: {} },
 ]);
 
 test("default Codex resolution uses the package-owned executable", () => {
@@ -186,6 +199,10 @@ let initialized = false;`,
         });
         const response = (id: string): Record<string, unknown> | undefined =>
           messages.find((message) => message.id === id);
+        assert.deepEqual(response("input"), {
+          id: "input",
+          result: { answers: {} },
+        });
         assert.deepEqual(response("elicit"), {
           id: "elicit",
           result: { action: "decline", content: null },
@@ -204,6 +221,10 @@ let initialized = false;`,
             id,
             result: { decision: "denied" },
           });
+        assert.deepEqual(response("unknown"), {
+          id: "unknown",
+          error: { code: -32601, message: "Unsupported server request" },
+        });
         app.child.stderr.emit("data", `${homedir()}/private-file`);
         assert.doesNotMatch(logs.join(""), new RegExp(homedir()));
         assert.match(logs.join(""), /\[REDACTED_HOME\]/);
@@ -211,6 +232,31 @@ let initialized = false;`,
         await app.stop();
       }
     }, "app-server-test-");
+  },
+);
+
+testWithPosixExecutable(
+  "app-server bounds a Codex version check that never exits",
+  async () => {
+    await withTempDir(async (directory) => {
+      const executable = join(directory, "codex");
+      await writeFile(
+        executable,
+        `#!${process.execPath}\nsetInterval(() => {}, 1_000);\n`,
+        "utf8",
+      );
+      await chmod(executable, 0o755);
+      await assert.rejects(
+        startAppServer({
+          codexPath: executable,
+          root: directory,
+          startupTimeoutMs: 20,
+          shutdownTimeoutMs: 100,
+          log: silentLogger,
+        }),
+        /Codex version check timed out/,
+      );
+    }, "app-server-version-timeout-test-");
   },
 );
 

@@ -21,6 +21,22 @@ export class HttpError extends Error {
   }
 }
 
+/** Builds a tool-correlation error using its narrow status-to-type policy. */
+export function toolCorrelationErrorForStatus(
+  status: number,
+  message: string,
+  code: string,
+  param: string | null,
+): HttpError {
+  const type: ErrorType =
+    status >= 500
+      ? "server_error"
+      : status === 409
+        ? "conflict_error"
+        : "invalid_request_error";
+  return new HttpError(status, message, type, code, param);
+}
+
 /** Writes a non-cacheable JSON response unless it has already ended. */
 export function writeJson(
   response: ServerResponse,

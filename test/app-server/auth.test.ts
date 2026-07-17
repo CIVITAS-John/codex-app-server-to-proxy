@@ -219,3 +219,35 @@ test("authentication supports cancellation and timeout", async () => {
     /timed out/,
   );
 });
+
+test("authentication records timeout while allowing browser launch to finish", async () => {
+  let finishLaunch!: () => void;
+  const launch = new Promise<void>((resolve) => {
+    finishLaunch = resolve;
+  });
+  let settled = false;
+  const authentication = ensureAuthenticated({
+    rpc: fakeRpc("timeout"),
+    log: silentLogger,
+    timeoutMs: 1,
+    interactive: true,
+    terminal: () => {},
+    launch: async () => {
+      await launch;
+      return true;
+    },
+  });
+  void authentication.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+
+  await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  assert.equal(settled, false);
+  finishLaunch();
+  await assert.rejects(authentication, /timed out/);
+});

@@ -11,6 +11,8 @@ import {
 import { join, win32 } from "node:path";
 import { test } from "vitest";
 import {
+  SANDBOX_MODES,
+  WEB_SEARCH_MODES,
   PolicyError,
   UNRESTRICTED_POLICY_REQUIREMENTS,
   canonicalizeRoot,
@@ -30,19 +32,10 @@ import {
 import { withTempDir } from "../support/temp.js";
 
 /** Every sandbox exposed by the public x_codex extension. */
-const sandboxes: SandboxMode[] = [
-  "read-only",
-  "workspace-write",
-  "danger-full-access",
-];
+const sandboxes: SandboxMode[] = [...SANDBOX_MODES];
 
 /** Every web-search mode enforceable by the pinned app-server. */
-const webSearchModes: WebSearchMode[] = [
-  "disabled",
-  "cached",
-  "indexed",
-  "live",
-];
+const webSearchModes: WebSearchMode[] = [...WEB_SEARCH_MODES];
 
 /** Returns an unrestricted baseline with selected managed fields overridden. */
 function requirements(

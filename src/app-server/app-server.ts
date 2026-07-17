@@ -16,6 +16,7 @@ import {
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { redact } from "../core/redact.js";
+import { listenForAbort, withDeadline } from "../core/abort.js";
 
 /** Identifies this proxy to app-server during initialization. */
 export const CLIENT_NAME = "codex-openai-proxy";
@@ -233,41 +234,45 @@ async function verifyCodex(
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
-  const onAbort = (): void => {
-    child.kill("SIGKILL");
-  };
-  externalSignal?.addEventListener("abort", onAbort, { once: true });
-  try {
-    await waitForSpawn(child, externalSignal);
-  } catch (error) {
-    externalSignal?.removeEventListener("abort", onAbort);
-    throw error;
-  }
+  await waitForSpawn(child, externalSignal);
   const output: Buffer[] = [];
   child.stdout.on("data", (chunk: Buffer) => output.push(chunk));
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    child.kill("SIGKILL");
-  }, timeoutMs);
-  timer.unref();
-  const [code, exitSignal] = await once(child, "exit");
-  clearTimeout(timer);
-  externalSignal?.removeEventListener("abort", onAbort);
-  if (externalSignal?.aborted) throw abortReason(externalSignal);
-  if (timedOut && exitSignal === "SIGKILL")
-    throw new Error("Codex version check timed out.");
-  if (code !== 0) throw new Error("Codex version check failed.");
-  const value = Buffer.concat(output).toString("utf8").trim();
-  const match = /^codex-cli (\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/.exec(value);
-  if (!match)
-    throw new Error(
-      "The configured executable did not identify itself as Codex.",
-    );
-  if (match[1] !== PINNED_CODEX_VERSION)
-    throw new Error(
-      `Unsupported Codex version ${match[1]}; expected ${PINNED_CODEX_VERSION}.`,
-    );
+  const timeoutReason = new Error("Codex version check timed out.");
+  await withDeadline(
+    externalSignal,
+    {
+      milliseconds: timeoutMs,
+      timeoutReason,
+      abortReason,
+    },
+    async (deadlineSignal) => {
+      const disposeAbort = listenForAbort(deadlineSignal, () => {
+        child.kill("SIGKILL");
+      });
+      try {
+        const [code, exitSignal] = await once(child, "exit");
+        // A parent cancellation wins even when it races the version deadline.
+        if (externalSignal?.aborted) throw abortReason(externalSignal);
+        if (deadlineSignal.reason === timeoutReason && exitSignal === "SIGKILL")
+          throw timeoutReason;
+        if (code !== 0) throw new Error("Codex version check failed.");
+        const value = Buffer.concat(output).toString("utf8").trim();
+        const match = /^codex-cli (\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/.exec(
+          value,
+        );
+        if (!match)
+          throw new Error(
+            "The configured executable did not identify itself as Codex.",
+          );
+        if (match[1] !== PINNED_CODEX_VERSION)
+          throw new Error(
+            `Unsupported Codex version ${match[1]}; expected ${PINNED_CODEX_VERSION}.`,
+          );
+      } finally {
+        disposeAbort();
+      }
+    },
+  );
 }
 
 /** Bounds an initialization request with an abortable deadline. */
@@ -278,21 +283,15 @@ async function requestWithTimeout(
   timeoutMs: number,
   externalSignal?: AbortSignal,
 ): Promise<unknown> {
-  const controller = new AbortController();
-  const onAbort = (): void => controller.abort(abortReason(externalSignal!));
-  externalSignal?.addEventListener("abort", onAbort, { once: true });
-  if (externalSignal?.aborted) onAbort();
-  const timer = setTimeout(
-    () => controller.abort(new Error(`${method} timed out.`)),
-    timeoutMs,
+  return await withDeadline(
+    externalSignal,
+    {
+      milliseconds: timeoutMs,
+      timeoutReason: new Error(`${method} timed out.`),
+      abortReason,
+    },
+    async (deadlineSignal) => await rpc.request(method, params, deadlineSignal),
   );
-  timer.unref();
-  try {
-    return await rpc.request(method, params, controller.signal);
-  } finally {
-    clearTimeout(timer);
-    externalSignal?.removeEventListener("abort", onAbort);
-  }
 }
 
 /** Gracefully stops app-server, escalating to SIGKILL after the deadline. */
@@ -305,10 +304,23 @@ async function stopChild(
   child.stdin.end();
   if (child.exitCode !== null || child.signalCode !== null) return;
   child.kill("SIGTERM");
-  const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
-  timer.unref();
-  await once(child, "exit");
-  clearTimeout(timer);
+  await withDeadline(
+    undefined,
+    {
+      milliseconds: timeoutMs,
+      timeoutReason: new Error("app-server shutdown timed out"),
+    },
+    async (deadlineSignal) => {
+      const disposeDeadline = listenForAbort(deadlineSignal, () => {
+        child.kill("SIGKILL");
+      });
+      try {
+        await once(child, "exit");
+      } finally {
+        disposeDeadline();
+      }
+    },
+  );
 }
 
 /** Waits until a child either spawns successfully or reports an error. */
@@ -318,10 +330,11 @@ async function waitForSpawn(
 ): Promise<void> {
   if (child.pid !== undefined) return;
   await new Promise<void>((resolve, reject) => {
+    let disposeAbort = (): void => undefined;
     const cleanup = (): void => {
       child.off("spawn", onSpawn);
       child.off("error", onError);
-      signal?.removeEventListener("abort", onAbort);
+      disposeAbort();
     };
     const onSpawn = (): void => {
       cleanup();
@@ -331,15 +344,14 @@ async function waitForSpawn(
       cleanup();
       reject(error);
     };
-    const onAbort = (): void => {
+    const onAbort = (abortedSignal: AbortSignal): void => {
       cleanup();
       child.kill("SIGKILL");
-      reject(abortReason(signal!));
+      reject(abortReason(abortedSignal));
     };
     child.once("spawn", onSpawn);
     child.once("error", onError);
-    signal?.addEventListener("abort", onAbort, { once: true });
-    if (signal?.aborted) onAbort();
+    disposeAbort = listenForAbort(signal, onAbort);
   });
 }
 
@@ -350,7 +362,22 @@ function abortReason(signal: AbortSignal): Error {
     : new Error("app-server startup cancelled");
 }
 
-/** Declines unsolicited app-server requests that the proxy cannot safely serve. */
+/** Method-specific result bodies for unsolicited app-server requests. */
+const FAIL_CLOSED_RESPONSES: ReadonlyMap<string, unknown> = new Map([
+  ["item/tool/requestUserInput", { answers: {} }],
+  ["mcpServer/elicitation/request", { action: "decline", content: null }],
+  ["item/commandExecution/requestApproval", { decision: "decline" }],
+  ["item/fileChange/requestApproval", { decision: "decline" }],
+  ["applyPatchApproval", { decision: "denied" }],
+  ["execCommandApproval", { decision: "denied" }],
+  [
+    "item/permissions/requestApproval",
+    // Omitting every requested permission is the protocol's explicit denial.
+    { permissions: {}, scope: "turn" },
+  ],
+]);
+
+/** Declines one unsolicited app-server request with its method-specific response. */
 function failClosed(
   rpc: JsonRpcTransport,
   request: ServerRequest,
@@ -359,28 +386,14 @@ function failClosed(
   if (request.method === "item/tool/call") {
     // The continuation coordinator centrally routes this callback by thread.
     return;
-  } else if (request.method === "item/tool/requestUserInput") {
-    rpc.respond(request.id, { answers: {} });
-  } else if (request.method === "mcpServer/elicitation/request") {
-    rpc.respond(request.id, { action: "decline", content: null });
-  } else if (
-    request.method === "item/commandExecution/requestApproval" ||
-    request.method === "item/fileChange/requestApproval"
-  ) {
-    rpc.respond(request.id, { decision: "decline" });
-  } else if (
-    request.method === "applyPatchApproval" ||
-    request.method === "execCommandApproval"
-  ) {
-    rpc.respond(request.id, { decision: "denied" });
-  } else if (request.method === "item/permissions/requestApproval") {
-    // Omitting every requested permission is the protocol's explicit denial.
-    rpc.respond(request.id, { permissions: {}, scope: "turn" });
   } else {
-    rpc.respondError(request.id, {
-      code: -32601,
-      message: "Unsupported server request",
-    });
+    const response = FAIL_CLOSED_RESPONSES.get(request.method);
+    if (response === undefined)
+      rpc.respondError(request.id, {
+        code: -32601,
+        message: "Unsupported server request",
+      });
+    else rpc.respond(request.id, response);
   }
   log("warn", "app_server_request_declined", { method: request.method });
 }

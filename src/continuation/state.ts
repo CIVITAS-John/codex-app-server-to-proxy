@@ -14,7 +14,10 @@ import type {
   JsonRpcTransport,
   ServerRequest,
 } from "../app-server/json-rpc.js";
-import { HttpError } from "../http/errors.js";
+import {
+  toolCorrelationErrorForStatus,
+  type HttpError,
+} from "../http/errors.js";
 import {
   bindingHash,
   canonicalJson,
@@ -293,18 +296,23 @@ export class ContinuationCoordinator {
     this.rpc.off("request", this.#routeToolRequest);
   };
 
+  /** Rejects one request while allowing disposal to survive transport closure. */
+  #failRequestReplaced(id: string | number): void {
+    try {
+      this.rpc.respondError(id, {
+        code: -32000,
+        message: "App-server transport is being replaced",
+      });
+    } catch {
+      // A concurrently closed transport has already failed the request.
+    }
+  }
+
   /** Routes one dynamic-tool callback to the sole owner of its thread. */
   readonly #routeToolRequest = (request: ServerRequest): void => {
     if (request.method !== "item/tool/call") return;
     if (this.#disposed) {
-      try {
-        this.rpc.respondError(request.id, {
-          code: -32000,
-          message: "App-server transport is being replaced",
-        });
-      } catch {
-        // A concurrently closed transport has already failed the request.
-      }
+      this.#failRequestReplaced(request.id);
       return;
     }
     const params = asRecord(request.params);
@@ -496,16 +504,8 @@ export class ContinuationCoordinator {
     this.#busy.clear();
     for (const [responseId, entry] of this.#pending) {
       clearTimeout(entry.timer);
-      for (const call of entry.calls) {
-        try {
-          this.rpc.respondError(call.request.id, {
-            code: -32000,
-            message: "App-server transport is being replaced",
-          });
-        } catch {
-          // A concurrent close has already failed the suspended request.
-        }
-      }
+      for (const call of entry.calls)
+        this.#failRequestReplaced(call.request.id);
       this.store.update(responseId, { state: "expired" });
     }
     this.#pending.clear();
@@ -565,10 +565,9 @@ function isResponseRecord(value: unknown): value is ResponseRecord {
 
 /** Builds an OpenAI-shaped failure for implicit tool-call correlation. */
 function toolLookupFailure(status: number, code: string): HttpError {
-  return new HttpError(
+  return toolCorrelationErrorForStatus(
     status,
     "The tool result could not be correlated to one pending call.",
-    status === 409 ? "conflict_error" : "invalid_request_error",
     code,
     "tool_call_id",
   );

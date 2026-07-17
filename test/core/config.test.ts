@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { join, sep } from "node:path";
 import { test } from "vitest";
 import {
+  LOG_LEVELS,
   normalizeLoopbackHost,
   parseServeOptions,
   resolveServeOptions,
@@ -30,6 +31,20 @@ test("loopback validation accepts only exact safe forms", () => {
       /Only 127\.0\.0\.1, ::1, and localhost/,
     );
   }
+});
+
+test("log-level validation accepts every supported value and rejects others", () => {
+  for (const logLevel of LOG_LEVELS)
+    assert.equal(
+      parseServeOptions(["--log-level", logLevel]).logLevel,
+      logLevel,
+    );
+  assert.throws(
+    () => parseServeOptions(["--log-level", "verbose"]),
+    (error: unknown) =>
+      error instanceof Error &&
+      error.message === "--log-level must be debug, info, warn, or error.",
+  );
 });
 
 test("serve options have safe documented defaults and reject ambiguity", async () => {

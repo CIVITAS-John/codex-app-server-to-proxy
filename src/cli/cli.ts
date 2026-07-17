@@ -10,7 +10,7 @@ import {
   type Logger,
   type RedactionContext,
 } from "../core/logger.js";
-import { createProxyServer } from "../http/server.js";
+import { createProxyServer, type ProxyServer } from "../http/server.js";
 import {
   CLIENT_VERSION,
   PINNED_CODEX_VERSION,
@@ -18,6 +18,7 @@ import {
   type AppServer,
 } from "../app-server/app-server.js";
 import { ensureAuthenticated } from "../app-server/auth.js";
+import { abortableDelay } from "../core/abort.js";
 
 /** Delays before bounded app-server restart attempts after an unexpected exit. */
 export const APP_SERVER_RECOVERY_DELAYS_MS = [
@@ -80,6 +81,201 @@ function redactionContext(
   };
 }
 
+/** Installs one-shot process signal handlers and returns an idempotent disposer. */
+function installSignalHandlers(
+  stop: (signal: NodeJS.Signals) => void,
+): () => void {
+  const onSigint = (): void => stop("SIGINT");
+  const onSigterm = (): void => stop("SIGTERM");
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
+
+  let disposed = false;
+  return (): void => {
+    if (disposed) return;
+    disposed = true;
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
+  };
+}
+
+/** Dependencies required to supervise the app-server lifecycle. */
+interface AppServerSupervisorOptions {
+  options: ServeOptions;
+  log: Logger;
+  proxy: ProxyServer;
+  lifecycle: AbortController;
+}
+
+/** Owns app-server startup, authentication, transport installation, and recovery. */
+class AppServerSupervisor {
+  readonly #options: ServeOptions;
+  readonly #log: Logger;
+  readonly #proxy: ProxyServer;
+  readonly #lifecycle: AbortController;
+  #active: AppServer | undefined;
+  #starting: AppServer | undefined;
+  #initializing: Promise<AppServer> | undefined;
+  readonly #cleanupFailures = new Set<unknown>();
+  #recovering = false;
+
+  constructor({ options, log, proxy, lifecycle }: AppServerSupervisorOptions) {
+    this.#options = options;
+    this.#log = log;
+    this.#proxy = proxy;
+    this.#lifecycle = lifecycle;
+  }
+
+  /** Starts the initial child and installs its transport before returning. */
+  async start(): Promise<void> {
+    await this.#startAndInstall();
+  }
+
+  /** Waits for initialization to settle, then stops every current child. */
+  async stop(): Promise<void> {
+    // startAppServer owns cancellation before it can expose an AppServer. Await
+    // that task so shutdown cannot complete while a recovery child is still
+    // being verified, initialized, or authenticated.
+    let initialized: AppServer | undefined;
+    try {
+      initialized = await this.#initializing;
+    } catch {
+      // The initialization observer below classifies failures at rejection
+      // time, while normal startup and recovery errors remain with callers.
+    }
+    const children = [
+      ...new Set([this.#active, this.#starting, initialized]),
+    ].filter((child): child is AppServer => child !== undefined);
+    // AppServer.stop() memoizes its own shutdown, so repeated calls are safe.
+    const results = await Promise.allSettled(
+      children.map(async (child) => await child.stop()),
+    );
+    for (const result of results)
+      if (result.status === "rejected")
+        this.#cleanupFailures.add(result.reason);
+
+    const failures = [...this.#cleanupFailures];
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1)
+      throw new AggregateError(failures, "app-server cleanup failed");
+  }
+
+  /** Stops one partial child while retaining cleanup failure for shutdown. */
+  async #stopPartial(next: AppServer): Promise<void> {
+    try {
+      await next.stop();
+    } catch (error) {
+      this.#cleanupFailures.add(error);
+    }
+  }
+
+  /** Starts and authenticates one child without exposing a partial transport. */
+  async #initialize(): Promise<AppServer> {
+    const next = await startAppServer({
+      codexPath: this.#options.codexPath,
+      root: this.#options.root,
+      startupTimeoutMs: this.#options.toolTimeoutMs,
+      shutdownTimeoutMs: this.#options.shutdownTimeoutMs,
+      log: this.#log,
+      diagnosticLogging: this.#options.logLevel === "debug",
+      signal: this.#lifecycle.signal,
+    });
+    this.#starting = next;
+    let exited = false;
+    next.child.once("exit", () => {
+      exited = true;
+      if (!this.#lifecycle.signal.aborted && this.#active === next) {
+        this.#active = undefined;
+        this.#proxy.setReady(false);
+        this.#proxy.setTransport(undefined);
+        void this.#recover();
+      }
+    });
+    try {
+      await ensureAuthenticated({
+        rpc: next.rpc,
+        log: this.#log,
+        timeoutMs: this.#options.toolTimeoutMs,
+        interactive: Boolean(process.stderr.isTTY),
+        terminal: (message) => process.stderr.write(message),
+        signal: this.#lifecycle.signal,
+      });
+    } catch (error) {
+      await this.#stopPartial(next);
+      if (this.#starting === next) this.#starting = undefined;
+      throw error;
+    }
+    if (this.#lifecycle.signal.aborted || exited) {
+      await this.#stopPartial(next);
+      if (this.#starting === next) this.#starting = undefined;
+      throw (
+        this.#lifecycle.signal.reason ??
+        new Error("app-server exited during startup")
+      );
+    }
+    this.#starting = undefined;
+    return next;
+  }
+
+  /** Atomically promotes one initialized child into the live proxy transport. */
+  async #startAndInstall(): Promise<void> {
+    const initializing = this.#initialize();
+    this.#initializing = initializing;
+    void initializing.catch((error: unknown) => {
+      // An ordinary failure that preceded shutdown remains an operational
+      // startup/recovery error. Once aborted, only the exact lifecycle reason
+      // is expected; a different rejection can be abort cleanup failing.
+      if (
+        this.#lifecycle.signal.aborted &&
+        error !== this.#lifecycle.signal.reason
+      )
+        this.#cleanupFailures.add(error);
+    });
+    try {
+      const next = await initializing;
+      if (this.#lifecycle.signal.aborted) {
+        await this.#stopPartial(next);
+        throw this.#lifecycle.signal.reason;
+      }
+      this.#active = next;
+      this.#proxy.setTransport(next.rpc, next.requirements);
+      this.#proxy.setReady(true);
+    } finally {
+      if (this.#initializing === initializing) this.#initializing = undefined;
+    }
+  }
+
+  /** Runs the single bounded recovery loop while leaving HTTP listening. */
+  async #recover(): Promise<void> {
+    if (this.#recovering || this.#lifecycle.signal.aborted) return;
+    this.#recovering = true;
+    this.#proxy.setReady(false);
+    try {
+      for (const [index, delayMs] of APP_SERVER_RECOVERY_DELAYS_MS.entries()) {
+        if (this.#lifecycle.signal.aborted) return;
+        const attempt = index + 1;
+        try {
+          await abortableDelay(delayMs, this.#lifecycle.signal);
+        } catch {
+          if (this.#lifecycle.signal.aborted) return;
+          throw new Error("App-server recovery delay failed.");
+        }
+        try {
+          await this.#startAndInstall();
+          this.#log("info", "app_server_restarted", { attempt });
+          return;
+        } catch (error) {
+          if (this.#lifecycle.signal.aborted) return;
+          this.#log.failure("app_server_restart_failed", { attempt }, error);
+        }
+      }
+      this.#log("error", "app_server_restart_exhausted");
+    } finally {
+      this.#recovering = false;
+    }
+  }
+}
+
 /** Runs the proxy lifecycle after configuration has been fully resolved. */
 async function runServer(options: ServeOptions, log: Logger): Promise<number> {
   const proxy = createProxyServer(options, log);
@@ -95,9 +291,13 @@ async function runServer(options: ServeOptions, log: Logger): Promise<number> {
   });
   log("debug", "server_root", { root: options.root });
 
-  let appServer: AppServer | undefined;
-  let startingAppServer: AppServer | undefined;
   const lifecycle = new AbortController();
+  const supervisor = new AppServerSupervisor({
+    options,
+    log,
+    proxy,
+    lifecycle,
+  });
   let settleShutdown!: (code: number) => void;
   const shutdown = new Promise<number>((resolve) => {
     settleShutdown = resolve;
@@ -111,158 +311,37 @@ async function runServer(options: ServeOptions, log: Logger): Promise<number> {
     // Disposing the coordinator first rejects suspended dynamic tool calls
     // before the child transport is terminated.
     proxy.setTransport(undefined);
-    const children = [...new Set([appServer, startingAppServer])].filter(
-      (child): child is AppServer => child !== undefined,
-    );
-    // AppServer.stop() memoizes its own shutdown, so repeated calls are safe.
-    stopping = Promise.all(children.map((child) => child.stop())).then(
-      async () => {
+    stopping = (async () => {
+      try {
+        await supervisor.stop();
         await proxy.close();
         log("info", "shutdown_complete");
         settleShutdown(0);
-      },
-      async (error: unknown) => {
+      } catch (error) {
         await proxy.close().catch(() => undefined);
         log.failure("shutdown_failed", {}, error);
         settleShutdown(1);
-      },
-    );
+      }
+    })();
   };
-  const onSigint = (): void => stop("SIGINT");
-  const onSigterm = (): void => stop("SIGTERM");
   // Install lifecycle handlers before authentication so login is cancellable.
-  process.once("SIGINT", onSigint);
-  process.once("SIGTERM", onSigterm);
-
-  // Authentication must finish before readiness admits proxy traffic.
-  const initializeAppServer = async (): Promise<AppServer> => {
-    const next = await startAppServer({
-      codexPath: options.codexPath,
-      root: options.root,
-      startupTimeoutMs: options.toolTimeoutMs,
-      shutdownTimeoutMs: options.shutdownTimeoutMs,
-      log,
-      diagnosticLogging: options.logLevel === "debug",
-      signal: lifecycle.signal,
-    });
-    startingAppServer = next;
-    let exited = false;
-    next.child.once("exit", () => {
-      exited = true;
-      if (!lifecycle.signal.aborted && appServer === next) {
-        appServer = undefined;
-        proxy.setReady(false);
-        proxy.setTransport(undefined);
-        void recoverAppServer();
-      }
-    });
-    try {
-      await ensureAuthenticated({
-        rpc: next.rpc,
-        log,
-        timeoutMs: options.toolTimeoutMs,
-        interactive: Boolean(process.stderr.isTTY),
-        terminal: (message) => process.stderr.write(message),
-        signal: lifecycle.signal,
-      });
-    } catch (error) {
-      await next.stop().catch(() => undefined);
-      if (startingAppServer === next) startingAppServer = undefined;
-      throw error;
-    }
-    if (lifecycle.signal.aborted || exited) {
-      await next.stop().catch(() => undefined);
-      if (startingAppServer === next) startingAppServer = undefined;
-      throw (
-        lifecycle.signal.reason ?? new Error("app-server exited during startup")
-      );
-    }
-    startingAppServer = undefined;
-    return next;
-  };
-  let recovering = false;
-  // Keep the HTTP listener alive while bounded retries restore app-server.
-  const recoverAppServer = async (): Promise<void> => {
-    if (recovering || lifecycle.signal.aborted) return;
-    recovering = true;
-    proxy.setReady(false);
-    try {
-      for (const [index, delayMs] of APP_SERVER_RECOVERY_DELAYS_MS.entries()) {
-        if (lifecycle.signal.aborted) return;
-        const attempt = index + 1;
-        try {
-          await abortableDelay(delayMs, lifecycle.signal);
-        } catch {
-          if (lifecycle.signal.aborted) return;
-          throw new Error("App-server recovery delay failed.");
-        }
-        try {
-          const next = await initializeAppServer();
-          if (lifecycle.signal.aborted) {
-            await next.stop().catch(() => undefined);
-            return;
-          }
-          appServer = next;
-          proxy.setTransport(next.rpc, next.requirements);
-          proxy.setReady(true);
-          log("info", "app_server_restarted", { attempt });
-          return;
-        } catch (error) {
-          if (lifecycle.signal.aborted) return;
-          log.failure("app_server_restart_failed", { attempt }, error);
-        }
-      }
-      log("error", "app_server_restart_exhausted");
-    } finally {
-      recovering = false;
-    }
-  };
+  const disposeSignals = installSignalHandlers(stop);
   try {
-    appServer = await initializeAppServer();
+    // Authentication must finish before readiness admits proxy traffic.
+    await supervisor.start();
     if (lifecycle.signal.aborted) return await shutdown;
-    proxy.setTransport(appServer.rpc, appServer.requirements);
-    proxy.setReady(true);
-  } catch (error) {
-    if (lifecycle.signal.aborted) {
-      const code = await shutdown;
-      process.off("SIGINT", onSigint);
-      process.off("SIGTERM", onSigterm);
-      return code;
-    }
-    await (appServer ? appServer.stop() : undefined)?.catch(() => undefined);
-    await proxy.close().catch(() => undefined);
-    process.off("SIGINT", onSigint);
-    process.off("SIGTERM", onSigterm);
-    throw error;
-  }
-  // Announce readiness only after shutdown handlers can observe an immediate signal.
-  log("info", "app_server_ready", {
-    proxy_version: CLIENT_VERSION,
-    codex_version: PINNED_CODEX_VERSION,
-  });
-  try {
+    // Announce readiness only after shutdown handlers can observe an immediate signal.
+    log("info", "app_server_ready", {
+      proxy_version: CLIENT_VERSION,
+      codex_version: PINNED_CODEX_VERSION,
+    });
     return await shutdown;
+  } catch (error) {
+    if (lifecycle.signal.aborted) return await shutdown;
+    await supervisor.stop().catch(() => undefined);
+    await proxy.close().catch(() => undefined);
+    throw error;
   } finally {
-    process.off("SIGINT", onSigint);
-    process.off("SIGTERM", onSigterm);
+    disposeSignals();
   }
-}
-
-/** Waits for a recovery backoff unless lifecycle shutdown aborts it. */
-async function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) throw signal.reason;
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(done, ms);
-    timer.unref();
-    const abort = (): void => {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", abort);
-      reject(signal.reason);
-    };
-    function done(): void {
-      signal.removeEventListener("abort", abort);
-      resolve();
-    }
-    signal.addEventListener("abort", abort, { once: true });
-  });
 }

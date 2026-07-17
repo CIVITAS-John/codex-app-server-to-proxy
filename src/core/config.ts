@@ -33,7 +33,10 @@ export interface ParsedServeOptions extends Omit<ServeOptions, "stateDir"> {
 }
 
 /** Supported structured-log severity levels. */
-export type LogLevel = "debug" | "info" | "warn" | "error";
+export const LOG_LEVELS = ["debug", "info", "warn", "error"] as const;
+
+/** A supported structured-log severity level. */
+export type LogLevel = (typeof LOG_LEVELS)[number];
 
 /** Normalizes accepted host spellings to validated loopback addresses. */
 export function normalizeLoopbackHost(value: string): ServeOptions["host"] {
@@ -79,6 +82,24 @@ function boolean(name: string, value: string): boolean {
   if (value === "true") return true;
   if (value === "false") return false;
   throw new Error(`${name} must be true or false.`);
+}
+
+/** Validates a CLI string against a fixed list and returns its member type. */
+function oneOf<T extends string>(
+  name: string,
+  value: string,
+  allowed: readonly T[],
+): T {
+  const selected = allowed.find((candidate) => candidate === value);
+  if (selected === undefined) {
+    const last = allowed.at(-1);
+    const choices =
+      allowed.length < 2
+        ? (last ?? "a supported value")
+        : `${allowed.slice(0, -1).join(", ")}, or ${last}`;
+    throw new Error(`${name} must be ${choices}.`);
+  }
+  return selected;
 }
 
 /** Builds the default per-root state directory from a canonical root. */
@@ -147,10 +168,11 @@ export function parseServeOptions(
 
   const root = resolve(cwd, values.get("--root") ?? ".");
   const stateValue = values.get("--state-dir");
-  const logLevel = values.get("--log-level") ?? "info";
-  if (!["debug", "info", "warn", "error"].includes(logLevel)) {
-    throw new Error("--log-level must be debug, info, warn, or error.");
-  }
+  const logLevel = oneOf(
+    "--log-level",
+    values.get("--log-level") ?? "info",
+    LOG_LEVELS,
+  );
   return {
     host: normalizeLoopbackHost(values.get("--host") ?? "127.0.0.1"),
     port: integer("--port", values.get("--port") ?? "8787", 0, 65_535),
@@ -184,7 +206,7 @@ export function parseServeOptions(
       1,
       10_000,
     ),
-    logLevel: logLevel as LogLevel,
+    logLevel,
     ...(stateValue === undefined ? {} : { stateDir: stateValue }),
   };
 }

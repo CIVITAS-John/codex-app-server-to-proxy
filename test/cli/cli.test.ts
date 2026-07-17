@@ -387,6 +387,92 @@ process.on("SIGTERM", () => process.exit(0));`,
 );
 
 testWithPosixExecutable(
+  "signal shutdown waits for an in-flight recovery initialization",
+  async () => {
+    await withTempDir(async (directory) => {
+      const fake = join(directory, "codex");
+      const launches = join(directory, "launches");
+      const recoveryStarted = join(directory, "recovery-started");
+      const recoveryStopped = join(directory, "recovery-stopped");
+      await writeFile(
+        fake,
+        fakeCodexScript({
+          version: PINNED_CODEX_VERSION,
+          setup: `const fs = require("node:fs");
+const launches = ${JSON.stringify(launches)};
+const count = Number(fs.existsSync(launches) ? fs.readFileSync(launches, "utf8") : 0) + 1;
+fs.writeFileSync(launches, String(count));
+if (count === 1) {
+  process.on("SIGTERM", () => process.exit(0));
+} else {
+  fs.writeFileSync(${JSON.stringify(recoveryStarted)}, "yes");
+  process.on("SIGTERM", () => setTimeout(() => {
+    fs.writeFileSync(${JSON.stringify(recoveryStopped)}, "yes");
+    process.exit(0);
+  }, 250));
+}`,
+          onLine: (
+            message,
+          ) => `  if (count === 2 && ${message}.method === "initialize") {
+    return;
+  }
+  if (${message}.method === "account/read") {
+    console.log(JSON.stringify({ id: ${message}.id, result: ${embeddedProtocolResults.authenticatedAccount} }));
+    if (count === 1) setTimeout(() => process.exit(23), 100);
+    return;
+  }`,
+        }),
+        "utf8",
+      );
+      await chmod(fake, 0o755);
+      const child = spawn(
+        process.execPath,
+        [
+          "dist/bin.js",
+          "serve",
+          "--port",
+          "0",
+          "--state-dir",
+          join(directory, "state"),
+          "--codex-path",
+          fake,
+          "--tool-timeout",
+          "30s",
+          "--shutdown-timeout",
+          "2s",
+        ],
+        { cwd: repoRootPath, stdio: ["ignore", "pipe", "pipe"] },
+      );
+      let stderr = "";
+      child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+        stderr += chunk;
+      });
+      const exit = once(child, "exit");
+      let exited = false;
+      try {
+        await waitForText(() => stderr, "app_server_ready");
+        await waitForFile(recoveryStarted, 8_000);
+        child.kill("SIGTERM");
+        await waitForText(() => stderr, "shutdown_complete");
+        // The recovery child delays this marker after SIGTERM, so its presence
+        // proves shutdown awaited the detached initialization task.
+        assert.equal(await readFile(recoveryStopped, "utf8"), "yes");
+        const [code, signal] = await exit;
+        exited = true;
+        assert.equal(code, 0);
+        assert.equal(signal, null);
+      } finally {
+        if (!exited && child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGKILL");
+          await exit;
+        }
+      }
+    }, "codex-proxy-recovery-stop-");
+  },
+  15_000,
+);
+
+testWithPosixExecutable(
   "signal shutdown cancels an in-flight login and stops its child",
   async () => {
     await withTempDir(async (directory) => {

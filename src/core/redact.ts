@@ -1,6 +1,11 @@
 import { homedir } from "node:os";
 import { isAbsolute, parse, sep } from "node:path";
 
+/** Identifies a nonempty path that is not itself a filesystem root. */
+function isRedactablePath(path: string): boolean {
+  return path.length > 0 && parse(path).root !== path;
+}
+
 /** Removes common URL, credential, and local-path forms from diagnostics. */
 export function redact(
   value: string,
@@ -14,11 +19,11 @@ export function redact(
       .filter(
         (path) =>
           path.length > 1 &&
-          parse(path).root !== path &&
+          isRedactablePath(path) &&
           (isAbsolute(path) || path.includes(sep)),
       )
       .map((path) => [path, "[REDACTED_PATH]"] as const),
-    ...(root && parse(root).root !== root && root !== home
+    ...(isRedactablePath(root) && root !== home
       ? ([[root, "[REDACTED_CWD]"]] as const)
       : []),
     [home, "[REDACTED_HOME]"] as const,

@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import type { Writable, Readable } from "node:stream";
 import { createInterface } from "node:readline";
 import { record } from "../core/canonical.js";
+import { listenForAbort } from "../core/abort.js";
 
 /** JSON-RPC error object accepted by respondError. */
 export interface RpcErrorData {
@@ -70,22 +71,24 @@ export class JsonRpcTransport extends EventEmitter {
       );
     const id = this.#nextId++;
     return new Promise((resolve, reject) => {
-      const abort = (): void => {
+      let disposeAbort = (): void => undefined;
+      const abort = (abortedSignal: AbortSignal): void => {
         if (!this.#pending.delete(id)) return;
-        reject(signal?.reason ?? new Error("request cancelled"));
+        reject(abortedSignal.reason ?? new Error("request cancelled"));
       };
       const pending: Pending = {
         resolve: (value) => {
-          signal?.removeEventListener("abort", abort);
+          disposeAbort();
           resolve(value);
         },
         reject: (reason) => {
-          signal?.removeEventListener("abort", abort);
+          disposeAbort();
           reject(reason);
         },
       };
       this.#pending.set(id, pending);
-      signal?.addEventListener("abort", abort, { once: true });
+      disposeAbort = listenForAbort(signal, abort);
+      if (!this.#pending.has(id)) return;
       try {
         this.#write({ id, method, params });
       } catch (error) {

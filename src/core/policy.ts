@@ -4,17 +4,41 @@ import { isAbsolute, relative, sep } from "node:path";
 import { bindingHash, record } from "./canonical.js";
 
 /** Sandbox modes exposed by the x_codex request extension. */
-export type SandboxMode =
-  "read-only" | "workspace-write" | "danger-full-access";
+export const SANDBOX_MODES = [
+  "read-only",
+  "workspace-write",
+  "danger-full-access",
+] as const;
+
+/** A sandbox mode exposed by the x_codex request extension. */
+export type SandboxMode = (typeof SANDBOX_MODES)[number];
 
 /** Per-request web-search modes supported by the pinned app-server. */
-export type WebSearchMode = "disabled" | "cached" | "indexed" | "live";
+export const WEB_SEARCH_MODES = [
+  "disabled",
+  "cached",
+  "indexed",
+  "live",
+] as const;
 
-/** Non-interactive approval policies that the proxy can safely own. */
-export type ApprovalPolicy = "never" | "on-request" | "untrusted";
+/** A per-request web-search mode supported by the pinned app-server. */
+export type WebSearchMode = (typeof WEB_SEARCH_MODES)[number];
 
-/** Approval reviewers accepted by the pinned app-server protocol. */
-export type ApprovalsReviewer = "auto_review" | "guardian_subagent" | "user";
+/** Non-interactive approval policies in the proxy's preference order. */
+const APPROVAL_POLICY_ORDER = ["never", "on-request", "untrusted"] as const;
+
+/** A non-interactive approval policy that the proxy can safely own. */
+export type ApprovalPolicy = (typeof APPROVAL_POLICY_ORDER)[number];
+
+/** Approval reviewers in the proxy's preference order. */
+const APPROVAL_REVIEWER_ORDER = [
+  "auto_review",
+  "guardian_subagent",
+  "user",
+] as const;
+
+/** An approval reviewer accepted by the pinned app-server protocol. */
+export type ApprovalsReviewer = (typeof APPROVAL_REVIEWER_ORDER)[number];
 
 /** Relevant managed requirements read from app-server at startup. */
 export interface PolicyRequirements {
@@ -109,11 +133,7 @@ export async function canonicalizeRoot(path: string): Promise<string> {
   if (!isAbsolute(path))
     throw new Error("--root must name an absolute readable directory.");
   try {
-    const canonical = await realpath(path);
-    await access(canonical, constants.R_OK | constants.X_OK);
-    if (!(await stat(canonical)).isDirectory())
-      throw new Error("not directory");
-    return canonical;
+    return await canonicalDirectory(path);
   } catch {
     throw new Error("--root must name a readable directory.");
   }
@@ -145,45 +165,24 @@ export function validateRequestPolicy(value: unknown): RequestPolicy {
       "x_codex.cwd",
       "x_codex.cwd must be a non-empty string.",
     );
-  const sandboxes: readonly string[] = [
-    "read-only",
-    "workspace-write",
-    "danger-full-access",
-  ];
-  if (
-    extension.sandbox !== undefined &&
-    (typeof extension.sandbox !== "string" ||
-      !sandboxes.includes(extension.sandbox))
-  )
-    throw new PolicyError(
-      "unsupported_sandbox",
-      "x_codex.sandbox",
-      "x_codex.sandbox is not supported.",
-    );
-  const webSearchModes: readonly string[] = [
-    "disabled",
-    "cached",
-    "indexed",
-    "live",
-  ];
-  if (
-    extension.web_search !== undefined &&
-    (typeof extension.web_search !== "string" ||
-      !webSearchModes.includes(extension.web_search))
-  )
-    throw new PolicyError(
-      "unsupported_web_search",
-      "x_codex.web_search",
-      "x_codex.web_search is not supported.",
-    );
+  const sandbox = validateEnumField(
+    extension.sandbox,
+    SANDBOX_MODES,
+    "unsupported_sandbox",
+    "x_codex.sandbox",
+    "x_codex.sandbox is not supported.",
+  );
+  const webSearch = validateEnumField(
+    extension.web_search,
+    WEB_SEARCH_MODES,
+    "unsupported_web_search",
+    "x_codex.web_search",
+    "x_codex.web_search is not supported.",
+  );
   return {
     ...(typeof extension.cwd === "string" ? { cwd: extension.cwd } : {}),
-    ...(typeof extension.sandbox === "string"
-      ? { sandbox: extension.sandbox as SandboxMode }
-      : {}),
-    ...(typeof extension.web_search === "string"
-      ? { webSearch: extension.web_search as WebSearchMode }
-      : {}),
+    ...(sandbox === undefined ? {} : { sandbox }),
+    ...(webSearch === undefined ? {} : { webSearch }),
   };
 }
 
@@ -199,25 +198,25 @@ export function parsePolicyRequirements(value: unknown): PolicyRequirements {
   return {
     allowedApprovalPolicies: stringAllowlist(
       requirements.allowedApprovalPolicies,
-      ["never", "on-request", "untrusted"],
+      APPROVAL_POLICY_ORDER,
       "allowedApprovalPolicies",
       true,
-    ) as ApprovalPolicy[] | null,
+    ),
     allowedApprovalsReviewers: stringAllowlist(
       requirements.allowedApprovalsReviewers,
-      ["user", "auto_review", "guardian_subagent"],
+      APPROVAL_REVIEWER_ORDER,
       "allowedApprovalsReviewers",
-    ) as ApprovalsReviewer[] | null,
+    ),
     allowedSandboxModes: stringAllowlist(
       requirements.allowedSandboxModes,
-      ["read-only", "workspace-write", "danger-full-access"],
+      SANDBOX_MODES,
       "allowedSandboxModes",
-    ) as SandboxMode[] | null,
+    ),
     allowedWebSearchModes: stringAllowlist(
       requirements.allowedWebSearchModes,
-      ["disabled", "cached", "indexed", "live"],
+      WEB_SEARCH_MODES,
       "allowedWebSearchModes",
-    ) as WebSearchMode[] | null,
+    ),
   };
 }
 
@@ -264,10 +263,9 @@ export async function resolveEffectivePolicy(
 export function selectApprovalsReviewer(
   requirements: PolicyRequirements,
 ): ApprovalsReviewer {
-  const allowed = requirements.allowedApprovalsReviewers;
-  for (const candidate of ["auto_review", "guardian_subagent", "user"] as const)
-    if (allowed === null || allowed.includes(candidate)) return candidate;
-  throw new PolicyError(
+  return firstAllowed(
+    APPROVAL_REVIEWER_ORDER,
+    requirements.allowedApprovalsReviewers,
     "approval_reviewer_not_allowed",
     "x_codex",
     "Managed requirements allow no supported approval reviewer.",
@@ -282,10 +280,9 @@ export function selectApprovalsReviewer(
 export function selectApprovalPolicy(
   requirements: PolicyRequirements,
 ): ApprovalPolicy {
-  const allowed = requirements.allowedApprovalPolicies;
-  for (const candidate of ["never", "on-request", "untrusted"] as const)
-    if (allowed === null || allowed.includes(candidate)) return candidate;
-  throw new PolicyError(
+  return firstAllowed(
+    APPROVAL_POLICY_ORDER,
+    requirements.allowedApprovalPolicies,
     "approval_policy_not_allowed",
     "x_codex",
     "Managed requirements allow no supported non-interactive approval policy.",
@@ -341,10 +338,7 @@ async function canonicalizeRequestCwd(
     );
   let canonical: string;
   try {
-    canonical = await realpath(requested);
-    await access(canonical, constants.R_OK | constants.X_OK);
-    if (!(await stat(canonical)).isDirectory())
-      throw new Error("not directory");
+    canonical = await canonicalDirectory(requested);
   } catch {
     throw new PolicyError(
       "invalid_cwd",
@@ -359,6 +353,27 @@ async function canonicalizeRequestCwd(
       "x_codex.cwd must resolve within the configured root.",
     );
   return canonical;
+}
+
+/** Resolves a readable directory while preserving filesystem check ordering. */
+async function canonicalDirectory(path: string): Promise<string> {
+  const canonical = await realpath(path);
+  await access(canonical, constants.R_OK | constants.X_OK);
+  if (!(await stat(canonical)).isDirectory()) throw new Error("not directory");
+  return canonical;
+}
+
+/** Returns the first managed-allowed value in the proxy's preference order. */
+function firstAllowed<T extends string>(
+  order: readonly T[],
+  allowed: readonly T[] | null,
+  code: string,
+  param: string,
+  message: string,
+): T {
+  for (const candidate of order)
+    if (allowed === null || allowed.includes(candidate)) return candidate;
+  throw new PolicyError(code, param, message);
 }
 
 /** Rejects a managed-disallowed request selection without approximation. */
@@ -377,23 +392,45 @@ function requireAllowed<T extends string>(
 }
 
 /** Parses a nullable managed string allowlist and rejects malformed entries. */
-function stringAllowlist(
+function stringAllowlist<T extends string>(
   value: unknown,
-  supported: readonly string[],
+  supported: readonly T[],
   name: string,
   allowGranular = false,
-): string[] | null {
+): T[] | null {
   if (value === null || value === undefined) return null;
   if (!Array.isArray(value))
     throw new Error(`configRequirements/read returned malformed ${name}.`);
-  const result: string[] = [];
+  const result: T[] = [];
   for (const entry of value) {
     if (allowGranular && isGranularApproval(entry)) continue;
-    if (typeof entry !== "string" || !supported.includes(entry))
+    if (typeof entry !== "string" || !includesString(supported, entry))
       throw new Error(`configRequirements/read returned malformed ${name}.`);
     result.push(entry);
   }
   return result;
+}
+
+/** Validates an optional request string against a supported enum tuple. */
+function validateEnumField<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  code: string,
+  param: string,
+  message: string,
+): T | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !includesString(allowed, value))
+    throw new PolicyError(code, param, message);
+  return value;
+}
+
+/** Narrows a string after membership checking without weakening tuple types. */
+function includesString<T extends string>(
+  values: readonly T[],
+  value: string,
+): value is T {
+  return values.some((candidate) => candidate === value);
 }
 
 /** Recognizes the generated granular approval-policy shape for safe omission. */

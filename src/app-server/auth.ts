@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import type { JsonRpcTransport } from "./json-rpc.js";
 import type { Logger } from "../core/logger.js";
+import { listenForAbort, withDeadline } from "../core/abort.js";
 
 /** Minimal account/read fields used by the authentication flow. */
 type AccountResponse = { account?: unknown; requiresOpenaiAuth?: boolean };
@@ -81,55 +82,68 @@ async function startAndWaitForLogin(
         : new Error(result.error ?? "ChatGPT login failed."),
     );
   };
-  const abort = (): void =>
-    settle(
-      options.signal?.reason instanceof Error
-        ? options.signal.reason
-        : new Error("ChatGPT login cancelled."),
-    );
-  const timer = setTimeout(
-    () => settle(new Error("ChatGPT login timed out.")),
-    options.timeoutMs,
-  );
-  timer.unref();
   options.rpc.on("notification", notification);
-  options.signal?.addEventListener("abort", abort, { once: true });
 
   try {
-    if (options.signal?.aborted) abort();
-    const login = (await options.rpc.request(
-      "account/login/start",
-      { type: useDeviceCode ? "chatgptDeviceCode" : "chatgpt" },
+    await withDeadline(
       options.signal,
-    )) as LoginResponse;
-    loginId = login.loginId;
-    if (earlyCompletion !== undefined)
-      notification("account/login/completed", earlyCompletion);
-
-    if (login.type === "chatgpt") {
-      const launched = await (options.launch ?? launchBrowser)(login.authUrl);
-      if (!launched) {
-        options.terminal(
-          `Open this URL to sign in to ChatGPT:\n${login.authUrl}\n`,
+      {
+        milliseconds: options.timeoutMs,
+        timeoutReason: new Error("ChatGPT login timed out."),
+        abortReason: (signal) =>
+          signal.reason instanceof Error
+            ? signal.reason
+            : new Error("ChatGPT login cancelled."),
+      },
+      async (deadlineSignal) => {
+        const disposeDeadline = listenForAbort(
+          deadlineSignal,
+          (abortedSignal) =>
+            settle(
+              abortedSignal.reason instanceof Error
+                ? abortedSignal.reason
+                : new Error("ChatGPT login cancelled."),
+            ),
         );
-        options.log("warn", "browser_launch_failed", {
-          login_url: "[REDACTED]",
-        });
-      } else options.log("info", "browser_launch_succeeded");
-    } else {
-      options.terminal(
-        `Open ${login.verificationUrl} and enter code ${login.userCode}.\n`,
-      );
-      options.log("info", "device_code_login_started", {
-        verification_url: "[REDACTED]",
-        user_code: "[REDACTED]",
-      });
-    }
-    await completion;
+        try {
+          const login = (await options.rpc.request(
+            "account/login/start",
+            { type: useDeviceCode ? "chatgptDeviceCode" : "chatgpt" },
+            options.signal,
+          )) as LoginResponse;
+          loginId = login.loginId;
+          if (earlyCompletion !== undefined)
+            notification("account/login/completed", earlyCompletion);
+
+          if (login.type === "chatgpt") {
+            const launched = await (options.launch ?? launchBrowser)(
+              login.authUrl,
+            );
+            if (!launched) {
+              options.terminal(
+                `Open this URL to sign in to ChatGPT:\n${login.authUrl}\n`,
+              );
+              options.log("warn", "browser_launch_failed", {
+                login_url: "[REDACTED]",
+              });
+            } else options.log("info", "browser_launch_succeeded");
+          } else {
+            options.terminal(
+              `Open ${login.verificationUrl} and enter code ${login.userCode}.\n`,
+            );
+            options.log("info", "device_code_login_started", {
+              verification_url: "[REDACTED]",
+              user_code: "[REDACTED]",
+            });
+          }
+          await completion;
+        } finally {
+          disposeDeadline();
+        }
+      },
+    );
   } finally {
-    clearTimeout(timer);
     options.rpc.off("notification", notification);
-    options.signal?.removeEventListener("abort", abort);
   }
 }
 

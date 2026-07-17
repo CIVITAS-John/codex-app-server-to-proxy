@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { PassThrough, Writable } from "node:stream";
-import { once } from "node:events";
+import { getEventListeners, once } from "node:events";
 import { test } from "vitest";
 import { JsonRpcTransport, RpcError } from "../../src/app-server/json-rpc.js";
 
@@ -89,4 +89,19 @@ test("a synchronous output write failure removes its pending request", async () 
 
   await assert.rejects(rpc.request("first", {}), /synchronous write failure/);
   await assert.rejects(rpc.request("second", {}), /synchronous write failure/);
+});
+
+test("transport disposes request abort listeners after settlement", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const rpc = new JsonRpcTransport(input, output);
+  const controller = new AbortController();
+  const request = rpc.request("account/read", {}, controller.signal);
+  const [wire] = await once(output, "data");
+  const id = (JSON.parse(String(wire)) as { id: number }).id;
+  assert.equal(getEventListeners(controller.signal, "abort").length, 1);
+
+  input.write(`${JSON.stringify({ id, result: {} })}\n`);
+  await request;
+  assert.equal(getEventListeners(controller.signal, "abort").length, 0);
 });

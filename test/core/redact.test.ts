@@ -19,6 +19,14 @@ test("redact skips trivially broad roots to avoid over-redaction", () => {
   assert.equal(redact(`${home}/x`, home), "[REDACTED_HOME]/x");
 });
 
+test("redact preserves arbitrary single-segment root handling", () => {
+  assert.equal(
+    redact("workspace/file.ts", "workspace"),
+    "[REDACTED_CWD]/file.ts",
+  );
+  assert.equal(redact("x/file.ts", "x"), "[REDACTED_CWD]/file.ts");
+});
+
 test("redact masks configured paths outside the root and home", () => {
   const external = join("/tmp", "secret-client", "proxy-state");
   assert.equal(
