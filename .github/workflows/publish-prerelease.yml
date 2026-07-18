@@ -84,6 +84,10 @@ jobs:
           PACKAGE_NAME=$(node -p "require('./package.json').name")
           VIEW_ERROR="$RUNNER_TEMP/npm-version-view-error.log"
           if npm view "$PACKAGE_NAME@$VERSION" version --json >/dev/null 2>"$VIEW_ERROR"; then
+            if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
+              echo "::error::${PACKAGE_NAME}@${VERSION} is already published and tag v${VERSION} exists: a prior run published but could not update main. Recover with: git fetch --tags && git merge v${VERSION} && git push origin main, then redispatch."
+              exit 1
+            fi
             echo "::error::${PACKAGE_NAME}@${VERSION} is already published."
             exit 1
           fi
@@ -118,7 +122,19 @@ jobs:
       - name: Push the prerelease tag
         if: ${{ !inputs.dry_run }}
         id: push_tag
-        run: git push origin "refs/tags/v$VERSION"
+        shell: bash
+        run: |
+          TAG_REF="refs/tags/v$VERSION"
+          TAG_QUERY_STATUS=0
+          git ls-remote --exit-code --tags origin "$TAG_REF" >/dev/null || TAG_QUERY_STATUS=$?
+          if [[ "$TAG_QUERY_STATUS" -eq 0 ]]; then
+            git push origin ":$TAG_REF"
+            echo "Replaced leftover remote tag v$VERSION from an earlier failed run; this run already confirmed the version is not on npm."
+          elif [[ "$TAG_QUERY_STATUS" -ne 2 ]]; then
+            echo "::error::Unable to check origin for an existing v$VERSION tag. No refs were changed."
+            exit 1
+          fi
+          git push origin "$TAG_REF"
       - name: Publish prerelease through npm trusted publishing
         if: ${{ !inputs.dry_run }}
         id: publish
