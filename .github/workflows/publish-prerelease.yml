@@ -96,7 +96,10 @@ jobs:
               const packageName = encodeURIComponent(process.env.EXPECTED_PACKAGE);
               const exchange = await fetch(`https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${packageName}`, {
                 method: "POST",
-                headers: { Authorization: `Bearer ${response.value}` },
+                headers: {
+                  Authorization: `Bearer ${response.value}`,
+                  "npm-command": "publish",
+                },
               });
               assert.equal(exchange.ok, true, `npm rejected the trusted-publisher identity with HTTP ${exchange.status}`);
               const credential = await exchange.json();
