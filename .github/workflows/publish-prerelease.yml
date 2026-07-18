@@ -48,6 +48,61 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
+      - name: Install the trusted-publishing npm CLI
+        run: npm install --global npm@11.18.0
+      - name: Verify the trusted-publisher identity
+        shell: bash
+        env:
+          EXPECTED_ENVIRONMENT: npm
+          EXPECTED_NPM_VERSION: 11.18.0
+          EXPECTED_PACKAGE: codex-openai-proxy
+          EXPECTED_REPOSITORY: CIVITAS-John/codex-app-server-to-proxy
+          EXPECTED_WORKFLOW_REF: CIVITAS-John/codex-app-server-to-proxy/.github/workflows/publish-prerelease.yml@refs/heads/main
+        run: |
+          ACTUAL_NPM_VERSION=$(npm --version)
+          if [[ "$ACTUAL_NPM_VERSION" != "$EXPECTED_NPM_VERSION" ]]; then
+            echo "::error::Expected npm ${EXPECTED_NPM_VERSION} for trusted publishing, but found ${ACTUAL_NPM_VERSION}."
+            exit 1
+          fi
+          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
+            echo "::error::GitHub did not expose its OIDC token endpoint. Confirm that this job retains id-token: write."
+            exit 1
+          fi
+
+          OIDC_SEPARATOR="?"
+          if [[ "$ACTIONS_ID_TOKEN_REQUEST_URL" == *"?"* ]]; then
+            OIDC_SEPARATOR="&"
+          fi
+          curl --fail --silent --show-error \
+            --header "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}${OIDC_SEPARATOR}audience=npm:registry.npmjs.org" |
+            node --input-type=module -e '
+              import assert from "node:assert/strict";
+
+              const chunks = [];
+              for await (const chunk of process.stdin) chunks.push(chunk);
+              const response = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+              assert.equal(typeof response.value, "string", "GitHub OIDC response must contain a token");
+              const segments = response.value.split(".");
+              assert.equal(segments.length, 3, "GitHub OIDC token must be a JWT");
+              const claims = JSON.parse(Buffer.from(segments[1], "base64url").toString("utf8"));
+              assert.equal(claims.aud, "npm:registry.npmjs.org", "OIDC audience must target npm");
+              assert.equal(claims.repository, process.env.EXPECTED_REPOSITORY, "OIDC repository claim must match npm trusted publishing");
+              assert.equal(claims.workflow_ref, process.env.EXPECTED_WORKFLOW_REF, "OIDC workflow claim must match npm trusted publishing");
+              assert.equal(claims.environment, process.env.EXPECTED_ENVIRONMENT, "OIDC environment claim must match npm trusted publishing");
+              assert.equal(claims.ref, "refs/heads/main", "OIDC ref claim must identify main");
+              assert.equal(claims.runner_environment, "github-hosted", "npm trusted publishing requires a GitHub-hosted runner");
+
+              const packageName = encodeURIComponent(process.env.EXPECTED_PACKAGE);
+              const exchange = await fetch(`https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/${packageName}`, {
+                method: "POST",
+                headers: { Authorization: `Bearer ${response.value}` },
+              });
+              assert.equal(exchange.ok, true, `npm rejected the trusted-publisher identity with HTTP ${exchange.status}`);
+              const credential = await exchange.json();
+              assert.equal(typeof credential.token, "string", "npm OIDC exchange must return a temporary publish credential");
+              console.log(`Verified npm ${process.env.EXPECTED_NPM_VERSION}; npm accepted the expected GitHub trusted-publisher identity.`);
+            '
       - run: npm ci
       - name: Verify npm package bootstrap
         shell: bash
@@ -138,7 +193,13 @@ jobs:
       - name: Publish prerelease through npm trusted publishing
         if: ${{ !inputs.dry_run }}
         id: publish
-        run: npm publish "${{ steps.packed.outputs.tarball }}" --provenance --tag next --access public
+        shell: bash
+        run: |
+          if npm publish "${{ steps.packed.outputs.tarball }}" --provenance --tag next --access public; then
+            exit 0
+          fi
+          echo "::error::npm rejected the OIDC publish. Confirm the package trusted publisher allows npm publish and exactly matches repository CIVITAS-John/codex-app-server-to-proxy, workflow publish-prerelease.yml, and environment npm."
+          exit 1
       - name: Fast-forward main to the published commit
         if: ${{ !inputs.dry_run }}
         shell: bash
