@@ -405,11 +405,13 @@ fs.writeFileSync(launches, String(count));
 if (count === 1) {
   process.on("SIGTERM", () => process.exit(0));
 } else {
-  fs.writeFileSync(${JSON.stringify(recoveryStarted)}, "yes");
   process.on("SIGTERM", () => setTimeout(() => {
     fs.writeFileSync(${JSON.stringify(recoveryStopped)}, "yes");
     process.exit(0);
   }, 250));
+  // Publish readiness only after SIGTERM is handled; otherwise the parent can
+  // signal between the marker write and handler registration on a busy runner.
+  fs.writeFileSync(${JSON.stringify(recoveryStarted)}, "yes");
 }`,
           onLine: (
             message,
