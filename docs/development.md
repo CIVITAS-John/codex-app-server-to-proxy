@@ -54,7 +54,7 @@ The protocol cleanliness check seeds a temporary protocol root, regenerates ther
 
 ## Continuous integration
 
-Required CI runs `npm ci` followed by the same `npm run check` command contributors use locally. Linux exercises Node.js 20, 22, 24, and 26; macOS and Windows exercise the primary Node.js 24 LTS. Node.js 20 is the minimum supported line; the `engines` range accepts newer majors, which are added to the CI matrix as they are validated.
+Required CI runs `npm ci` followed by the same `npm run check` command contributors use locally. Linux, macOS, and Windows all exercise the primary Node.js 24 LTS. Node.js 20 is the minimum supported line; the `engines` range accepts newer majors, and matrix lines are added as they are validated.
 
 CI sets `CODEX_TEST_COVERAGE` explicitly. The primary Node.js 24 Linux job alone runs coverage and its floors and publishes the offline `coverage/` directory; the other operating-system and Node.js compatibility jobs run the same tests without redundant instrumentation. Omitting the variable locally keeps coverage enabled. Coverage is limited to maintained source and thresholds are based on the Stage 07 baseline. Pull requests never run the live suite.
 

@@ -56,7 +56,7 @@ Local implementation is not evidence that npm, GitHub Actions, or every supporte
 
 ### External evidence pending
 
-- The checked-in offline CI matrix still must finish green remotely on Node.js 20, 22, 24, and 26 on Linux and Node.js 24 on macOS and Windows.
+- The checked-in offline CI matrix still must finish green remotely on Node.js 24 on Linux, macOS, and Windows.
 - The dispatch-only registry-backed package smoke still must pass on remote Linux, macOS, and Windows runners; this networked evidence is not part of required offline CI.
 - The expanded live contract still awaits an explicitly authorized run with the expected normal count of five `gpt-5.4-mini` calls, maximum of six, and an exact recorded count. Earlier repository notes describe a 2026-07-14 two-scenario run under a prior four-call guard, but they do not record an exact call count, commit, or workflow URL and are not Stage 08 release evidence.
 - The npm prerelease, registry metadata, integrity, and `next` dist-tag still must be verified after publication. If name reservation requires the documented owner/2FA bootstrap, that first artifact will not have OIDC provenance; the trusted publisher and provenance must be verified with the next candidate.

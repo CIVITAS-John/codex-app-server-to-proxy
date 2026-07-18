@@ -1,15 +1,15 @@
 name: Publish npm prerelease
 
 on:
-  push:
-    tags: ["v*-*"]
-
-permissions:
-  contents: read
-  id-token: write
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Run all gates and the bump locally but skip tag push and publish
+        type: boolean
+        default: false
 
 concurrency:
-  group: npm-prerelease-${{ github.ref }}
+  group: npm-prerelease
   cancel-in-progress: false
 
 jobs:
@@ -26,28 +26,29 @@ jobs:
     environment:
       name: npm
       url: https://www.npmjs.com/package/codex-openai-proxy
+    permissions:
+      contents: write
+      id-token: write
     timeout-minutes: 30
     steps:
+      - name: Require a main-branch dispatch
+        shell: bash
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          if [[ "$DISPATCH_REF" != "refs/heads/main" ]]; then
+            echo "::error::Publish npm prerelease must be dispatched from main, not ${DISPATCH_REF}."
+            exit 1
+          fi
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
       - uses: actions/setup-node@v6
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
       - run: npm ci
-      - name: Validate prerelease tag and package version
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          node --input-type=module -e '
-            import assert from "node:assert/strict";
-            import { readFile } from "node:fs/promises";
-            const pkg = JSON.parse(await readFile("package.json", "utf8"));
-            assert.match(pkg.version, /^\d+\.\d+\.\d+-[0-9A-Za-z.-]+$/, "package version must be a prerelease");
-            assert.equal(process.env.RELEASE_TAG, `v${pkg.version}`, "tag must exactly match package version");
-          '
-      - name: Run offline release gate
-        run: npm run check
       - name: Verify npm package bootstrap
         shell: bash
         run: |
@@ -62,6 +63,37 @@ jobs:
           fi
           echo "::error::Unable to verify ${PACKAGE_NAME} on npm because of a registry, network, or authentication failure. This is not a first-release bootstrap signal."
           exit 1
+      - name: Create the prerelease commit and tag locally
+        id: bump
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          npm version prerelease --preid=rc
+          VERSION=$(node -p "require('./package.json').version")
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Verify the prerelease version is unpublished
+        shell: bash
+        run: |
+          node --input-type=module -e '
+            import assert from "node:assert/strict";
+            assert.match(process.env.VERSION, /^\d+\.\d+\.\d+-[0-9A-Za-z.-]+$/, "package version must be a prerelease");
+          '
+
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          VIEW_ERROR="$RUNNER_TEMP/npm-version-view-error.log"
+          if npm view "$PACKAGE_NAME@$VERSION" version --json >/dev/null 2>"$VIEW_ERROR"; then
+            echo "::error::${PACKAGE_NAME}@${VERSION} is already published."
+            exit 1
+          fi
+          if grep -q "E404" "$VIEW_ERROR"; then
+            exit 0
+          fi
+          echo "::error::Unable to verify ${PACKAGE_NAME}@${VERSION} on npm because of a registry, network, or authentication failure."
+          exit 1
+      - name: Run offline release gate on the bumped tree
+        run: npm run check
       - name: Test and retain the packed npm CLI
         id: packed
         shell: bash
@@ -73,9 +105,58 @@ jobs:
       - name: Retain the tested npm tarball
         uses: actions/upload-artifact@v4
         with:
-          name: npm-tarball-${{ github.ref_name }}
+          name: npm-tarball-v${{ steps.bump.outputs.version }}
           path: ${{ steps.packed.outputs.tarball }}
           if-no-files-found: error
           retention-days: 14
+      - name: Report dry-run result
+        if: ${{ inputs.dry_run }}
+        shell: bash
+        run: |
+          echo "Dry run complete for v$VERSION. No refs were pushed and nothing was published."
+          sha256sum "${{ steps.packed.outputs.tarball }}"
+      - name: Push the prerelease tag
+        if: ${{ !inputs.dry_run }}
+        id: push_tag
+        run: git push origin "refs/tags/v$VERSION"
       - name: Publish prerelease through npm trusted publishing
+        if: ${{ !inputs.dry_run }}
+        id: publish
         run: npm publish "${{ steps.packed.outputs.tarball }}" --provenance --tag next --access public
+      - name: Fast-forward main to the published commit
+        if: ${{ !inputs.dry_run }}
+        shell: bash
+        run: |
+          if git push origin HEAD:main; then
+            exit 0
+          fi
+          echo "::error::The prerelease was published, but main could not be updated from this run. Land the tagged commit manually with: git fetch --tags && git merge v$VERSION && git push origin main"
+          exit 1
+      - name: Reconcile the tag after an unsuccessful publish command
+        if: ${{ failure() && steps.push_tag.outcome == 'success' && steps.publish.outcome != 'success' }}
+        shell: bash
+        run: |
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          VIEW_ERROR="$RUNNER_TEMP/npm-rollback-view-error.log"
+          TAG_REF="refs/tags/v$VERSION"
+          TAG_QUERY_STATUS=0
+          git ls-remote --exit-code --tags origin "$TAG_REF" >/dev/null || TAG_QUERY_STATUS=$?
+          if [[ "$TAG_QUERY_STATUS" -ne 0 ]]; then
+            if [[ "$TAG_QUERY_STATUS" -eq 2 ]]; then
+              echo "Remote tag v$VERSION no longer exists; no rollback is needed."
+              exit 0
+            fi
+            echo "::error::Unable to verify remote tag v$VERSION. No tag was deleted."
+            exit 1
+          fi
+          if npm view "$PACKAGE_NAME@$VERSION" version --json >/dev/null 2>"$VIEW_ERROR"; then
+            echo "::error::npm reports ${PACKAGE_NAME}@${VERSION} as published. The remote tag was retained; land the tagged commit manually with: git fetch --tags && git merge v${VERSION} && git push origin main"
+            exit 1
+          fi
+          if grep -q "E404" "$VIEW_ERROR"; then
+            git push origin ":$TAG_REF"
+            echo "Deleted unpublished remote tag v$VERSION so a later dispatch can recreate it."
+            exit 0
+          fi
+          echo "::error::Unable to determine whether ${PACKAGE_NAME}@${VERSION} was published. The remote tag was retained."
+          exit 1

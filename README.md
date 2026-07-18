@@ -137,7 +137,7 @@ The proxy sends Codex activity directly on the assistant delta/message. Text use
 
 Internal app-server commands, file changes, MCP calls, web searches, collaboration calls, and other supported tool-like items are represented as function-shaped calls. The first event announces a call in `tool_calls`. Later progress and terminal events place bounded status/content plus the matching function metadata in nonstandard `tool_results` without repeating complete call arguments; an orphan result also introduces its reconstructable call. These calls are observational and are already executed by app-server; clients must not execute them. They do not cause `finish_reason: "tool_calls"`.
 
-Client-defined dynamic functions still suspend with `finish_reason: "tool_calls"` and require the normal follow-up `role: "tool"` messages. The continuation response begins with the accepted calls and nonstandard `tool_results` together, then streams later nonstandard reasoning, standard text, or internal activity from the same turn. The top-level request extension `previous_response_id` and the policy fields nested under `x_codex` remain distinct from these direct response fields.
+Client-defined dynamic functions still suspend with `finish_reason: "tool_calls"` and require the normal follow-up `role: "tool"` messages. The continuation response begins with the accepted calls and nonstandard `tool_results` together, then streams later nonstandard reasoning, standard text, or internal activity from the same turn.
 
 ### Select Codex policy
 
@@ -163,7 +163,7 @@ Approval policy is proxy-owned and non-interactive. The proxy prefers `never`, s
 
 Continuations must repeat the same effective `x_codex` settings. A change is rejected with `continuation_cwd_mismatch` or `continuation_policy_mismatch` before the thread is resumed.
 
-The machine-readable request-extension schema is [protocol/schemas/x-codex.schema.json](https://github.com/CIVITAS-John/codex-app-server-to-proxy/blob/main/protocol/schemas/x-codex.schema.json), shipped inside the installed package at `protocol/schemas/x-codex.schema.json`. `previous_response_id` is the separate top-level nonstandard continuation extension. Response `reasoning` and `tool_results` are nonstandard direct compatibility fields rather than standard Chat Completions fields or fields inside a response-side `x_codex` object.
+The machine-readable request-extension schema is [protocol/schemas/x-codex.schema.json](https://github.com/CIVITAS-John/codex-app-server-to-proxy/blob/main/protocol/schemas/x-codex.schema.json), shipped inside the installed package at `protocol/schemas/x-codex.schema.json`.
 
 > **Project trust side effect:** Starting a new thread with `workspace-write` and a `cwd` can cause app-server to mark that project as trusted in the user's `config.toml`. Set `--root` to the narrowest appropriate boundary; the proxy will not cause app-server to trust a directory outside it.
 
@@ -181,11 +181,7 @@ The listener accepts only `127.0.0.1`, `::1`, or `localhost`; configuration norm
 
 There is no proxy bearer-token check, so any process running as your local user may be able to call it. Continuation state is private to that user where the platform supports POSIX permissions. See the [security model](https://github.com/CIVITAS-John/codex-app-server-to-proxy/blob/main/docs/security.md) for the threat model, audit boundary, and debug-logging policy.
 
-The launch directory is the default root for Codex work. Set a narrower boundary when needed:
-
-```sh
-npx --yes codex-openai-proxy@next serve --root /absolute/path/to/project
-```
+The launch directory is the default root for Codex work; pass `--root /absolute/path/to/project` to set a narrower boundary, as shown in the quick start.
 
 The proxy writes structured JSON logs to stderr. Default logs omit working directories and command details. `--log-level debug` is the opt-in diagnostic mode and may reveal the configured root or redacted app-server diagnostic context, so capture it carefully. Run `npx --yes codex-openai-proxy@next --help` for all server, timeout, capacity, logging, state, and Codex executable options.
 
@@ -237,13 +233,10 @@ Inspect `~/.codex-openai-proxy/<printed-namespace>` before deleting it.
 
 ## Verification modes
 
-`npm ci && npm run check` is the deterministic offline gate. It regenerates the pinned protocol in a temporary tree for comparison, type-checks both Vitest configurations, and runs bounded property and compatibility tests. The required CI definition runs that gate on Node.js 20, 22, 24, and 26 on Linux and Node.js 24 on macOS and Windows. Coverage and its floors run only on the primary Linux Node.js 24 job and remain enabled by default for local `npm test`.
-
-`npm run test:package` builds one tarball, seeds an isolated npm cache from the exact Codex packages already installed by `npm ci`, installs that exact proxy tarball in npm offline mode with lifecycle scripts disabled, and invokes the generated npm bin shim against a local fake app-server. The smoke performs no registry request, login, or live model call; its only HTTP traffic is loopback test traffic. The default command cleans up the tarball. Release automation uses `npm run test:package -- --retain` and publishes the retained, tested file rather than rebuilding from the source directory.
-
-`npm run test:package -- --registry-install` is the separate networked packaging check. It uses an isolated empty cache to fetch the exact runtime and current-platform Codex packages, then runs the same tarball/bin-shim smoke. A dispatch-only three-operating-system workflow keeps this registry availability check outside required offline CI.
-
-`npm run test:live` is a separate opt-in compatibility check using the dedicated live configuration. It is serial, uses only `gpt-5.4-mini`, normally makes five model calls, and has a hard maximum of six. The manual online workflow additionally requires explicit environment authorization and a nonempty `CODEX_ACCESS_TOKEN`; headless execution never prints device-code URLs or codes. It is never a pull-request prerequisite.
+- `npm ci && npm run check` is the deterministic offline gate: it regenerates the pinned protocol in a temporary tree for comparison, type-checks, and runs the bounded offline test suites. Required CI runs the same gate on Node.js 24 on Linux, macOS, and Windows.
+- `npm run test:package` builds one tarball and installs it in npm offline mode with lifecycle scripts disabled, exercising the generated bin shim against a local fake app-server. It performs no registry request, login, or live model call. Release automation publishes the exact tarball this smoke retained (`-- --retain`) rather than rebuilding at publish time.
+- `npm run test:package -- --registry-install` is the separate networked packaging check, dispatched on Linux, macOS, and Windows outside required offline CI.
+- `npm run test:live` is the opt-in live compatibility check: serial, `gpt-5.4-mini` only, normally five model calls with a hard maximum of six, and requires explicit authorization. It is never a pull-request prerequisite.
 
 ## Project documentation
 

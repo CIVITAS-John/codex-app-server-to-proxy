@@ -42,7 +42,7 @@ These results are local source-tree evidence, not remote-matrix or registry evid
 
 ## Prove remote compatibility
 
-- [ ] Push the exact candidate commit and record a green required offline matrix for Linux on Node.js 20, 22, 24, and 26 and for macOS and Windows on Node.js 24.
+- [ ] Push the exact candidate commit and record a green required offline matrix for Linux, macOS, and Windows on Node.js 24.
 - [ ] Dispatch the `Registry-backed package smoke` workflow and record its clean registry-install/bin-shim results from Linux, macOS, and Windows on Node.js 24. Source-tree execution and the required offline matrix are not substitutes for this networked evidence.
 - [ ] Resolve or explicitly defer every failed matrix, package, or dependency-audit result before tagging.
 
@@ -94,18 +94,26 @@ npm trusted publishing is configured from an existing package's settings. If `np
 
 ### Publish subsequent candidates through OIDC
 
-- [ ] In the npm package settings, configure trusted publishing for `CIVITAS-John/codex-app-server-to-proxy`, workflow `publish-prerelease.yml`, and the protected GitHub `npm` environment. Allow publication, grant the workflow only `contents: read` and `id-token: write`, and do not add a long-lived npm token.
-- [ ] Bump and tag the accepted subsequent candidate in one step after updating [CHANGELOG.md](CHANGELOG.md). The version lives only in `package.json`; tests read it from there, so no other file is edited by a bump:
+- [ ] In the npm package settings, configure trusted publishing for `CIVITAS-John/codex-app-server-to-proxy`, workflow `publish-prerelease.yml`, and the protected GitHub `npm` environment. Allow publication, grant the workflow only `contents: write` and `id-token: write`, and do not add a long-lived npm token. The contents permission lets the workflow push its version commit and tag.
+- [ ] Add the upcoming candidate's entry to [CHANGELOG.md](CHANGELOG.md) and commit it to `main`. Keep the publication date pending until registry verification below. Do not hand-edit versions or hand-create tags.
+- [ ] In GitHub Actions, open **Publish npm prerelease**, choose **Run workflow** from `main`, and optionally select `dry_run` first. The workflow rejects any non-`main` dispatch. A dry run executes the offline matrix, guards, local version bump, and package gates, but does not push refs or publish to npm.
+- [ ] For a real run, the workflow bumps `package.json` and `package-lock.json`, creates the version commit and `v${package.version}` tag on the runner, pushes only the tag, publishes the exact retained tarball to `next` with provenance, and then fast-forwards `main` to the tagged commit. It uploads the tarball for 14-day evidence retention. The registry-backed smoke remains a separate, explicitly dispatched verification.
+- [ ] Treat the workflow's failure boundaries as part of the release gate. Before the tag push, a failure leaves the repository untouched. After an unsuccessful publish command, the workflow first confirms that its remote tag still exists and checks the exact npm version. It retains the tag and fails if the version exists or npm cannot be verified; a confirmed E404 deletes the tag so a later dispatch can recreate it. Because registry visibility can lag, verify npm again before redispatching, and if the workflow retained the tag for a version npm now confirms absent, delete that tag first — a leftover tag rejects the next run's tag push:
 
   ```sh
-  npm version prerelease --preid=rc
-  git push --follow-tags
+  git push origin :refs/tags/vX.Y.Z-rc.N
   ```
 
-  `npm version` writes `package.json` and `package-lock.json`, commits, and creates the `v${package.version}` tag the workflow validates. Do not hand-edit versions or hand-create tags.
+- [ ] After npm accepts the version, if the final `main` push fails, land the tagged commit on `main` manually. A plain merge fast-forwards when `main` has not moved and records a merge commit when it has:
 
-- [ ] The pushed tag triggers the prerelease workflow. It must require the full offline matrix, confirm the package exists, verify the tag/version pair, run the local gates, execute `npm run test:package -- --retain`, upload that tarball for 14-day evidence retention, and publish the exact reported path with `npm publish "${{ steps.packed.outputs.tarball }}" --provenance --tag next --access public`.
-- [ ] Record the workflow URL, tested tarball digest, published integrity, and OIDC/provenance result. A rebuilt or directory-published package does not satisfy this gate.
+  ```sh
+  git fetch --tags
+  git merge vX.Y.Z-rc.N
+  git push origin main
+  ```
+
+- [ ] Account for the validation and identity split: the full offline matrix runs on the dispatch commit immediately before the generated version commit, while `npm run check` and `npm run test:package -- --retain` run on the bumped tree and validate the versioned tarball. GitHub's OIDC provenance identifies the `main` dispatch ref and parent commit because the version commit is created inside that workflow run; record both that dispatch SHA and the generated tagged commit.
+- [ ] Record the workflow URL, dispatch SHA, generated tagged commit, tested tarball digest, published integrity, and OIDC/provenance result. A rebuilt or directory-published package does not satisfy this gate.
 - [ ] After OIDC succeeds, restrict traditional publishing access in the npm package settings according to the repository's owner-recovery policy. Retain an interactive owner account with 2FA for deprecation and dist-tag incident response; do not create an automation token.
 
 ## Verify the registry
@@ -117,7 +125,7 @@ npm trusted publishing is configured from an existing package's settings. If `np
   npm view "codex-openai-proxy@${CODEX_PROXY_RELEASE_VERSION}" version dist-tags dist.integrity dist.tarball repository license --json
   ```
 
-- [ ] For an OIDC-published candidate, verify the npm provenance attestation links to the expected repository, workflow, commit, tag, and tested tarball. Verify registry signatures and attestations from a clean temporary install where supported. For the one-time manual bootstrap, record that provenance is unavailable rather than claiming it passed.
+- [ ] For an OIDC-published candidate, verify the npm provenance attestation links to the expected repository, workflow, `main` dispatch ref, dispatch commit, and tested tarball. Separately verify that the release tag names the generated version commit whose parent is that dispatch commit. Verify registry signatures and attestations from a clean temporary install where supported. For the one-time manual bootstrap, record that provenance is unavailable rather than claiming it passed.
 - [ ] Install the exact registry version in a clean temporary project with lifecycle scripts disabled, invoke `codex-openai-proxy --version` through its npm bin shim, and repeat the bounded published-package smoke.
 - [ ] In an explicitly authorized disposable login profile with no existing Codex session, start the exact registry-installed bin shim on loopback and record that browser or device-code login reaches `/ready`. An already-authenticated startup is not first-run login evidence. Do not record the authorization URL, device code, token, or profile path.
 - [ ] From the exact registry-installed bin shim, run the published-prerelease live scenarios with only `gpt-5.4-mini`: declare the expected normal total of **5 calls** and hard maximum of **6** before starting, then record the exact count. Cover streaming, role history, client-defined tool continuation, usage when reported, policy selection, and completed-thread continuation after restarting both the installed proxy and its app-server. The fake packed smoke and source-level `npm run test:live` do not satisfy this item.

@@ -80,7 +80,7 @@ All implementation items below are now represented in the source tree and determ
 
 Vitest remains the sole runner for maintained automated suites. The default configuration is the required offline gate; the dedicated live configuration is a separately authorized compatibility smoke and never substitutes for deterministic fault coverage.
 
-The runtime policy enforces a lower bound only: `engines` is `>=20`, so Node.js 20 is the minimum compatibility line and newer majors are accepted without an upper cap. CI exercises Node.js 20, 22, 24, and 26 on Linux and the primary Node.js 24 LTS on macOS and Windows; the matrix gains new majors as they are validated but does not bound what the package accepts.
+The runtime policy enforces a lower bound only: `engines` is `>=20`, so Node.js 20 is the minimum compatibility line and newer majors are accepted without an upper cap. CI exercises the primary Node.js 24 LTS on Linux, macOS, and Windows; the matrix gains lines as they are validated but does not bound what the package accepts.
 
 Required property tests use deterministic seed `17072026` and bounded runs. Minimal regression values are checked in separately from generated protocol artifacts. Coverage measures maintained `src/` TypeScript only, excludes the executable shim, and publishes text, JSON summary, and LCOV output from the primary Linux Node.js 24 job. CI explicitly disables coverage on compatibility-matrix jobs; default local tests keep it enabled.
 
