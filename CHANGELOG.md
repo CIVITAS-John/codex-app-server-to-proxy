@@ -2,7 +2,7 @@
 
 All notable user-facing changes are recorded here. This project follows semantic versioning once a version is published.
 
-## 0.1.0-rc.0 — pending publication
+## 0.1.0-rc.0 — July 17, 2026
 
 First prerelease candidate for the localhost-only `codex-openai-proxy` npm CLI.
 
@@ -24,5 +24,3 @@ First prerelease candidate for the localhost-only `codex-openai-proxy` npm CLI.
 - Pins `@openai/codex` to exactly `0.144.5`; `--codex-path` overrides must report that same version.
 - Implements a focused, text-only Chat Completions subset. It does not implement the Responses API or general OpenAI endpoints.
 - Persists version-0 continuation mappings per canonical root under `~/.codex-openai-proxy` by default. Uninstalling the npm package does not remove them.
-
-Replace “pending publication” with the publication date after registry verification. For an OIDC candidate, provenance verification is also required; for the one-time manual bootstrap, record the documented provenance exception instead.
