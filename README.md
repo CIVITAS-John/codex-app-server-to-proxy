@@ -19,10 +19,10 @@ npx --yes codex-openai-proxy@next serve --root /absolute/path/to/project
 
 Check status:
 
-| Endpoint | Meaning |
-| --- | --- |
-| `GET /health` | 200 while the proxy process is alive |
-| `GET /ready` | 200 once Codex is initialized and authenticated; 503 while starting, logging in, or recovering |
+| Endpoint      | Meaning                                                                                        |
+| ------------- | ---------------------------------------------------------------------------------------------- |
+| `GET /health` | 200 while the proxy process is alive                                                           |
+| `GET /ready`  | 200 once Codex is initialized and authenticated; 503 while starting, logging in, or recovering |
 
 ## Authentication
 
@@ -71,14 +71,14 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 
 ## What's supported
 
-| Supported | Not supported |
-| --- | --- |
-| `POST /v1/chat/completions` with text-only messages (`system`, `developer`, `user`, `assistant`, `tool`) | Multimodal message content (images, audio) |
-| Streaming (SSE, ends with `data: [DONE]`) and non-streaming | Responses API, embeddings, images, audio, model management |
-| `reasoning_effort` (`none` … `max`, forwarded to Codex) | `tool_choice` other than `"auto"` / `"none"` |
-| Client-defined function tools, `tool_calls`, `finish_reason: "tool_calls"` | More than one choice per response |
-| `stream_options.include_usage` | Remote (non-loopback) serving |
-| OpenAI-shaped JSON errors | |
+| Supported                                                                                                | Not supported                                              |
+| -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `POST /v1/chat/completions` with text-only messages (`system`, `developer`, `user`, `assistant`, `tool`) | Multimodal message content (images, audio)                 |
+| Streaming (SSE, ends with `data: [DONE]`) and non-streaming                                              | Responses API, embeddings, images, audio, model management |
+| `reasoning_effort` (`none` … `max`, forwarded to Codex)                                                  | `tool_choice` other than `"auto"` / `"none"`               |
+| Client-defined function tools, `tool_calls`, `finish_reason: "tool_calls"`                               | More than one choice per response                          |
+| `stream_options.include_usage`                                                                           | Remote (non-loopback) serving                              |
+| OpenAI-shaped JSON errors                                                                                |                                                            |
 
 Harmless unsupported fields are ignored with one structured warning. Malformed or ambiguous input is rejected rather than approximated.
 
@@ -109,7 +109,7 @@ Function tools follow the normal multi-request Chat Completions flow:
 3. Execute the functions in your client.
 4. Send the assistant tool-call message plus matching `role: "tool"` messages — repeating the same `tools`, `reasoning_effort`, and `x_codex` settings as the original request.
 
-Changing those settings between the call and its results is rejected (`continuation_reasoning_effort_mismatch` / `continuation_policy_mismatch`); the pending call stays intact so you can retry corrected. Pending tool calls are held in memory for 5 minutes and do not survive a proxy restart.
+Changing those settings between the call and its results is rejected (`continuation_reasoning_effort_mismatch` / `continuation_policy_mismatch`); the pending call stays intact so you can retry corrected. Pending tool calls are held in memory for 5 minutes, with the deadline restarted whenever an incoming request selects the pending response by `previous_response_id` or matching tool-call IDs. They do not survive a proxy restart.
 
 ## Codex-specific extensions
 
@@ -136,9 +136,9 @@ Pass the `id` of the newest completed response as top-level `previous_response_i
 
 Responses can include two nonstandard fields on the assistant delta/message:
 
-| Field | Contents |
-| --- | --- |
-| `reasoning` | Codex's reasoning summary (string) |
+| Field          | Contents                                                                                      |
+| -------------- | --------------------------------------------------------------------------------------------- |
+| `reasoning`    | Codex's reasoning summary (string)                                                            |
 | `tool_results` | Status/results of Codex's internal activity (commands, file changes, MCP calls, web searches) |
 
 Internal activity also appears as function-shaped entries in `tool_calls`. These are **observational** — Codex already executed them. Do not execute them, and do not send tool results for them; they never cause `finish_reason: "tool_calls"`. Only your own client-defined functions suspend the turn and require `role: "tool"` follow-ups.
@@ -161,11 +161,11 @@ Per-request Codex controls live under a nonstandard top-level `x_codex` object:
 }
 ```
 
-| Field | Values | Default | Notes |
-| --- | --- | --- | --- |
-| `cwd` | absolute path | the configured `--root` | Must be the root or a descendant; symlink escapes and relative paths are rejected |
-| `sandbox` | `read-only`, `workspace-write`, `danger-full-access` | `read-only` | Full access is never selected implicitly |
-| `web_search` | `disabled`, `cached`, `indexed`, `live` | `disabled` | Applied per Codex thread |
+| Field        | Values                                               | Default                 | Notes                                                                             |
+| ------------ | ---------------------------------------------------- | ----------------------- | --------------------------------------------------------------------------------- |
+| `cwd`        | absolute path                                        | the configured `--root` | Must be the root or a descendant; symlink escapes and relative paths are rejected |
+| `sandbox`    | `read-only`, `workspace-write`, `danger-full-access` | `read-only`             | Full access is never selected implicitly                                          |
+| `web_search` | `disabled`, `cached`, `indexed`, `live`              | `disabled`              | Applied per Codex thread                                                          |
 
 The JSON Schema ships with the package at `protocol/schemas/x-codex.schema.json`.
 
@@ -183,25 +183,25 @@ When Codex reports exact usage for the turn, responses include standard `prompt_
 
 Default limits (all configurable via CLI flags):
 
-| Limit | Default |
-| --- | --- |
-| JSON body size | 1 MiB |
-| Concurrent HTTP requests | 100 (excess rejected with 429 `overloaded`) |
-| Request deadline | 30 s |
-| Suspended tool-call deadline | 5 min |
-| Login / startup deadline (`--tool-timeout`) | 5 min |
+| Limit                                       | Default                                     |
+| ------------------------------------------- | ------------------------------------------- |
+| JSON body size                              | 1 MiB                                       |
+| Concurrent HTTP requests                    | 100 (excess rejected with 429 `overloaded`) |
+| Request deadline                            | 30 s                                        |
+| Suspended tool-call deadline                | 5 min                                       |
+| Login / startup deadline (`--tool-timeout`) | 5 min                                       |
 
 A second request for an active Codex thread returns 409 `thread_busy`. If app-server crashes, the proxy retries with bounded backoff while `/ready` returns 503.
 
 ## Troubleshooting
 
-| Symptom | What to do |
-| --- | --- |
-| `/ready` returns 503 | Login or startup hasn't finished — follow [Authentication](#authentication) and check the stderr logs for `app_server_ready` or `startup_failed` |
-| Browser login never appears | Non-terminal stderr selects device-code login; run `serve` in a foreground terminal without redirecting stderr |
-| Address already in use | Choose another loopback `--port` |
-| `--codex-path` override rejected | The override must report exactly `codex-cli 0.144.5` (the version bundled with this package); remove the flag to use the bundled executable |
-| Policy request denied | Managed requirements disallow the value; the proxy never silently weakens policy |
+| Symptom                          | What to do                                                                                                                                       |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/ready` returns 503             | Login or startup hasn't finished — follow [Authentication](#authentication) and check the stderr logs for `app_server_ready` or `startup_failed` |
+| Browser login never appears      | Non-terminal stderr selects device-code login; run `serve` in a foreground terminal without redirecting stderr                                   |
+| Address already in use           | Choose another loopback `--port`                                                                                                                 |
+| `--codex-path` override rejected | The override must report exactly `codex-cli 0.144.5` (the version bundled with this package); remove the flag to use the bundled executable      |
+| Policy request denied            | Managed requirements disallow the value; the proxy never silently weakens policy                                                                 |
 
 For deeper diagnosis, temporarily add `--log-level debug` — but treat its output as sensitive.
 

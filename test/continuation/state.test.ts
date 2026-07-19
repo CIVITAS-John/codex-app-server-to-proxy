@@ -10,7 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
-import { test } from "vitest";
+import { test, vi } from "vitest";
 import { PassThrough } from "node:stream";
 import { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
 import {
@@ -292,6 +292,44 @@ test("pending tool_call_id values implicitly select exactly one response", async
     );
     rpc.close();
   }, "codex-proxy-state-");
+});
+
+test("matching a pending response refreshes its tool-result deadline", async () => {
+  vi.useFakeTimers();
+  try {
+    await withTempDir(async (directory) => {
+      const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
+      const coordinator = new ContinuationCoordinator(
+        new ResponseStore(directory),
+        rpc,
+        100,
+      );
+      coordinator.suspend("response_1", binding, [
+        {
+          request: { id: 1, method: "item/tool/call", params: {} },
+          callId: "call_1",
+          name: "lookup",
+          arguments: {},
+          threadId: "thread_1",
+          turnId: "turn_1",
+        },
+      ]);
+
+      await vi.advanceTimersByTimeAsync(80);
+      assert.equal(coordinator.refreshPending("response_1"), true);
+      assert.equal(coordinator.refreshPending("unknown"), false);
+      await vi.advanceTimersByTimeAsync(80);
+      assert.equal(coordinator.pending("response_1")?.length, 1);
+      assert.equal(coordinator.store.get("response_1")?.state, "pending_tool");
+
+      await vi.advanceTimersByTimeAsync(20);
+      assert.equal(coordinator.pending("response_1"), undefined);
+      assert.equal(coordinator.store.get("response_1")?.state, "expired");
+      rpc.close();
+    }, "codex-proxy-state-");
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("implicit tool continuation preserves an expired restart tombstone", async () => {

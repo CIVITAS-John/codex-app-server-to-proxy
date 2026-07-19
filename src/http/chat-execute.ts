@@ -434,6 +434,11 @@ async function resumeContinuation(
 ): Promise<Array<{ call: PendingToolCall; content: string }>> {
   const stored = options.continuations.store.get(request.previousResponseId!);
   if (!stored) continuationFailure(404, "unknown_previous_response_id");
+  // Selecting a live suspension proves that this request is a continuation attempt.
+  // Refresh before validation so a correctable mismatch cannot consume the
+  // remaining client tool-result window.
+  if (stored.state === "pending_tool")
+    options.continuations.refreshPending(request.previousResponseId!);
   if (stored.model !== binding.model)
     continuationFailure(409, "continuation_model_mismatch");
   // Schema-version-0 records written before reasoning effort became binding

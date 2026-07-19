@@ -432,6 +432,14 @@ export class ContinuationCoordinator {
     return this.#pending.get(responseId)?.calls;
   }
 
+  /** Restarts the deadline for one live suspension selected by a request. */
+  refreshPending(responseId: string): boolean {
+    const entry = this.#pending.get(responseId);
+    if (!entry) return false;
+    entry.timer.refresh();
+    return true;
+  }
+
   /** Resolves live pending tool IDs to exactly one suspended response. */
   findPendingResponse(callIds: readonly string[]): string {
     const requested = new Set(callIds);

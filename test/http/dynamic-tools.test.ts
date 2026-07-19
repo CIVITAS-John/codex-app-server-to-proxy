@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
+import { test, vi } from "vitest";
+import { ContinuationCoordinator } from "../../src/continuation/state.js";
 import {
   protocolNotification,
   protocolResponse,
@@ -696,6 +697,10 @@ test("implicit tool continuation must repeat the original x_codex policy", async
       { type: "function", function: { name: "first", parameters: {} } },
       { type: "function", function: { name: "second", parameters: {} } },
     ];
+    const refreshPending = vi.spyOn(
+      ContinuationCoordinator.prototype,
+      "refreshPending",
+    );
     try {
       const first = (await (
         await postChatCompletion(origin, {
@@ -723,6 +728,7 @@ test("implicit tool continuation must repeat the original x_codex policy", async
         "continuation_policy_mismatch",
       );
       assert.equal(fake.results.length, 0);
+      assert.deepEqual(refreshPending.mock.calls, [[first.id]]);
 
       const changedEffort = await postChatCompletion(origin, {
         model: "m",
@@ -737,6 +743,7 @@ test("implicit tool continuation must repeat the original x_codex policy", async
         "continuation_reasoning_effort_mismatch",
       );
       assert.equal(fake.results.length, 0);
+      assert.deepEqual(refreshPending.mock.calls, [[first.id], [first.id]]);
 
       // Repeating the original x_codex on the implicit continuation matches the
       // suspension and delivers the results.
@@ -753,6 +760,7 @@ test("implicit tool continuation must repeat the original x_codex policy", async
         [902, 901],
       );
     } finally {
+      refreshPending.mockRestore();
       await proxy.close();
     }
   }, "codex-dynamic-tools-");
