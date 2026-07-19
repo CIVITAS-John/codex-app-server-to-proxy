@@ -34,6 +34,44 @@ After a stable release, omit `@next` from the `npx` and install commands. Instal
 
 The package includes the exact `@openai/codex` version used to generate its app-server contract: `0.144.5`. The proxy uses that package-owned executable by default. An explicit `--codex-path` override must report exactly `codex-cli 0.144.5`; both older and newer overrides are rejected until this package's generated contract is updated.
 
+## Authentication
+
+The proxy authenticates app-server with Codex's ChatGPT account session. It does not exchange the `Authorization` header or the placeholder API key used by an OpenAI client for a ChatGPT login. If Codex already reports a usable account, startup reuses it without prompting. Otherwise, the proxy begins login and stays unavailable for completions until that login succeeds.
+
+### What to expect
+
+The proxy starts its loopback HTTP listener before checking the account. During authentication, `/health` returns HTTP 200, `/ready` returns HTTP 503 with `{"status":"not_ready"}`, and Chat Completions requests return `app_server_not_ready`. A successful startup writes an `app_server_ready` structured event to stderr; `/ready` then returns HTTP 200 with `{"status":"ready"}`.
+
+The login method depends on whether stderr is attached to a terminal:
+
+- In a local interactive terminal, the proxy requests browser login and tries to open the authorization page. Complete the flow in the browser and leave `serve` running. A successful browser launch writes `browser_launch_succeeded`; this means only that the page opened, not that login is complete. If the launcher fails, the proxy writes the authorization URL once to the terminal and records `browser_launch_failed` with the URL redacted from the structured event.
+- With redirected or non-terminal stderr, including most containers, services, and CI jobs, the proxy requests device-code login. It writes a verification URL and one-time code to stderr and records `device_code_login_started` with both values redacted from the structured event. Keep stderr visible long enough to complete the flow.
+- If an account is already available, neither prompt appears. The proxy proceeds directly to `app_server_ready` after app-server initialization.
+
+Codex owns the account session and token refresh; the proxy does not keep a separate credential in its continuation state. Removing the proxy package or its state directory therefore does not log out the Codex account.
+
+The default authentication deadline is five minutes. `--tool-timeout` controls this deadline as well as app-server startup and dynamic-tool deadlines; for a deliberately slow interactive login, start the proxy with a larger value such as `--tool-timeout 10m`. Pressing Ctrl-C cancels an in-progress login and shuts down the child process.
+
+Treat the fallback authorization URL and device code as temporary credentials. Do not paste them into issues, logs, screenshots, or shared transcripts. The proxy redacts them from structured logs, but the one-time terminal instructions are intentionally readable so that login can be completed.
+
+### Debug authentication
+
+1. Run `serve` in the foreground with stderr attached to the terminal. Avoid piping or redirecting stderr if you expect browser login, because doing so selects device-code login instead.
+2. Check both endpoints while the process is running:
+
+   ```sh
+   curl -i http://127.0.0.1:8787/health
+   curl -i http://127.0.0.1:8787/ready
+   ```
+
+   A healthy but not-ready process is still initializing, authenticating, or recovering. Use the structured events to distinguish those states.
+
+3. Look for `browser_launch_succeeded`, `browser_launch_failed`, or `device_code_login_started`, then wait for `app_server_ready`. If startup ends with `startup_failed`, inspect its redacted `error` field. `ChatGPT login failed` indicates that the authorization flow was rejected; `ChatGPT login timed out` means the shared `--tool-timeout` deadline expired.
+4. If no browser appears after `browser_launch_succeeded`, stop the proxy and retry in an environment where the operating-system browser launcher works; a session with non-terminal stderr selects device-code login instead. When `browser_launch_failed` appears, use the URL printed immediately before the structured event. In a headless session, use the device-code instructions printed immediately before `device_code_login_started`.
+5. Retry `serve` after correcting or completing the login. The proxy does not become partially ready, and a failed initial login exits instead of accepting completion requests with an unusable account.
+
+For deeper diagnosis, add `--log-level debug` temporarily. Debug output can contain the configured root and bounded app-server diagnostic text, so keep it local and review it before sharing. Redirecting debug output also makes stderr non-interactive; authenticate in the foreground first if you want the browser flow, then stop the proxy and reproduce the problem with debug capture enabled.
+
 ## Use an OpenAI client
 
 Point an OpenAI-compatible client at the local `/v1` base URL. The proxy does not require a local API key, although some client libraries require a non-empty placeholder value.
@@ -204,10 +242,9 @@ This proxy implements only the focused Chat Completions subset described above. 
 
 ## Troubleshooting
 
-- If `/ready` returns 503, inspect the structured terminal logs for authentication, managed-policy, version, or bounded-restart failures.
+- If `/ready` returns 503, follow the [authentication guide](#authentication), then inspect the structured terminal logs for managed-policy, version, or bounded-restart failures.
 - If startup reports an address conflict, choose another loopback `--port` or stop the process already using it.
 - If the package-owned Codex executable is missing, reinstall the package for the current platform. If an override is rejected, remove `--codex-path` or supply an executable whose `--version` output reports exactly `codex-cli 0.144.5`.
-- If login fails or times out, keep the terminal open, retry `serve`, and follow the browser or device-code prompt. Inspect only redacted structured logs before enabling debug output.
 - If a policy request is denied, choose a value permitted by the loaded managed requirements; the proxy will not silently weaken or substitute policy.
 - Use `--log-level debug` only for temporary diagnosis. Debug output is a sensitive-data opt-in and should not be attached to issues without review.
 

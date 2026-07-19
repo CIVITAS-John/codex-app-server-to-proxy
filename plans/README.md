@@ -27,7 +27,7 @@ This directory is the source of truth for product decisions, implementation stat
 - Group maintained source by CLI, core, app-server, HTTP, and continuation domains, and mirror those domains under `test/` alongside contract, spike, and shared-support folders.
     - Keep `src/bin.ts` as the root executable shim so compilation continues to publish the CLI at `dist/bin.js`; the restructure changes contributor-facing paths but not the package bin contract.
 - Use mocks by default and only `gpt-5.4-mini` for opt-in live development tests.
-- Reserve the npm package name with one interactive package-owner/2FA publication of the exact tested `0.1.0-rc.0` tarball to `next` only if the package does not yet exist; record that no OIDC provenance is available for this bootstrap. Configure trusted publishing immediately afterward and require every later candidate to publish its exact tested tarball through OIDC. The prerelease workflow rejects stable versions and must not move `latest`.
+- Reserve an unclaimed npm package name once with an interactive package-owner/2FA publication of the exact tested `0.1.0-rc.0` tarball to `next`; that bootstrap has no OIDC provenance. Publish later candidates through the `main`-only prerelease workflow with trusted publishing. The workflow never moves `latest`.
 - Treat npm deprecation and dist-tag changes as interactive package-owner operations protected by 2FA. Trusted-publishing OIDC authority is limited to publication and does not authorize rollback registry mutations.
 - Preserve per-root continuation state across uninstall, deprecation, and rollback. A persistence-incompatible release must migrate explicitly or leave the prior compatible package available; package lifecycle actions never delete the store.
 
@@ -48,7 +48,7 @@ This directory is the source of truth for product decisions, implementation stat
 
 ### Implemented locally
 
-Stages 01 through 07 are implemented in the source tree. Stage 08 adds the prerelease package metadata and license, narrow npm allow-list, package-derived `--version`, deterministic fresh-tarball/bin-shim smoke, trusted-publishing prerelease workflow, published-user README, changelog, and release/rollback checklist. The exact Codex dependency and generated contract remain pinned to `0.144.5`.
+Stages 01 through 08 are implemented in the source tree. Stage 08 includes the package metadata, deterministic packed-package smoke, registry-backed smoke workflow, trusted-publishing prerelease workflow, published-user README, changelog, and release runbook. The exact Codex dependency and generated contract remain pinned to `0.144.5`.
 
 The default TypeScript/Vitest configuration is deterministic and offline; opt-in live-test filenames are excluded. The expanded live contract names three scenarios, normally makes five `gpt-5.4-mini` calls, and enforces a six-call maximum. On 2026-07-16, `npm run check` passed 19 files and 155 tests with coverage thresholds, the offline `npm run test:package` and local `--registry-install` mode passed, and the final dry pack contained 51 files at 71,939 bytes packed and 295,941 bytes unpacked.
 
