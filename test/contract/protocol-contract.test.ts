@@ -134,6 +134,7 @@ test("continuation schema examples agree with the production store reader", asyn
         required: string[];
         properties: {
           responseId: { minLength: number };
+          reasoningEffort: { type: string; minLength: number };
           toolsHash: { pattern: string };
           callIds: { uniqueItems: boolean };
         };
@@ -144,6 +145,8 @@ test("continuation schema examples agree with the production store reader", asyn
   assert.equal(schema.properties.version.const, 0);
   assert.equal(recordSchema.additionalProperties, false);
   assert.equal(recordSchema.properties.responseId.minLength, 1);
+  assert.equal(recordSchema.properties.reasoningEffort.type, "string");
+  assert.equal(recordSchema.properties.reasoningEffort.minLength, 1);
   assert.equal(recordSchema.properties.toolsHash.pattern, "^[a-f0-9]{64}$");
   assert.equal(recordSchema.properties.callIds.uniqueItems, true);
 
@@ -169,12 +172,22 @@ test("continuation schema examples agree with the production store reader", asyn
     (await loadContinuationFixture(accepted))?.threadId,
     accepted.threadId,
   );
+  assert.equal(
+    (
+      await loadContinuationFixture({
+        ...accepted,
+        reasoningEffort: "high",
+      })
+    )?.reasoningEffort,
+    "high",
+  );
 
   const rejected = [
     { ...accepted, responseId: "" },
     { ...accepted, toolsHash: "A".repeat(64) },
     { ...accepted, createdAt: null },
     { ...accepted, callIds: ["duplicate", "duplicate"] },
+    { ...accepted, reasoningEffort: "" },
     { ...accepted, unexpected: true },
   ];
   for (const record of rejected)
@@ -209,6 +222,7 @@ test("contract documents the implemented Stage 05 compatibility mappings", async
   assert.match(contract, /`unsupported_chat_fields_ignored`/);
   assert.match(contract, /`none` is accepted/);
   assert.match(contract, /`choices\[0\]\.delta\.reasoning`/);
+  assert.match(contract, /`reasoning_effort`.*`turn\/start\.effort`/);
   assert.match(
     contract,
     /nonstandard direct compatibility field `tool_results`/,

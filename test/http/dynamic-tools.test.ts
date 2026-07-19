@@ -627,6 +627,7 @@ test("implicit tool continuation must repeat the original x_codex policy", async
       const first = (await (
         await postChatCompletion(origin, {
           model: "m",
+          reasoning_effort: "high",
           tools,
           x_codex: { sandbox: "workspace-write" },
           messages: [{ role: "user", content: "use tools" }],
@@ -639,6 +640,7 @@ test("implicit tool continuation must repeat the original x_codex policy", async
       // suspension and the tool results are rejected without being delivered.
       const dropped = await postChatCompletion(origin, {
         model: "m",
+        reasoning_effort: "high",
         tools,
         messages: toolTranscript(calls),
       });
@@ -649,10 +651,25 @@ test("implicit tool continuation must repeat the original x_codex policy", async
       );
       assert.equal(fake.results.length, 0);
 
+      const changedEffort = await postChatCompletion(origin, {
+        model: "m",
+        reasoning_effort: "low",
+        tools,
+        x_codex: { sandbox: "workspace-write" },
+        messages: toolTranscript(calls),
+      });
+      assert.equal(changedEffort.status, 409);
+      assert.equal(
+        await responseErrorCode(changedEffort),
+        "continuation_reasoning_effort_mismatch",
+      );
+      assert.equal(fake.results.length, 0);
+
       // Repeating the original x_codex on the implicit continuation matches the
       // suspension and delivers the results.
       const repeated = await postChatCompletion(origin, {
         model: "m",
+        reasoning_effort: "high",
         tools,
         x_codex: { sandbox: "workspace-write" },
         messages: toolTranscript(calls),

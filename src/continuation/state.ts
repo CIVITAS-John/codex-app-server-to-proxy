@@ -32,6 +32,7 @@ const SCHEMA_VERSION = 0;
 /** Context that must remain identical over a Codex thread's lifetime. */
 export interface ThreadBinding {
   model: string;
+  reasoningEffort?: string;
   cwd: string;
   toolsHash: string;
   policyHash: string;
@@ -521,6 +522,7 @@ function isResponseRecord(value: unknown): value is ResponseRecord {
     "threadId",
     "state",
     "model",
+    "reasoningEffort",
     "cwd",
     "toolsHash",
     "policyHash",
@@ -546,6 +548,9 @@ function isResponseRecord(value: unknown): value is ResponseRecord {
     record.threadId.length > 0 &&
     typeof record.model === "string" &&
     record.model.length > 0 &&
+    (record.reasoningEffort === undefined ||
+      (typeof record.reasoningEffort === "string" &&
+        record.reasoningEffort.length > 0)) &&
     typeof record.cwd === "string" &&
     record.cwd.length > 0 &&
     validHash(record.toolsHash) &&

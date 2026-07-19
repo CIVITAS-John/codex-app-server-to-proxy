@@ -70,6 +70,9 @@ export async function handleChatCompletion(
   }
   const request: ChatRequest = {
     model: parsed.model,
+    ...(parsed.reasoningEffort
+      ? { reasoningEffort: parsed.reasoningEffort }
+      : {}),
     messages: parsed.messages,
     stream: parsed.stream,
     includeUsage: parsed.includeUsage,

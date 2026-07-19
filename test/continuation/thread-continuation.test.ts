@@ -183,12 +183,17 @@ function post(
   });
 }
 
-test("model, cwd, tool, and policy binding mismatches fail before thread/read", async () => {
+test("model, reasoning, cwd, tool, and policy binding mismatches fail before thread/read", async () => {
   const cases = [
     {
       name: "model",
       patch: { model: "other" },
       code: "continuation_model_mismatch",
+    },
+    {
+      name: "reasoning",
+      patch: { reasoningEffort: "high" },
+      code: "continuation_reasoning_effort_mismatch",
     },
     {
       name: "cwd",

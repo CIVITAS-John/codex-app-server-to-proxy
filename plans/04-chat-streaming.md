@@ -6,14 +6,14 @@ Translate the supported Chat Completions subset to app-server threads/turns and 
 
 ## Work
 
-1. Validate `model`, `messages`, `stream`, `stream_options`, `tools`, `tool_choice`, `previous_response_id`, and `x_codex`. Reject any value that cannot be applied faithfully; warn only for fields proven harmless to ignore.
+1. Validate `model`, `reasoning_effort`, `messages`, `stream`, `stream_options`, `tools`, `tool_choice`, `previous_response_id`, and `x_codex`. Reject any value that cannot be applied faithfully; warn only for fields proven harmless to ignore.
 2. Convert system/developer/user/assistant/tool messages into app-server input using the history mechanism decided in Stage 01.
     - `turn/start` input carries no roles, so never silently collapse role or order into plain user text without documenting it.
-3. Start a thread when no continuation exists, then start a turn with only the request model and policy settings proven enforceable in Stage 01.
+3. Start a thread when no continuation exists, then start a turn with the request model, reasoning effort, and policy settings proven enforceable in Stage 01.
 4. Create a single event-normalization layer for app-server item lifecycle and delta notifications.
     - Treat `item/*` notifications as the canonical item stream.
     - `turn/completed` currently carries an empty `items` array and must not be relied on for content.
-5. Translate assistant text to the standard `choices[0].delta.content` shape and exposed reasoning text to the nonstandard direct compatibility field `choices[0].delta.reasoning`; do not expose the app-server `reasoning_summary` naming.
+5. Translate assistant text to the standard `choices[0].delta.content` shape and exposed reasoning text to the nonstandard direct compatibility field `choices[0].delta.reasoning`; request a detailed app-server reasoning summary by default so those deltas are emitted, but disable it for explicit `reasoning_effort: "none"` and do not expose the app-server `reasoning_summary` naming.
 6. Normalize internal command, file, MCP, web-search, collaboration, approval, and other supported tool-like activity into the standard function-shaped `tool_calls` shape and the nonstandard direct compatibility field `tool_results`.
     - Correlate lifecycle events directly through the matching `id` repeated in `tool_calls` and `tool_results`; expose only a stable tool name, bounded arguments/output or progress, terminal status, and structured error.
     - When correlated `item/*` progress arrives without an observed start, synthesize a bounded generic function-shaped call from its `itemId` and a safe method-derived name, then emit that call with its result. Do not expose unknown global notifications.
@@ -37,6 +37,8 @@ Translate the supported Chat Completions subset to app-server threads/turns and 
 ## Implemented decisions
 
 - A fresh request must end in one text-only user message. Earlier system, developer, user, and assistant messages are passed to `thread/inject_items` as role-preserving raw Responses API message items; they are never flattened into user text.
+- Standard `reasoning_effort` accepts the documented Chat Completions values and maps directly to app-server `turn/start.effort`. App-server controls reasoning work and exposed summaries separately, so `turn/start.summary` defaults to `"detailed"`, while explicit `none` maps to `summary: "none"`. Reasoning effort is part of the durable thread binding and must match on continuation so omission or a changed value cannot silently inherit different sticky state.
+- A replayed assistant message may include the proxy's nonstandard string `reasoning` response extension and a structurally valid, self-correlating `tool_calls`/`tool_results` transcript of already-executed Codex activity. The proxy accepts and discards those observational fields, injecting only the assistant's visible `content`; malformed values remain invalid, and client-defined tool continuation still requires matching `role: "tool"` messages.
 - One stateful event normalizer maps both streaming and non-streaming output. Streaming order is chunk order.
 - Reasoning uses `reasoning`, and internal app-server tools use function-shaped `tool_calls` plus self-correlating `tool_results`. Internal tools remain observational and never produce `finish_reason: "tool_calls"`.
 - One explicit notification registry distinguishes dedicated normalization, generic `itemId`-correlated progress, intentionally ignored lifecycle metadata, and diagnostic-only methods. Unstable approval auto-review notifications and terminal-interaction input remain bounded redacted diagnostics rather than public activity. Every intentionally handled notification is structurally required to appear in the generated-protocol-typed event corpus, so adding a known method cannot silently opt it into HTTP output.

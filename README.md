@@ -113,6 +113,7 @@ Standard behavior includes:
 - streaming and non-streaming responses;
 - Chat Completions SSE framing ending with `data: [DONE]`;
 - assistant text in `choices[].message.content` or `choices[].delta.content`;
+- `reasoning_effort` for reasoning models;
 - client-defined function tools, `tool_calls`, and `finish_reason: "tool_calls"`;
 - `stream_options.include_usage`; and
 - OpenAI-shaped JSON errors.
@@ -130,6 +131,7 @@ curl -N http://127.0.0.1:8787/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "gpt-5.4-mini",
+    "reasoning_effort": "high",
     "messages": [{"role": "user", "content": "Describe this repository."}],
     "stream": true,
     "stream_options": {"include_usage": true}
@@ -138,6 +140,8 @@ curl -N http://127.0.0.1:8787/v1/chat/completions \
 
 Standard clients can consume assistant text, client-defined function calls, the final finish reason, and the optional usage chunk without understanding Codex-specific data. Internal activity requires clients that tolerate the direct compatibility fields described below.
 
+`reasoning_effort` accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` and is forwarded to app-server for the turn. The proxy requests a detailed app-server reasoning summary by default so the nonstandard streamed `reasoning` extension receives output; explicit `none` disables the summary. Not every model supports every value; app-server remains authoritative for model-specific availability. A `previous_response_id` continuation must repeat the original value, including omission, or the proxy returns `continuation_reasoning_effort_mismatch`.
+
 ## Function tools
 
 Function tools use the normal multi-request Chat Completions flow:
@@ -145,9 +149,9 @@ Function tools use the normal multi-request Chat Completions flow:
 1. Send the function definitions in `tools`.
 2. Receive an assistant response containing `tool_calls`.
 3. Execute the requested functions in your client.
-4. Send the assistant tool-call message followed by matching `role: "tool"` messages, repeating the same `tools` definition and the same `x_codex` policy settings from the original request.
+4. Send the assistant tool-call message followed by matching `role: "tool"` messages, repeating the same `tools` definition, `reasoning_effort`, and `x_codex` policy settings from the original request.
 
-By default, the proxy associates tool results with the one pending Codex turn through their `tool_call_id` values. Start it with `--implicit-tool-continuation false` if every tool-result request should instead supply the Codex continuation field described below. Either way, a tool-result request whose effective `x_codex` settings differ from the original request is rejected with `continuation_policy_mismatch` and leaves the pending call intact for a corrected retry. Omitted settings are allowed only when they resolve to the same effective values.
+By default, the proxy associates tool results with the one pending Codex turn through their `tool_call_id` values. Start it with `--implicit-tool-continuation false` if every tool-result request should instead supply the Codex continuation field described below. Either way, a tool-result request whose `reasoning_effort` or effective `x_codex` settings differ from the original request is rejected with `continuation_reasoning_effort_mismatch` or `continuation_policy_mismatch` and leaves the pending call intact for a corrected retry. Omitted settings are allowed only when they resolve to the same effective values.
 
 Pending tool calls are held in memory for five minutes by default. They cannot survive a proxy restart; completed threads can.
 
@@ -167,11 +171,13 @@ Codex-specific behavior is additive but nonstandard. Clients that require strict
 }
 ```
 
-A continuation must use the same model and function-tool definitions as the original thread. The proxy rejects unknown, expired, superseded, busy, or incompatible response IDs and never silently starts a replacement thread. Only the newest response can be continued; branching from an older response is not supported.
+A continuation must use the same model, `reasoning_effort`, and function-tool definitions as the original thread. The proxy rejects unknown, expired, superseded, busy, or incompatible response IDs and never silently starts a replacement thread. Only the newest response can be continued; branching from an older response is not supported.
 
 ### Receive Codex activity
 
 The proxy sends Codex activity directly on the assistant delta/message. Text uses the standard `content` shape and calls use the standard `tool_calls` shape. Exposed reasoning uses the nonstandard `reasoning` field (never `reasoning_summary`) and results use the nonstandard `tool_results` field. These are Codex-specific direct compatibility extensions, not standard Chat Completions fields and not fields inside a response-side `x_codex` object. Streaming order is SSE chunk order; non-streaming responses aggregate those fields while preserving text that appeared before a call.
+
+When a client reconstructs a fresh request from a prior response, it may replay the nonstandard string `reasoning` field and the structurally valid `tool_calls`/`tool_results` transcript of already-executed Codex activity on the prior assistant message. The proxy discards those observational fields before injecting history into app-server and retains only the assistant's visible `content`. This does not change client-defined function continuation: calls ending with `finish_reason: "tool_calls"` still require matching `role: "tool"` messages. With `previous_response_id`, send only the new user message because the persisted Codex thread already owns the earlier turn.
 
 Internal app-server commands, file changes, MCP calls, web searches, collaboration calls, and other supported tool-like items are represented as function-shaped calls. The first event announces a call in `tool_calls`. Later progress and terminal events place bounded status/content plus the matching function metadata in nonstandard `tool_results` without repeating complete call arguments; an orphan result also introduces its reconstructable call. These calls are observational and are already executed by app-server; clients must not execute them. They do not cause `finish_reason: "tool_calls"`.
 
@@ -237,7 +243,7 @@ This proxy implements only the focused Chat Completions subset described above. 
 - only one choice is produced, and harmless unsupported sampling/output fields are ignored with one warning;
 - `tool_choice` supports only `auto` and `none`;
 - response `reasoning` and `tool_results` require clients that tolerate nonstandard fields;
-- continuation is linear and bound to the original model, tools, canonical cwd, and effective policy; and
+- continuation is linear and bound to the original model, reasoning effort, tools, canonical cwd, and effective policy; and
 - no endpoint other than health, readiness, and `POST /v1/chat/completions` is implemented.
 
 ## Troubleshooting
@@ -273,7 +279,7 @@ Inspect `~/.codex-openai-proxy/<printed-namespace>` before deleting it.
 - `npm ci && npm run check` is the deterministic offline gate: it regenerates the pinned protocol in a temporary tree for comparison, type-checks, and runs the bounded offline test suites. Required CI runs the same gate on Node.js 24 on Linux, macOS, and Windows.
 - `npm run test:package` builds one tarball and installs it in npm offline mode with lifecycle scripts disabled, exercising the generated bin shim against a local fake app-server. It performs no registry request, login, or live model call. Release automation publishes the exact tarball this smoke retained (`-- --retain`) rather than rebuilding at publish time.
 - `npm run test:package -- --registry-install` is the separate networked packaging check, dispatched on Linux, macOS, and Windows outside required offline CI.
-- `npm run test:live` is the opt-in live compatibility check: serial, `gpt-5.4-mini` only, normally five model calls with a hard maximum of six, and requires explicit authorization. It is never a pull-request prerequisite.
+- `npm run test:live` is the opt-in live compatibility check: serial, `gpt-5.4-mini` only, normally seven model calls with a hard maximum of seven on POSIX hosts, and requires explicit authorization. It is never a pull-request prerequisite.
 
 ## Project documentation
 

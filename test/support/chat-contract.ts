@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, test } from "vitest";
 export const CONTRACT_MODEL = "gpt-5.4-mini";
 
 /** Hard model-turn guard for the explicitly selected Stage 07 live scenarios. */
-export const MAX_LIVE_MODEL_CALLS = 6;
+export const MAX_LIVE_MODEL_CALLS = 7;
 
 /** Safe root-relative file read by the live built-in command scenario. */
 export const OBSERVATION_FIXTURE = ".codex-contract-observation";
@@ -168,49 +168,83 @@ export function registerChatContract(
       }, 130_000);
 
     if (scenarios.has("role-history-sse"))
-      test("streams role-preserving history as valid SSE", async () => {
-        const response = await chat({
+      test("replays a streamed response with reasoning stripped from history", async () => {
+        const callsBefore = backend!.modelCalls();
+        const first = await chat({
           model: CONTRACT_MODEL,
+          reasoning_effort: "high",
           messages: [
             { role: "system", content: "Answer briefly." },
             { role: "developer", content: "Do not use markdown." },
-            { role: "user", content: "Remember the word cedar." },
-            { role: "assistant", content: "I will remember cedar." },
-            { role: "user", content: "Acknowledge the remembered word." },
+            {
+              role: "user",
+              content:
+                "Remember the word cedar. Reason briefly, then reply exactly with contract-history-one.",
+            },
           ],
           stream: true,
           stream_options: { include_usage: true },
         });
-        assert.equal(response.status, 200);
+        assert.equal(first.status, 200);
         assert.equal(
-          response.headers.get("content-type"),
+          first.headers.get("content-type"),
           "text/event-stream; charset=utf-8",
         );
-        const frames = (await response.text())
-          .split("\n\n")
-          .filter(Boolean)
-          .map((frame) => frame.slice(6));
-        assert.ok(
-          frames.at(-1) === "[DONE]",
-          "SSE stream omitted its terminal marker",
-        );
-        const chunks = frames
-          .slice(0, -1)
-          .map((frame) => parseJson<StreamChunk>(frame, "SSE frame"));
-        assert.equal(chunks[0]?.choices?.[0]?.delta?.role, "assistant");
-        const content = chunks
+        const firstChunks = parseSse(await first.text());
+        assert.equal(firstChunks[0]?.choices?.[0]?.delta?.role, "assistant");
+        const firstReasoning = firstChunks
+          .flatMap((chunk) => chunk.choices ?? [])
+          .map((choice) => choice.delta?.reasoning ?? "")
+          .join("");
+        const firstContent = firstChunks
           .flatMap((chunk) => chunk.choices ?? [])
           .map((choice) => choice.delta?.content ?? "")
           .join("");
-        assert.ok(content.length > 0);
+        assert.ok(firstReasoning.length > 0);
+        assert.ok(/contract-history-one/i.test(firstContent));
         assert.equal(
-          chunks.some((chunk) => chunk.choices?.[0]?.finish_reason === "stop"),
+          firstChunks.some(
+            (chunk) => chunk.choices?.[0]?.finish_reason === "stop",
+          ),
           true,
         );
-        const usage = chunks.find(
+        const usage = firstChunks.find(
           (chunk) => chunk.choices?.length === 0 && chunk.usage,
         )?.usage;
         if (usage) assertUsage(usage);
+
+        const second = await chat({
+          model: CONTRACT_MODEL,
+          reasoning_effort: "high",
+          messages: [
+            { role: "system", content: "Answer briefly." },
+            { role: "developer", content: "Do not use markdown." },
+            {
+              role: "user",
+              content:
+                "Remember the word cedar. Reason briefly, then reply exactly with contract-history-one.",
+            },
+            {
+              role: "assistant",
+              reasoning: firstReasoning,
+              content: firstContent,
+            },
+            {
+              role: "user",
+              content:
+                "Acknowledge the remembered word by replying exactly with contract-history-two.",
+            },
+          ],
+          stream: true,
+        });
+        assert.equal(second.status, 200);
+        const secondChunks = parseSse(await second.text());
+        const secondContent = secondChunks
+          .flatMap((chunk) => chunk.choices ?? [])
+          .map((choice) => choice.delta?.content ?? "")
+          .join("");
+        assert.ok(/contract-history-two/i.test(secondContent));
+        assert.equal(backend!.modelCalls() - callsBefore, 2);
       }, 130_000);
 
     if (scenarios.has("dynamic-tool-restart"))
@@ -423,6 +457,10 @@ export function registerChatContract(
           false,
           "already-executed built-in activity suspended as a client tool",
         );
+        const assistantReasoning = chunks
+          .flatMap((chunk) => chunk.choices ?? [])
+          .map((choice) => choice.delta?.reasoning ?? "")
+          .join("");
         const responseId = chunks.find((chunk) => chunk.id)?.id;
         assert.match(responseId ?? "", /^chatcmpl_codex_/);
 
@@ -455,9 +493,48 @@ export function registerChatContract(
           "built-in continuation exposed unexpected tool activity",
         );
         assert.equal(backend!.resumeCalls(), resumesBefore + 1);
+
+        const replayed = await chat({
+          model: CONTRACT_MODEL,
+          messages: [
+            {
+              role: "user",
+              content: `Use the built-in shell command tool to run ${OBSERVATION_COMMAND} exactly once. Do not modify files. Do not repeat the command output; after it finishes, give only a brief acknowledgment.`,
+            },
+            {
+              role: "assistant",
+              reasoning: assistantReasoning,
+              content: assistantContent,
+              tool_calls: uniqueCalls.map((call) => ({
+                id: call.id,
+                type: "function",
+                function: call.function,
+              })),
+              tool_results: results,
+            },
+            {
+              role: "user",
+              content:
+                "Do not run a tool. Reply exactly with contract-internal-replay-ok.",
+            },
+          ],
+          x_codex: policy,
+        });
+        const replayedRaw = await replayed.text();
+        assert.equal(replayed.status, 200, diagnostic(replayedRaw));
+        const replayedBody = parseJson<ToolCompletion>(
+          replayedRaw,
+          "built-in activity replay",
+        );
         assert.ok(
-          backend!.modelCalls() - callsBefore <= 2,
-          "built-in tool turn and continuation exceeded two model calls",
+          /contract-internal-replay-ok/i.test(
+            replayedBody.choices?.[0]?.message?.content ?? "",
+          ),
+          "built-in activity replay did not complete on a fresh thread",
+        );
+        assert.ok(
+          backend!.modelCalls() - callsBefore <= 3,
+          "built-in tool turn, continuation, and replay exceeded three model calls",
         );
       }, 130_000);
 
@@ -472,6 +549,11 @@ export function registerChatContract(
           {
             model: CONTRACT_MODEL,
             messages: [{ role: "tool", content: "x" }],
+          },
+          {
+            model: CONTRACT_MODEL,
+            reasoning_effort: "unsupported",
+            messages: [{ role: "user", content: "x" }],
           },
         ]) {
           const response = await fetch(
@@ -570,12 +652,15 @@ interface StreamChunk {
     delta?: {
       role?: string;
       content?: string;
+      reasoning?: string;
       tool_calls?: Array<{
         id: string;
         function?: { name?: string; arguments?: string };
       }>;
       tool_results?: Array<{
         id: string;
+        type?: string;
+        function?: { name?: string; arguments?: string };
         result?: {
           status?: string;
           content?: unknown;

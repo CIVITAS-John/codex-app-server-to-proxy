@@ -137,6 +137,8 @@ function policyCapturingAppServer(): {
             protocolThreadResumeResponse(protocolThread("thr_policy")),
           ),
         );
+      else if (message.method === "thread/inject_items")
+        send(protocolResponse("thread/inject_items", id, {}));
       else if (message.method === "turn/start") {
         send(
           protocolResponse("turn/start", id, {
@@ -990,6 +992,152 @@ test("streaming and aggregate responses share content and exact usage", async ()
   });
 });
 
+test("strips replayed assistant reasoning before injecting visible history", async () => {
+  await withChatServer(async (origin, _proxy, useTransport) => {
+    const fake = policyCapturingAppServer();
+    useTransport(fake);
+    const response = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        reasoning_effort: "high",
+        messages: [
+          { role: "user", content: "input1" },
+          {
+            role: "assistant",
+            reasoning: "reasoning from the first response",
+            tool_calls: [
+              {
+                id: "internal_command",
+                type: "function",
+                function: {
+                  name: "commandExecution",
+                  arguments: '{"command":"pwd"}',
+                },
+              },
+            ],
+            tool_results: [
+              {
+                id: "internal_command",
+                type: "function",
+                function: {
+                  name: "commandExecution",
+                  arguments: '{"command":"pwd"}',
+                },
+                result: {
+                  status: "in_progress",
+                  progress_type: "outputDelta",
+                  content: "workspace output",
+                },
+              },
+              {
+                id: "internal_command",
+                type: "function",
+                function: {
+                  name: "commandExecution",
+                  arguments: '{"command":"pwd"}',
+                },
+                result: {
+                  status: "completed",
+                  content: "workspace output",
+                  exit_code: 0,
+                },
+              },
+            ],
+            content: "message from the first response",
+          },
+          { role: "user", content: "input2" },
+        ],
+      }),
+    });
+    assert.equal(response.status, 200);
+    const injected = fake.messages.find(
+      (message) => message.method === "thread/inject_items",
+    );
+    assert.deepEqual(injected?.params, {
+      threadId: "thr_policy",
+      items: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "input1" }],
+        },
+        {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "output_text",
+              text: "message from the first response",
+            },
+          ],
+        },
+      ],
+    });
+    const turn = fake.messages.find(
+      (message) => message.method === "turn/start",
+    );
+    assert.deepEqual(turn?.params, {
+      threadId: "thr_policy",
+      model: "m",
+      effort: "high",
+      summary: "detailed",
+      input: [{ type: "text", text: "input2", text_elements: [] }],
+      cwd: await realpath("."),
+      approvalPolicy: "never",
+      approvalsReviewer: "auto_review",
+      sandboxPolicy: { type: "readOnly", networkAccess: false },
+    });
+  });
+});
+
+test("reasoning effort none disables app-server reasoning summaries", async () => {
+  await withChatServer(async (origin, _proxy, useTransport) => {
+    const fake = policyCapturingAppServer();
+    useTransport(fake);
+    const response = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        reasoning_effort: "none",
+        messages: [{ role: "user", content: "answer" }],
+      }),
+    });
+    assert.equal(response.status, 200);
+    const turn = fake.messages.find(
+      (message) => message.method === "turn/start",
+    );
+    assert.equal((turn?.params as Record<string, unknown>)?.effort, "none");
+    assert.equal((turn?.params as Record<string, unknown>)?.summary, "none");
+  });
+});
+
+test("app-server reasoning summaries default to detailed", async () => {
+  await withChatServer(async (origin, _proxy, useTransport) => {
+    const fake = policyCapturingAppServer();
+    useTransport(fake);
+    const response = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        messages: [{ role: "user", content: "answer" }],
+      }),
+    });
+    assert.equal(response.status, 200);
+    const turn = fake.messages.find(
+      (message) => message.method === "turn/start",
+    );
+    assert.equal((turn?.params as Record<string, unknown>)?.effort, undefined);
+    assert.equal(
+      (turn?.params as Record<string, unknown>)?.summary,
+      "detailed",
+    );
+  });
+});
+
 test("aggregate tool-only responses use null content", async () => {
   await withChatServer(async (origin, _proxy, useTransport) => {
     useTransport(fakeAppServer(true, () => {}, true));
@@ -1150,6 +1298,59 @@ test("rejects ambiguous history and unknown continuation before app-server work"
         messages: [{ role: "assistant", content: "not a user turn" }],
       },
       { model: "m", messages: [{ role: "tool", content: "x" }] },
+      {
+        model: "m",
+        messages: [{ role: "user", content: "x", reasoning: "not allowed" }],
+      },
+      {
+        model: "m",
+        messages: [
+          { role: "assistant", content: "x", reasoning: { text: "bad" } },
+          { role: "user", content: "continue" },
+        ],
+      },
+      {
+        model: "m",
+        messages: [
+          { role: "user", content: "x", tool_results: [] },
+          { role: "user", content: "continue" },
+        ],
+      },
+      {
+        model: "m",
+        messages: [
+          {
+            role: "assistant",
+            content: "x",
+            tool_calls: [
+              {
+                id: "call_a",
+                type: "function",
+                function: { name: "commandExecution", arguments: "{}" },
+              },
+            ],
+            tool_results: [
+              {
+                id: "foreign_call",
+                type: "function",
+                function: { name: "commandExecution", arguments: "{}" },
+                result: { status: "completed" },
+              },
+            ],
+          },
+          { role: "user", content: "continue" },
+        ],
+      },
+      {
+        model: "m",
+        reasoning_effort: "ultra",
+        messages: [{ role: "user", content: "x" }],
+      },
+      {
+        model: "m",
+        reasoning_effort: 1,
+        messages: [{ role: "user", content: "x" }],
+      },
     ]) {
       const response = await fetch(`${origin}/v1/chat/completions`, {
         method: "POST",
@@ -1472,6 +1673,7 @@ test("request policies map exactly, bind continuations, and honor managed denial
       const origin = started.origin;
       const request = {
         model: "m",
+        reasoning_effort: "high",
         messages: [{ role: "user", content: "policy" }],
         x_codex: {
           cwd,
@@ -1504,6 +1706,8 @@ test("request policies map exactly, bind continuations, and honor managed denial
       assert.deepEqual(turn?.params, {
         threadId: "thr_policy",
         model: "m",
+        effort: "high",
+        summary: "detailed",
         input: [{ type: "text", text: "policy", text_elements: [] }],
         cwd,
         approvalPolicy: "never",
@@ -1546,6 +1750,8 @@ test("request policies map exactly, bind continuations, and honor managed denial
       assert.deepEqual(continuedTurn?.params, {
         threadId: "thr_policy",
         model: "m",
+        effort: "high",
+        summary: "detailed",
         input: [{ type: "text", text: "continue", text_elements: [] }],
         cwd,
         approvalPolicy: "never",
@@ -1651,6 +1857,7 @@ test("request policies map exactly, bind continuations, and honor managed denial
         {
           threadId: "thr_policy",
           model: "m",
+          summary: "detailed",
           input: [{ type: "text", text: "offline", text_elements: [] }],
           cwd: root,
           approvalPolicy: "never",

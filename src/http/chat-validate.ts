@@ -9,6 +9,21 @@ import {
 import type { PendingToolCall } from "../continuation/state.js";
 import { HttpError } from "./errors.js";
 
+/** Chat Completions reasoning-effort values supported by the public API. */
+const REASONING_EFFORTS = new Set([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const);
+
+/** A validated Chat Completions reasoning-effort value. */
+export type ChatReasoningEffort =
+  "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
 /** A validated text-only Chat Completions message. */
 export interface ChatMessage {
   role: "system" | "developer" | "user" | "assistant" | "tool";
@@ -20,6 +35,7 @@ export interface ChatMessage {
 /** The Stage 04 request subset after validation. */
 export interface ChatRequest {
   model: string;
+  reasoningEffort?: ChatReasoningEffort;
   messages: ChatMessage[];
   stream: boolean;
   includeUsage: boolean;
@@ -48,6 +64,14 @@ export function validateRequest(
     invalid("messages must be a non-empty array.", "messages");
   if (body.stream !== undefined && typeof body.stream !== "boolean")
     invalid("stream must be a boolean.", "stream");
+  if (
+    body.reasoning_effort !== undefined &&
+    !REASONING_EFFORTS.has(body.reasoning_effort as ChatReasoningEffort)
+  )
+    invalid(
+      "reasoning_effort must be one of none, minimal, low, medium, high, xhigh, or max.",
+      "reasoning_effort",
+    );
   if (
     body.previous_response_id !== undefined &&
     (typeof body.previous_response_id !== "string" ||
@@ -96,6 +120,7 @@ export function validateRequest(
   const dynamicTools = validateTools(body.tools, body.tool_choice);
   const supported = new Set([
     "model",
+    "reasoning_effort",
     "messages",
     "stream",
     "stream_options",
@@ -112,6 +137,9 @@ export function validateRequest(
     });
   return {
     model: body.model as string,
+    ...(body.reasoning_effort !== undefined
+      ? { reasoningEffort: body.reasoning_effort as ChatReasoningEffort }
+      : {}),
     messages,
     stream: body.stream === true,
     includeUsage,
@@ -159,9 +187,21 @@ function validateMessage(value: unknown, index: number): ChatMessage {
     "name",
     "tool_call_id",
     "tool_calls",
+    "tool_results",
+    "reasoning",
   ]);
   if (Object.keys(message).some((key) => !allowed.has(key)))
     invalid("This message contains unsupported fields.", param);
+  // `reasoning` is a response-only x_codex extension. Accept the proxy's own
+  // output when a client replays a transcript, but never make it model-visible.
+  if (
+    message.reasoning !== undefined &&
+    (message.role !== "assistant" || typeof message.reasoning !== "string")
+  )
+    invalid(
+      "reasoning is supported only as a string on assistant messages.",
+      `${param}.reasoning`,
+    );
   let toolCalls: ChatMessage["toolCalls"];
   if (message.role === "assistant" && message.tool_calls !== undefined) {
     if (!Array.isArray(message.tool_calls))
@@ -181,6 +221,40 @@ function validateMessage(value: unknown, index: number): ChatMessage {
         );
       return { id: call.id, name: fn.name, arguments: fn.arguments };
     });
+  }
+  if (message.tool_results !== undefined) {
+    if (
+      message.role !== "assistant" ||
+      !Array.isArray(message.tool_results) ||
+      message.tool_results.length === 0
+    )
+      invalid(
+        "tool_results must be a non-empty array on an assistant message.",
+        `${param}.tool_results`,
+      );
+    const callsById = new Map(toolCalls?.map((call) => [call.id, call]));
+    message.tool_results.forEach((raw, resultIndex) => {
+      const result = record(raw);
+      const fn = record(result?.function);
+      const data = record(result?.result);
+      const call =
+        typeof result?.id === "string" ? callsById.get(result.id) : undefined;
+      if (
+        result?.type !== "function" ||
+        !call ||
+        typeof fn?.name !== "string" ||
+        typeof fn.arguments !== "string" ||
+        call.name !== fn.name ||
+        call.arguments !== fn.arguments ||
+        typeof data?.status !== "string"
+      )
+        invalid(
+          "Each tool result must match a complete assistant tool call.",
+          `${param}.tool_results.${resultIndex}`,
+        );
+    });
+    // These self-correlating results describe Codex activity that app-server
+    // already executed. Validation deliberately does not retain them.
   }
   if (message.role === "tool" && typeof message.tool_call_id !== "string")
     invalid("A tool message requires tool_call_id.", `${param}.tool_call_id`);

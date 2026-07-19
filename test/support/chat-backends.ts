@@ -294,6 +294,13 @@ function createScriptedTransport(
         const input = params.input as Array<{ text?: string }>;
         const prompt = input?.[0]?.text ?? "";
         if (
+          prompt.includes("contract-history-") &&
+          (params.effort !== "high" || params.summary !== "detailed")
+        )
+          throw new Error(
+            "role history did not apply high reasoning effort with a detailed summary",
+          );
+        if (
           prompt.includes("remembered word") &&
           injected.get(threadId)?.length !== 4
         )
@@ -304,6 +311,19 @@ function createScriptedTransport(
           }),
         );
         active.set(turnId, { threadId });
+        if (prompt.includes("contract-history-one"))
+          send(
+            protocolNotification({
+              method: "item/reasoning/summaryTextDelta",
+              params: {
+                threadId,
+                turnId,
+                itemId: "contract-history-reasoning",
+                summaryIndex: 0,
+                delta: "checked replay history",
+              },
+            }),
+          );
         if (prompt.includes("contract_lookup")) {
           const requestId = ++nextServerRequest;
           pendingTools.set(requestId, { threadId, turnId });
@@ -393,13 +413,21 @@ function createScriptedTransport(
               itemId: "message",
               delta: prompt.includes("10000")
                 ? "1\n2\n"
-                : prompt.includes("contract-resume-ok")
-                  ? "contract-resume-ok"
-                  : prompt.includes("complete stdout from the prior built-in")
-                    ? successfulBuiltInThreads.has(threadId)
-                      ? observationToken
-                      : "contract-built-in-retained-missing"
-                    : "Hello",
+                : prompt.includes("contract-history-one")
+                  ? "contract-history-one"
+                  : prompt.includes("contract-history-two")
+                    ? "contract-history-two"
+                    : prompt.includes("contract-resume-ok")
+                      ? "contract-resume-ok"
+                      : prompt.includes("contract-internal-replay-ok")
+                        ? "contract-internal-replay-ok"
+                        : prompt.includes(
+                              "complete stdout from the prior built-in",
+                            )
+                          ? successfulBuiltInThreads.has(threadId)
+                            ? observationToken
+                            : "contract-built-in-retained-missing"
+                          : "Hello",
             },
           }),
         );

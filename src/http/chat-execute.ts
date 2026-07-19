@@ -221,6 +221,9 @@ export async function execute(
     [];
   const binding: ThreadBinding = {
     model: request.model,
+    ...(request.reasoningEffort
+      ? { reasoningEffort: request.reasoningEffort }
+      : {}),
     cwd: request.policy.cwd,
     toolsHash: bindingHash(request.dynamicTools),
     policyHash: policyBindingHash(request.policy),
@@ -433,6 +436,8 @@ async function resumeContinuation(
   if (!stored) continuationFailure(404, "unknown_previous_response_id");
   if (stored.model !== binding.model)
     continuationFailure(409, "continuation_model_mismatch");
+  if (stored.reasoningEffort !== binding.reasoningEffort)
+    continuationFailure(409, "continuation_reasoning_effort_mismatch");
   if (stored.cwd !== binding.cwd)
     continuationFailure(409, "continuation_cwd_mismatch");
   if (stored.toolsHash !== binding.toolsHash)
@@ -579,6 +584,11 @@ async function startTurn(
       {
         threadId: handle.threadId,
         model: request.model,
+        ...(request.reasoningEffort ? { effort: request.reasoningEffort } : {}),
+        // App-server controls reasoning work and exposed summaries separately.
+        // Expose detailed summaries by default, but honor an explicit request
+        // for no reasoning by disabling its summary as well.
+        summary: request.reasoningEffort === "none" ? "none" : "detailed",
         input: [{ type: "text", text: last.content, text_elements: [] }],
         ...turnPolicyParams(request.policy),
       },

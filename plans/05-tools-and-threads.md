@@ -33,7 +33,7 @@ Support client-defined tools across requests while preserving safe Codex thread 
     - For every completed-response continuation, first require a valid, unexpired mapping.
     - Then inspect the mapped thread through app-server (`thread/read` returns stored status without resuming) and verify that its status and effective policy are resumable.
     - Treat `thread/resume` as the final authoritative check and handle a state change between inspection and resume as a rejected continuation.
-9. Bind continuation records to the canonical tool set, model, cwd, and effective policy. Reject any mismatch.
+9. Bind continuation records to the canonical tool set, model, reasoning effort, cwd, and effective policy. Reject any mismatch.
 10. Add retention, pruning, corruption recovery, and strict schema validation for the local mapping store.
 11. Detect replayed continuation requests and make behavior idempotent where possible; otherwise return a clear conflict.
 12. Serialize access per thread: a thread runs at most one active turn.
@@ -58,7 +58,7 @@ Support client-defined tools across requests while preserving safe Codex thread 
 
 - The versioned state file is `continuations.json` under `--state-dir`. Writes use same-directory temporary files followed by atomic rename; corrupt files recover as an empty, untrusted store.
 - Mapping retention defaults to 30 days. An older completed response becomes `superseded` as soon as a newer response is recorded for the same thread.
-- Tool definitions are recursively key-sorted and SHA-256 hashed. Continuations bind that hash together with model, root working directory, and the effective-policy hash.
+- Tool definitions are recursively key-sorted and SHA-256 hashed. Continuations bind that hash together with model, optional reasoning effort, root working directory, and the effective-policy hash. The optional persisted field preserves compatibility with existing default-effort schema-version-0 records; a defined value must match exactly.
 - Pending-tool tombstones contain call IDs but no arguments or results. Reload converts them to expired tombstones because the JSON-RPC responders are process-local; the compatibility consequence is a non-retryable `expired_tool_continuation` response after restart.
 - Dynamic tool results always use app-server `inputText` content with `success: true`; Chat Completions has no standard tool-failure bit.
 - One response store lives for the proxy server lifetime. Replacing or removing app-server disposes the old continuation generation, cancels deadlines, rejects suspended responders and late callbacks, expires their mappings, and then closes the old transport so active executions wake without writing stale mappings. Buffered frames are ignored after logical transport close.

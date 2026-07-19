@@ -62,7 +62,7 @@ Complete contract and schema work offline.
     - whether app-server exposes cumulative or per-turn usage and how to derive per-response values without estimation;
     - the protocol reference is internally inconsistent: its overview says `turn/completed` carries token usage while its event reference streams usage separately via thread-scoped `thread/tokenUsage/updated`;
     - `thread/resume` replays persisted usage notifications before any new turn, so the attribution rule must ignore restored pre-turn usage.
-- Exact mismatch errors for continuation model, tool set, cwd, and policy.
+- Exact mismatch errors for continuation model, reasoning effort, tool set, cwd, and policy.
 - Exact HTTP 409 error code/body for a concurrent request targeting a busy Codex thread. Same-thread requests are rejected immediately; v1 does not queue them.
 - Exact OpenAI-shaped status/code mapping for unknown, expired, superseded, and non-resumable `previous_response_id` values, including which failures are retryable.
 

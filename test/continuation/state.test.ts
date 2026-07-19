@@ -24,6 +24,7 @@ import { withTempDir } from "../support/temp.js";
 /** Common immutable binding used by persistence tests. */
 const binding = {
   model: "gpt-5.4-mini",
+  reasoningEffort: "high",
   cwd: "/tmp/workspace",
   toolsHash: bindingHash([{ name: "lookup" }]),
   policyHash: bindingHash({ sandbox: "read-only" }),
@@ -115,6 +116,7 @@ test("state loading rejects schema-invalid record details", async () => {
     { ...valid, callIds: ["duplicate", "duplicate"] },
     { ...valid, toolsHash: "A".repeat(64) },
     { ...valid, policyHash: "f".repeat(63) },
+    { ...valid, reasoningEffort: "" },
     { ...valid, responseId: "" },
   ];
   for (const [index, invalid] of invalidRecords.entries()) {
