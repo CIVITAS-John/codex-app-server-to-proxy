@@ -135,6 +135,7 @@ test("continuation schema examples agree with the production store reader", asyn
         properties: {
           responseId: { minLength: number };
           reasoningEffort: { type: string; minLength: number };
+          reasoningEffortBound: { const: boolean };
           toolsHash: { pattern: string };
           callIds: { uniqueItems: boolean };
         };
@@ -147,6 +148,7 @@ test("continuation schema examples agree with the production store reader", asyn
   assert.equal(recordSchema.properties.responseId.minLength, 1);
   assert.equal(recordSchema.properties.reasoningEffort.type, "string");
   assert.equal(recordSchema.properties.reasoningEffort.minLength, 1);
+  assert.equal(recordSchema.properties.reasoningEffortBound.const, true);
   assert.equal(recordSchema.properties.toolsHash.pattern, "^[a-f0-9]{64}$");
   assert.equal(recordSchema.properties.callIds.uniqueItems, true);
 
@@ -177,6 +179,7 @@ test("continuation schema examples agree with the production store reader", asyn
       await loadContinuationFixture({
         ...accepted,
         reasoningEffort: "high",
+        reasoningEffortBound: true,
       })
     )?.reasoningEffort,
     "high",
@@ -188,6 +191,7 @@ test("continuation schema examples agree with the production store reader", asyn
     { ...accepted, createdAt: null },
     { ...accepted, callIds: ["duplicate", "duplicate"] },
     { ...accepted, reasoningEffort: "" },
+    { ...accepted, reasoningEffortBound: false },
     { ...accepted, unexpected: true },
   ];
   for (const record of rejected)

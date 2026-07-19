@@ -302,7 +302,8 @@ export class EventNormalizer {
       const shape = internalToolShape(item);
       call = this.#allocateToolCall(id, shape.name, shape.arguments);
     }
-    if (lifecycle === "started") return { delta: { tool_calls: [call] } };
+    if (lifecycle === "started")
+      return existing ? {} : { delta: { tool_calls: [call] } };
     return {
       delta: {
         // Streaming clients concatenate function arguments by call index, so a

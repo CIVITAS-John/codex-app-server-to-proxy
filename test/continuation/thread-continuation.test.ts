@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, realpath } from "node:fs/promises";
+import { mkdir, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { createInterface } from "node:readline";
@@ -235,6 +235,64 @@ test("model, reasoning, cwd, tool, and policy binding mismatches fail before thr
       }
     }, `codex-continuation-${item.name}-`);
   }
+});
+
+test("a pre-upgrade record accepts one ambiguous reasoning-effort continuation", async () => {
+  await withTempDir(async (directory) => {
+    const configuredRoot = join(directory, "workspace");
+    await mkdir(configuredRoot, { recursive: true });
+    const root = await realpath(configuredRoot);
+    const responseId = "response_legacy_reasoning";
+    await writeFile(
+      join(directory, "continuations.json"),
+      JSON.stringify({
+        version: 0,
+        records: [
+          {
+            responseId,
+            threadId: "thr_continuation",
+            state: "ready",
+            model: "m",
+            cwd: root,
+            toolsHash: bindingHash([]),
+            policyHash: defaultPolicyHash(root),
+            createdAt: Date.now(),
+            expiresAt: Date.now() + 60_000,
+          },
+        ],
+      }),
+    );
+    const fake = new ContinuationAppServer();
+    const running = await startProxy(directory, fake);
+    try {
+      const continued = await postChatCompletion(running.origin, {
+        model: "m",
+        reasoning_effort: "high",
+        previous_response_id: responseId,
+        messages: [{ role: "user", content: "continue" }],
+      });
+      assert.equal(continued.status, 200, await continued.clone().text());
+      const body = (await continued.json()) as { id: string };
+      assert.deepEqual(fake.methods, [
+        "thread/read",
+        "thread/resume",
+        "turn/start",
+      ]);
+
+      const rebound = new ResponseStore(directory).get(body.id);
+      assert.equal(rebound?.reasoningEffort, "high");
+      assert.equal(rebound?.reasoningEffortBound, true);
+
+      const omitted = await post(running.origin, body.id);
+      assert.equal(omitted.status, 409);
+      assert.equal(
+        await responseErrorCode(omitted),
+        "continuation_reasoning_effort_mismatch",
+      );
+    } finally {
+      await running.proxy.close();
+    }
+  }, "codex-continuation-legacy-reasoning-");
 });
 
 test("terminal mappings fail as JSON before streaming headers or thread work", async () => {

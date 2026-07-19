@@ -54,6 +54,7 @@ test("atomic mappings survive reload and supersede older thread responses", asyn
     const reloaded = new ResponseStore(directory);
     assert.equal(reloaded.get("response_1")?.state, "superseded");
     assert.equal(reloaded.get("response_2")?.state, "ready");
+    assert.equal(reloaded.get("response_2")?.reasoningEffortBound, true);
     const disk = JSON.parse(
       await readFile(join(directory, "continuations.json"), "utf8"),
     ) as {
@@ -117,6 +118,7 @@ test("state loading rejects schema-invalid record details", async () => {
     { ...valid, toolsHash: "A".repeat(64) },
     { ...valid, policyHash: "f".repeat(63) },
     { ...valid, reasoningEffort: "" },
+    { ...valid, reasoningEffortBound: false },
     { ...valid, responseId: "" },
   ];
   for (const [index, invalid] of invalidRecords.entries()) {

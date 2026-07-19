@@ -10,7 +10,7 @@ import type { PendingToolCall } from "../continuation/state.js";
 import { HttpError } from "./errors.js";
 
 /** Chat Completions reasoning-effort values supported by the public API. */
-const REASONING_EFFORTS = new Set([
+const REASONING_EFFORTS = [
   "none",
   "minimal",
   "low",
@@ -18,16 +18,23 @@ const REASONING_EFFORTS = new Set([
   "high",
   "xhigh",
   "max",
-] as const);
+] as const;
 
 /** A validated Chat Completions reasoning-effort value. */
-export type ChatReasoningEffort =
-  "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type ChatReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
-/** A validated text-only Chat Completions message. */
+/** Fast membership lookup derived from the public reasoning-effort values. */
+const REASONING_EFFORT_SET: ReadonlySet<string> = new Set(REASONING_EFFORTS);
+
+/** Narrows an unknown value to one supported reasoning effort. */
+function isReasoningEffort(value: unknown): value is ChatReasoningEffort {
+  return typeof value === "string" && REASONING_EFFORT_SET.has(value);
+}
+
+/** A validated text or tool-only Chat Completions message. */
 export interface ChatMessage {
   role: "system" | "developer" | "user" | "assistant" | "tool";
-  content: string;
+  content: string | null;
   toolCallId?: string;
   toolCalls?: Array<{ id: string; name: string; arguments: string }>;
 }
@@ -64,14 +71,16 @@ export function validateRequest(
     invalid("messages must be a non-empty array.", "messages");
   if (body.stream !== undefined && typeof body.stream !== "boolean")
     invalid("stream must be a boolean.", "stream");
-  if (
-    body.reasoning_effort !== undefined &&
-    !REASONING_EFFORTS.has(body.reasoning_effort as ChatReasoningEffort)
-  )
-    invalid(
-      "reasoning_effort must be one of none, minimal, low, medium, high, xhigh, or max.",
-      "reasoning_effort",
-    );
+  const rawReasoningEffort = body.reasoning_effort;
+  let reasoningEffort: ChatReasoningEffort | undefined;
+  if (rawReasoningEffort !== undefined && rawReasoningEffort !== null) {
+    if (!isReasoningEffort(rawReasoningEffort))
+      invalid(
+        `reasoning_effort must be one of ${REASONING_EFFORTS.join(", ")}.`,
+        "reasoning_effort",
+      );
+    reasoningEffort = rawReasoningEffort;
+  }
   if (
     body.previous_response_id !== undefined &&
     (typeof body.previous_response_id !== "string" ||
@@ -137,9 +146,7 @@ export function validateRequest(
     });
   return {
     model: body.model as string,
-    ...(body.reasoning_effort !== undefined
-      ? { reasoningEffort: body.reasoning_effort as ChatReasoningEffort }
-      : {}),
+    ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
     messages,
     stream: body.stream === true,
     includeUsage,
@@ -221,7 +228,18 @@ function validateMessage(value: unknown, index: number): ChatMessage {
         );
       return { id: call.id, name: fn.name, arguments: fn.arguments };
     });
+    if (new Set(toolCalls.map((call) => call.id)).size !== toolCalls.length)
+      invalid("Assistant tool call IDs must be unique.", `${param}.tool_calls`);
   }
+  if (
+    message.role === "assistant" &&
+    message.content === null &&
+    (!toolCalls || toolCalls.length === 0)
+  )
+    invalid(
+      "Null assistant content requires at least one tool call.",
+      `${param}.content`,
+    );
   if (message.tool_results !== undefined) {
     if (
       message.role !== "assistant" ||
@@ -260,7 +278,7 @@ function validateMessage(value: unknown, index: number): ChatMessage {
     invalid("A tool message requires tool_call_id.", `${param}.tool_call_id`);
   return {
     role: message.role as ChatMessage["role"],
-    content: typeof message.content === "string" ? message.content : "",
+    content: typeof message.content === "string" ? message.content : null,
     ...(typeof message.tool_call_id === "string"
       ? { toolCallId: message.tool_call_id }
       : {}),
@@ -306,7 +324,12 @@ function validateTools(
 }
 
 /** Maps prior messages to raw Responses API history without flattening roles. */
-export function toHistoryItem(message: ChatMessage): Record<string, unknown> {
+export function toHistoryItem(
+  message: ChatMessage,
+): Record<string, unknown> | undefined {
+  // A tool-only assistant response has no model-visible text to inject. Its
+  // calls and results describe activity app-server already owns.
+  if (message.content === null) return undefined;
   return {
     type: "message",
     role: message.role,
@@ -333,9 +356,14 @@ export function validateToolResults(
   if (!assistant?.toolCalls)
     invalid("The assistant tool-call message is required.", "messages");
   const expected = new Map(pending.map((call) => [call.callId, call]));
+  // Internal calls in a replayed assistant message are observational. Only
+  // calls owned by the pending dynamic batch participate in continuation.
+  const pendingCalls = assistant.toolCalls.filter((call) =>
+    expected.has(call.id),
+  );
   if (
-    assistant.toolCalls.length !== expected.size ||
-    assistant.toolCalls.some(
+    pendingCalls.length !== expected.size ||
+    pendingCalls.some(
       (call) =>
         expected.get(call.id)?.name !== call.name ||
         call.arguments !==
@@ -353,7 +381,7 @@ export function validateToolResults(
       invalid("The tool result references a foreign call ID.", "messages");
     if (results.has(message.toolCallId))
       invalid("A tool call has more than one result.", "messages");
-    results.set(message.toolCallId, message.content);
+    results.set(message.toolCallId, message.content!);
   }
   if (results.size !== expected.size)
     invalid(

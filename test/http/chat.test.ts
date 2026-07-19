@@ -849,6 +849,26 @@ test("allocates unique call indexes across internal, dynamic, continuation, and 
   );
 });
 
+test("does not repeat arguments when orphan progress precedes item start", () => {
+  const normalizer = new EventNormalizer();
+  const progress = normalizer.normalize("item/commandExecution/outputDelta", {
+    itemId: "command",
+    delta: "early output",
+  });
+  const started = normalizer.normalize("item/started", {
+    item: { id: "command", type: "commandExecution", command: "pwd" },
+  });
+  assert.deepEqual(progress[0]?.delta?.tool_calls, [
+    {
+      index: 0,
+      id: "command",
+      type: "function",
+      function: { name: "commandExecution_outputDelta", arguments: "{}" },
+    },
+  ]);
+  assert.equal(started[0]?.delta?.tool_calls, undefined);
+});
+
 test("exposes pinned item/plan/delta notifications as self-correlating progress", () => {
   const normalizer = new EventNormalizer();
   const notification = protocolNotification({
@@ -1092,6 +1112,78 @@ test("strips replayed assistant reasoning before injecting visible history", asy
   });
 });
 
+test("skips replayed tool-only assistant messages during history injection", async () => {
+  await withChatServer(async (origin, _proxy, useTransport) => {
+    const fake = policyCapturingAppServer();
+    useTransport(fake);
+    const response = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        messages: [
+          { role: "user", content: "input1" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "internal_command",
+                type: "function",
+                function: { name: "commandExecution", arguments: "{}" },
+              },
+            ],
+            tool_results: [
+              {
+                id: "internal_command",
+                type: "function",
+                function: { name: "commandExecution", arguments: "{}" },
+                result: { status: "completed" },
+              },
+            ],
+          },
+          { role: "user", content: "input2" },
+        ],
+      }),
+    });
+    assert.equal(response.status, 200);
+    const injected = fake.messages.find(
+      (message) => message.method === "thread/inject_items",
+    );
+    assert.deepEqual(injected?.params, {
+      threadId: "thr_policy",
+      items: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "input1" }],
+        },
+      ],
+    });
+  });
+});
+
+test("treats null reasoning effort as omitted", async () => {
+  await withChatServer(async (origin, _proxy, useTransport) => {
+    const fake = policyCapturingAppServer();
+    useTransport(fake);
+    const response = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        reasoning_effort: null,
+        messages: [{ role: "user", content: "answer" }],
+      }),
+    });
+    assert.equal(response.status, 200);
+    const turn = fake.messages.find(
+      (message) => message.method === "turn/start",
+    );
+    assert.equal((turn?.params as Record<string, unknown>)?.effort, undefined);
+  });
+});
+
 test("reasoning effort none disables app-server reasoning summaries", async () => {
   await withChatServer(async (origin, _proxy, useTransport) => {
     const fake = policyCapturingAppServer();
@@ -1312,6 +1404,13 @@ test("rejects ambiguous history and unknown continuation before app-server work"
       {
         model: "m",
         messages: [
+          { role: "assistant", content: null, tool_calls: [] },
+          { role: "user", content: "continue" },
+        ],
+      },
+      {
+        model: "m",
+        messages: [
           { role: "user", content: "x", tool_results: [] },
           { role: "user", content: "continue" },
         ],
@@ -1335,6 +1434,28 @@ test("rejects ambiguous history and unknown continuation before app-server work"
                 type: "function",
                 function: { name: "commandExecution", arguments: "{}" },
                 result: { status: "completed" },
+              },
+            ],
+          },
+          { role: "user", content: "continue" },
+        ],
+      },
+      {
+        model: "m",
+        messages: [
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "duplicate",
+                type: "function",
+                function: { name: "commandExecution", arguments: "{}" },
+              },
+              {
+                id: "duplicate",
+                type: "function",
+                function: { name: "webSearch", arguments: "{}" },
               },
             ],
           },

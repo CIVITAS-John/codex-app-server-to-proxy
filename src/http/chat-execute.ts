@@ -436,7 +436,14 @@ async function resumeContinuation(
   if (!stored) continuationFailure(404, "unknown_previous_response_id");
   if (stored.model !== binding.model)
     continuationFailure(409, "continuation_model_mismatch");
-  if (stored.reasoningEffort !== binding.reasoningEffort)
+  // Schema-version-0 records written before reasoning effort became binding
+  // data have neither field. Grandfather that ambiguous first continuation;
+  // every newly written record carries reasoningEffortBound for exact checks.
+  if (
+    (stored.reasoningEffortBound === true ||
+      stored.reasoningEffort !== undefined) &&
+    stored.reasoningEffort !== binding.reasoningEffort
+  )
     continuationFailure(409, "continuation_reasoning_effort_mismatch");
   if (stored.cwd !== binding.cwd)
     continuationFailure(409, "continuation_cwd_mismatch");
@@ -549,7 +556,10 @@ async function startFreshThread(
   );
   handle.threadId = requiredId(started.thread, "thread/start.thread");
   acquireThread(handle, options, onToolRequest);
-  const prior = request.messages.slice(0, -1).map(toHistoryItem);
+  const prior = request.messages
+    .slice(0, -1)
+    .map(toHistoryItem)
+    .filter((item): item is Record<string, unknown> => item !== undefined);
   if (prior.length)
     await options.rpc.request(
       "thread/inject_items",
@@ -589,7 +599,7 @@ async function startTurn(
         // Expose detailed summaries by default, but honor an explicit request
         // for no reasoning by disabling its summary as well.
         summary: request.reasoningEffort === "none" ? "none" : "detailed",
-        input: [{ type: "text", text: last.content, text_elements: [] }],
+        input: [{ type: "text", text: last.content!, text_elements: [] }],
         ...turnPolicyParams(request.policy),
       },
       options.signal,

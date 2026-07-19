@@ -23,6 +23,7 @@
         "state": { "enum": ["ready", "pending_tool", "expired", "superseded", "corrupt"] },
         "model": { "type": "string", "minLength": 1 },
         "reasoningEffort": { "type": "string", "minLength": 1 },
+        "reasoningEffortBound": { "const": true },
         "cwd": { "type": "string", "minLength": 1 },
         "toolsHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
         "policyHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },

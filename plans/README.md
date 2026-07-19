@@ -50,7 +50,7 @@ This directory is the source of truth for product decisions, implementation stat
 
 Stages 01 through 08 are implemented in the source tree. Stage 08 includes the package metadata, deterministic packed-package smoke, registry-backed smoke workflow, trusted-publishing prerelease workflow, published-user README, changelog, and release runbook. The exact Codex dependency and generated contract remain pinned to `0.144.5`.
 
-The default TypeScript/Vitest configuration is deterministic and offline; opt-in live-test filenames are excluded. The expanded live contract names three scenarios, normally makes seven `gpt-5.4-mini` calls on POSIX, and enforces a seven-call maximum. On 2026-07-16, `npm run check` passed 19 files and 155 tests with coverage thresholds, the offline `npm run test:package` and local `--registry-install` mode passed, and the final dry pack contained 51 files at 71,939 bytes packed and 295,941 bytes unpacked.
+The default TypeScript/Vitest configuration is deterministic and offline; opt-in live-test filenames are excluded. The expanded live contract names three scenarios, normally makes seven `gpt-5.4-mini` calls on POSIX, and enforces an eight-call maximum. On 2026-07-16, `npm run check` passed 19 files and 155 tests with coverage thresholds, the offline `npm run test:package` and local `--registry-install` mode passed, and the final dry pack contained 51 files at 71,939 bytes packed and 295,941 bytes unpacked.
 
 Local implementation is not evidence that npm, GitHub Actions, or every supported platform accepted the candidate. [Stage 08](08-packaging-and-release.md) records the local acceptance evidence separately from the pending external gates.
 
@@ -58,7 +58,7 @@ Local implementation is not evidence that npm, GitHub Actions, or every supporte
 
 - The checked-in offline CI matrix still must finish green remotely on Node.js 24 on Linux, macOS, and Windows.
 - The dispatch-only registry-backed package smoke still must pass on remote Linux, macOS, and Windows runners; this networked evidence is not part of required offline CI.
-- The expanded live contract still awaits an explicitly authorized POSIX run with the expected normal count and hard maximum of seven `gpt-5.4-mini` calls, plus an exact recorded count. Earlier repository notes describe a 2026-07-14 two-scenario run under a prior four-call guard, but they do not record an exact call count, commit, or workflow URL and are not Stage 08 release evidence.
+- The expanded live contract still awaits an explicitly authorized POSIX run with the expected normal count of seven and hard maximum of eight `gpt-5.4-mini` calls, plus an exact recorded count. Earlier repository notes describe a 2026-07-14 two-scenario run under a prior four-call guard, but they do not record an exact call count, commit, or workflow URL and are not Stage 08 release evidence.
 - The npm prerelease, registry metadata, integrity, and `next` dist-tag still must be verified after publication. If name reservation requires the documented owner/2FA bootstrap, that first artifact will not have OIDC provenance; the trusted publisher and provenance must be verified with the next candidate.
 - Stable publication is intentionally not implemented by the prerelease workflow. A reviewed stable path and accepted prerelease evidence are required before `latest` moves.
 

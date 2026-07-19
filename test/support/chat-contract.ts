@@ -4,8 +4,8 @@ import { afterAll, beforeAll, describe, test } from "vitest";
 /** Model fixed by the repository's live-test cost policy. */
 export const CONTRACT_MODEL = "gpt-5.4-mini";
 
-/** Hard model-turn guard for the explicitly selected Stage 07 live scenarios. */
-export const MAX_LIVE_MODEL_CALLS = 7;
+/** Hard model-turn guard with one retry above the normal seven live calls. */
+export const MAX_LIVE_MODEL_CALLS = 8;
 
 /** Safe root-relative file read by the live built-in command scenario. */
 export const OBSERVATION_FIXTURE = ".codex-contract-observation";

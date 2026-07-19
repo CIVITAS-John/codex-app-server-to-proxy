@@ -40,6 +40,8 @@ export interface ThreadBinding {
 
 /** One opaque response-to-thread record persisted by the proxy. */
 export interface ResponseRecord extends ThreadBinding {
+  /** Marks records written after reasoning effort became an exact binding. */
+  reasoningEffortBound?: true;
   responseId: string;
   threadId: string;
   // `corrupt` is a fail-closed persisted sentinel retained for compatibility and
@@ -109,6 +111,8 @@ export class ResponseStore {
     const now = Date.now();
     const stored = {
       ...record,
+      // Absence identifies ambiguous records written by pre-upgrade releases.
+      reasoningEffortBound: true as const,
       createdAt: now,
       expiresAt: now + this.retentionMs,
     };
@@ -523,6 +527,7 @@ function isResponseRecord(value: unknown): value is ResponseRecord {
     "state",
     "model",
     "reasoningEffort",
+    "reasoningEffortBound",
     "cwd",
     "toolsHash",
     "policyHash",
@@ -551,6 +556,8 @@ function isResponseRecord(value: unknown): value is ResponseRecord {
     (record.reasoningEffort === undefined ||
       (typeof record.reasoningEffort === "string" &&
         record.reasoningEffort.length > 0)) &&
+    (record.reasoningEffortBound === undefined ||
+      record.reasoningEffortBound === true) &&
     typeof record.cwd === "string" &&
     record.cwd.length > 0 &&
     validHash(record.toolsHash) &&

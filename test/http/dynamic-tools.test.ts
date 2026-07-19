@@ -56,6 +56,7 @@ class ToolAppServer {
     private readonly toolsOnFirstTurn = true,
     private readonly failResume = false,
     private readonly resumedThreadId = "thr_dynamic_tools",
+    private readonly internalBeforeTools = false,
   ) {
     this.transport = createFakeTransport({
       fragmentCount: 3,
@@ -114,6 +115,27 @@ class ToolAppServer {
           }),
         );
         if (this.toolsOnFirstTurn && this.#turn === 1) {
+          if (this.internalBeforeTools)
+            this.#send(
+              protocolNotification({
+                method: "item/started",
+                params: {
+                  threadId: this.#thread,
+                  turnId,
+                  startedAtMs: 0,
+                  item: {
+                    type: "webSearch",
+                    id: "internal_before_tools",
+                    query: "weather",
+                    action: {
+                      type: "search",
+                      query: "weather",
+                      queries: null,
+                    },
+                  },
+                },
+              }),
+            );
           this.#send(
             protocolNotification({
               method: "item/agentMessage/delta",
@@ -352,6 +374,57 @@ test("parallel fragmented tool calls accept out-of-order large results and answe
       await proxy.close();
     }
   }, "codex-dynamic-tools-");
+});
+
+test("verbatim mixed internal and dynamic calls resolve only the pending batch", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ToolAppServer(true, false, undefined, true);
+    const { origin, proxy } = await startProxy(directory, fake);
+    const tools = [
+      { type: "function", function: { name: "first", parameters: {} } },
+      { type: "function", function: { name: "second", parameters: {} } },
+    ];
+    try {
+      const initialResponse = await postChatCompletion(origin, {
+        model: "m",
+        tools,
+        messages: [{ role: "user", content: "use tools" }],
+      });
+      assert.equal(initialResponse.status, 200);
+      const initial = (await initialResponse.json()) as CompletionBody;
+      const calls = initial.choices[0]!.message.tool_calls!;
+      assert.deepEqual(
+        calls.map((call) => call.id),
+        ["internal_before_tools", "call_b", "call_a"],
+      );
+
+      const continued = await postChatCompletion(origin, {
+        model: "m",
+        tools,
+        previous_response_id: initial.id,
+        messages: [
+          {
+            role: "assistant",
+            content: initial.choices[0]!.message.content,
+            tool_calls: calls.map((call) => ({
+              id: call.id,
+              type: "function",
+              function: call.function,
+            })),
+          },
+          { role: "tool", tool_call_id: "call_b", content: "second result" },
+          { role: "tool", tool_call_id: "call_a", content: "first result" },
+        ],
+      });
+      assert.equal(continued.status, 200, await continued.clone().text());
+      assert.deepEqual(
+        fake.results.map((result) => result.id),
+        [902, 901],
+      );
+    } finally {
+      await proxy.close();
+    }
+  }, "codex-mixed-tool-replay-");
 });
 
 test("missing, foreign, and duplicate tool result IDs fail without consuming the suspension", async () => {
