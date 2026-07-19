@@ -2,7 +2,7 @@
 
 All notable user-facing changes are recorded here. This project follows semantic versioning once a version is published.
 
-## 0.1.0-rc.2 — Unreleased
+## 0.1.0-rc.2 — July 19, 2026
 
 ### Added
 
@@ -20,7 +20,7 @@ All notable user-facing changes are recorded here. This project follows semantic
 - Duration options reject values beyond Node's maximum timer delay, which previously made every deadline fire immediately.
 - Home-directory redaction skips a home that is itself a filesystem root, keeping diagnostics readable when `HOME=/`.
 
-## 0.1.0-rc.1 — July 19, 2026
+## 0.1.0-rc.1 — July 17, 2026
 
 ### Release process
 
