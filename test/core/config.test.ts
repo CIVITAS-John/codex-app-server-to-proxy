@@ -47,6 +47,23 @@ test("log-level validation accepts every supported value and rejects others", ()
   );
 });
 
+test("durations cap at the maximum Node timer delay", () => {
+  // Larger values overflow Node timers and fire immediately instead of later.
+  const maximum = 2 ** 31 - 1;
+  assert.equal(
+    parseServeOptions(["--tool-timeout", `${maximum}ms`]).toolTimeoutMs,
+    maximum,
+  );
+  assert.throws(
+    () => parseServeOptions(["--tool-timeout", `${maximum + 1}ms`]),
+    /--tool-timeout must be between 1ms and 2147483647ms\./,
+  );
+  assert.throws(
+    () => parseServeOptions(["--request-timeout", "40000m"]),
+    /--request-timeout must be between 1ms and 2147483647ms\./,
+  );
+});
+
 test("serve options have safe documented defaults and reject ambiguity", async () => {
   const canonicalHome = realpathSync(homedir());
   await withTempDir(async (directory) => {

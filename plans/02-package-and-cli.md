@@ -32,6 +32,8 @@ Create an installable TypeScript CLI with strict loopback enforcement and no dep
 
 Complete. The package builds a strict TypeScript CLI with an executable npm `bin`, validates loopback hosts before listening, and normalizes `localhost` to `127.0.0.1` without DNS resolution. The offline suite covers IPv4, IPv6, hostname, wildcard, LAN, mapped-address, HTTP error, body-limit, timeout, startup-failure, and signal-shutdown behavior.
 
+Request deadlines abort downstream work and forcibly close any already-committed HTTP response. This makes the concurrency bound a hard lifecycle limit even when a streaming client stops reading: the response close path releases the request slot instead of waiting indefinitely for SSE backpressure to drain.
+
 `GET /health` reports process liveness. `GET /ready` deliberately remains unavailable until Stage 03 initializes and authenticates app-server. `POST /v1/chat/completions` validates its content type, body bound, and JSON syntax, then returns `app_server_not_ready`; translation begins in Stage 04.
 
 The package allow-list is limited to the compiled CLI declarations/source maps, README, and protocol artifacts.  No default npm script starts Codex or makes a network or model call.

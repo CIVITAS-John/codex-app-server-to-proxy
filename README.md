@@ -192,6 +192,7 @@ Default limits (all configurable via CLI flags):
 | Login / startup deadline (`--tool-timeout`) | 5 min                                       |
 
 A second request for an active Codex thread returns 409 `thread_busy`. If app-server crashes, the proxy retries with bounded backoff while `/ready` returns 503.
+The request deadline aborts downstream work and closes any response that is still open, including a stream blocked by a client that stopped reading; its concurrency slot is then released.
 
 ## Troubleshooting
 

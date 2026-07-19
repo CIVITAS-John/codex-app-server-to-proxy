@@ -313,6 +313,15 @@ export class ContinuationCoordinator {
     }
   }
 
+  /** Expires a suspension without letting lifecycle cleanup fail on disk errors. */
+  #expireBestEffort(responseId: string): void {
+    try {
+      this.store.update(responseId, { state: "expired" });
+    } catch {
+      // Restart turns a stale pending-tool record into the same expired tombstone.
+    }
+  }
+
   /** Routes one dynamic-tool callback to the sole owner of its thread. */
   readonly #routeToolRequest = (request: ServerRequest): void => {
     if (request.method !== "item/tool/call") return;
@@ -421,7 +430,7 @@ export class ContinuationCoordinator {
       }
       this.#pending.delete(responseId);
       this.#busy.delete(threadId);
-      this.store.update(responseId, { state: "expired" });
+      this.#expireBestEffort(responseId);
     }, this.toolTimeoutMs);
     timer.unref();
     this.#pending.set(responseId, { calls, timer });
@@ -519,7 +528,7 @@ export class ContinuationCoordinator {
       clearTimeout(entry.timer);
       for (const call of entry.calls)
         this.#failRequestReplaced(call.request.id);
-      this.store.update(responseId, { state: "expired" });
+      this.#expireBestEffort(responseId);
     }
     this.#pending.clear();
   }

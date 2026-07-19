@@ -12,9 +12,9 @@ Make the proxy predictable under hostile local input, protocol churn, and operat
     - The fake and real app-server backends share the Chat Completions contract in `test/support/chat-contract.ts`. Fault injection remains fake-only.
     - `test/support/protocol-fixtures.ts` type-checks maintained client requests, client notifications, server requests, server notifications, and method-specific responses against generated structures and builds complete nested `Thread` and `Turn` values.
 2. The deterministic suites already cover the main implemented contract and many failure paths:
-    - partial JSON-RPC frames, interleaved notifications and responses, malformed frames, overload errors, and transport closure;
+    - partial JSON-RPC frames, interleaved notifications and responses, malformed frames and error objects, overload errors, intentional concurrent listener fanout, and transport closure;
     - streaming and aggregate Chat Completions output, exact usage when reported, dynamic tools, built-in Codex activity normalization, and continuation/restart behavior;
-    - body and request timeouts, Host-header validation, client disconnects, ingress-queue overflow, late SSE failures, duplicate tool results, tool timeouts, same-thread concurrency rejection, resume races, state corruption, and atomic-write rollback;
+    - body and request timeouts, Host-header validation, client disconnects, stalled-client backpressure and slot recovery, ingress-queue overflow, late SSE failures, duplicate tool results, tool timeouts, lifecycle persistence failures, same-thread concurrency rejection, resume races, state corruption, and atomic-write rollback;
     - unsafe bind rejection, app-server initialization failure, elicitation fail-closed behavior, authentication cancellation, and basic signal shutdown; and
     - the full offline sandbox × web-search policy matrix, managed denials, canonical cwd enforcement, and fresh/resumed request forwarding.
 3. Structured event names and HTTP request IDs are implemented. Default-visible failure summaries redact configured paths, home paths, URLs, and token-like values; full error detail is intentionally available only at `debug` level.
@@ -24,7 +24,7 @@ Make the proxy predictable under hostile local input, protocol churn, and operat
 
 ## Implemented scope
 
-All implementation items below are now represented in the source tree and deterministic offline gate. The final local Node.js 20.19.1 verification passed 18 files and 130 tests with 80.76% statements, 79.72% branches, 84.42% functions, and 83.58% lines. The expanded seven-call POSIX live contract remains opt-in and was not executed as part of this implementation run.
+All implementation items below are now represented in the source tree and deterministic offline gate. The final local Node.js 20.19.1 verification passed 21 files and 190 tests with 82.54% statements, 80.61% branches, 86.86% functions, and 85.30% lines. The expanded seven-call POSIX live contract remains opt-in and was not executed as part of this implementation run.
 
 1. Add checked-in CI with two explicit modes.
     - Define a finite runtime support policy and align `engines`, the README, and CI. Exercise the minimum Node.js 20 line, every retained LTS line, and the current release on Linux; exercise the primary supported LTS on macOS and Windows. Deduplicate overlapping versions rather than creating an unbounded `20+` matrix.

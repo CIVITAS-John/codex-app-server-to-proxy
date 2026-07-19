@@ -105,3 +105,44 @@ test("transport disposes request abort listeners after settlement", async () => 
   await request;
   assert.equal(getEventListeners(controller.signal, "abort").length, 0);
 });
+
+test("transport permits listener fanout for concurrent chat executions", () => {
+  const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
+  const listener = (): void => undefined;
+
+  for (let index = 0; index < 32; index += 1) {
+    rpc.on("notification", listener);
+    rpc.once("close", listener);
+  }
+
+  assert.equal(rpc.getMaxListeners(), 0);
+  assert.equal(getEventListeners(rpc, "notification").length, 32);
+  assert.equal(getEventListeners(rpc, "close").length, 32);
+  rpc.close();
+});
+
+test("transport rejects malformed JSON-RPC error responses", async () => {
+  const malformedErrors: unknown[] = [
+    null,
+    "busy",
+    [],
+    {},
+    { code: "-32001", message: "busy" },
+  ];
+
+  for (const error of malformedErrors) {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const rpc = new JsonRpcTransport(input, output);
+    const request = rpc.request("turn/start", {});
+    const [wire] = await once(output, "data");
+    const id = (JSON.parse(String(wire)) as { id: number }).id;
+    const malformed = once(rpc, "malformed");
+
+    input.write(`${JSON.stringify({ id, error })}\n`);
+
+    await assert.rejects(request, /malformed JSON-RPC error/);
+    assert.deepEqual(await malformed, [JSON.stringify({ id, error })]);
+    rpc.close();
+  }
+});

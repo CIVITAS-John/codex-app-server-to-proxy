@@ -19,6 +19,15 @@ test("redact skips trivially broad roots to avoid over-redaction", () => {
   assert.equal(redact(`${home}/x`, home), "[REDACTED_HOME]/x");
 });
 
+test("redact skips a home directory that is itself a filesystem root", () => {
+  // HOME=/ in a minimal container must not mask every path separator.
+  assert.equal(
+    redact("GET /etc/hosts", "workspace", [], "/"),
+    "GET /etc/hosts",
+  );
+  assert.equal(redact("plain text", "workspace", [], ""), "plain text");
+});
+
 test("redact preserves arbitrary single-segment root handling", () => {
   assert.equal(
     redact("workspace/file.ts", "workspace"),

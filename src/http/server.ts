@@ -90,10 +90,15 @@ export function createProxyServer(
     active += 1;
     const controller = new AbortController();
     controllers.add(controller);
-    const timer = setTimeout(
-      () => controller.abort(new Error("request timeout")),
-      options.requestTimeoutMs,
-    );
+    const timer = setTimeout(() => {
+      controller.abort(new Error("request timeout"));
+      // Give abort-aware handlers the rest of this event-loop turn to emit an
+      // OpenAI-shaped timeout. A handler stalled on HTTP backpressure cannot
+      // make progress, so the fallback close releases its concurrency slot.
+      setImmediate(() => {
+        if (!response.writableEnded && !response.destroyed) response.destroy();
+      });
+    }, options.requestTimeoutMs);
     timer.unref();
     let finished = false;
     const finish = (): void => {

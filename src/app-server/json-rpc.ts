@@ -45,6 +45,10 @@ export class JsonRpcTransport extends EventEmitter {
 
   constructor(input: Readable, output: Writable, maxPending = 256) {
     super();
+    // The shared transport intentionally fans notifications out to every active
+    // HTTP request. Those request lifecycles detach their listeners, so a fixed
+    // warning threshold would misdiagnose valid configured concurrency as a leak.
+    this.setMaxListeners(0);
     this.#output = output;
     this.#maxPending = maxPending;
     const lines = createInterface({ input, crlfDelay: Infinity });
@@ -149,12 +153,19 @@ export class JsonRpcTransport extends EventEmitter {
           : undefined;
       if (!pending) return;
       this.#pending.delete(message.id as number);
-      const error = record(message.error);
-      if (error && typeof error.code === "number")
+      if ("error" in message) {
+        const error = record(message.error);
+        if (!error || typeof error.code !== "number") {
+          this.emit("malformed", line);
+          pending.reject(
+            new Error("app-server emitted malformed JSON-RPC error"),
+          );
+          return;
+        }
         pending.reject(
           new RpcError(error.code, String(error.message ?? "JSON-RPC error")),
         );
-      else pending.resolve(message.result);
+      } else pending.resolve(message.result);
       return;
     }
     if (typeof message.method !== "string") {

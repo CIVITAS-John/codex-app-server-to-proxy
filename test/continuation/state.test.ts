@@ -332,6 +332,40 @@ test("matching a pending response refreshes its tool-result deadline", async () 
   }
 });
 
+test("tool timeout survives a failed expiration write and releases memory", async () => {
+  vi.useFakeTimers();
+  try {
+    await withTempDir(async (directory) => {
+      const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
+      const store = new ResponseStore(directory);
+      const coordinator = new ContinuationCoordinator(store, rpc, 100);
+      coordinator.suspend("response_1", binding, [
+        {
+          request: { id: 1, method: "item/tool/call", params: {} },
+          callId: "call_1",
+          name: "lookup",
+          arguments: {},
+          threadId: "thread_1",
+          turnId: "turn_1",
+        },
+      ]);
+      const update = vi.spyOn(store, "update").mockImplementation(() => {
+        throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+      });
+
+      await vi.advanceTimersByTimeAsync(100);
+
+      assert.equal(update.mock.calls.length, 1);
+      assert.equal(coordinator.pending("response_1"), undefined);
+      assert.equal(coordinator.claim("thread_1"), true);
+      assert.equal(store.get("response_1")?.state, "pending_tool");
+      rpc.close();
+    }, "codex-proxy-state-");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test("implicit tool continuation preserves an expired restart tombstone", async () => {
   await withTempDir(async (directory) => {
     const firstRpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
@@ -580,6 +614,35 @@ test("disposing a coordinator cancels pending responders and expires their mappi
         message: "App-server transport is being replaced",
       },
     });
+  }, "codex-proxy-state-");
+});
+
+test("disposing survives a failed expiration write and releases memory", async () => {
+  await withTempDir(async (directory) => {
+    const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
+    const store = new ResponseStore(directory);
+    const coordinator = new ContinuationCoordinator(store, rpc, 60_000);
+    coordinator.suspend("response_1", binding, [
+      {
+        request: { id: 1, method: "item/tool/call", params: {} },
+        callId: "call_1",
+        name: "lookup",
+        arguments: {},
+        threadId: "thread_1",
+        turnId: "turn_1",
+      },
+    ]);
+    const update = vi.spyOn(store, "update").mockImplementation(() => {
+      throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+    });
+
+    assert.doesNotThrow(() => coordinator.dispose());
+
+    assert.equal(update.mock.calls.length, 1);
+    assert.equal(coordinator.pending("response_1"), undefined);
+    assert.equal(coordinator.claim("thread_1"), true);
+    assert.equal(store.get("response_1")?.state, "pending_tool");
+    rpc.close();
   }, "codex-proxy-state-");
 });
 

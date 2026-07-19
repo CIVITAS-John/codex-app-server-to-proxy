@@ -64,6 +64,9 @@ function integer(
   return parsed;
 }
 
+/** Highest delay Node timers schedule without overflowing to immediate firing. */
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+
 /** Parses a positive duration CLI option into milliseconds. */
 function duration(name: string, value: string): number {
   const match = /^(\d+)(ms|s|m)?$/.exec(value);
@@ -72,8 +75,12 @@ function duration(name: string, value: string): number {
   const amount = Number(match[1]);
   const multiplier = match[2] === "m" ? 60_000 : match[2] === "s" ? 1_000 : 1;
   const result = amount * multiplier;
-  if (!Number.isSafeInteger(result) || result < 1)
-    throw new Error(`${name} must be positive.`);
+  if (
+    !Number.isSafeInteger(result) ||
+    result < 1 ||
+    result > MAX_TIMER_DELAY_MS
+  )
+    throw new Error(`${name} must be between 1ms and ${MAX_TIMER_DELAY_MS}ms.`);
   return result;
 }
 

@@ -11,8 +11,8 @@ export function redact(
   value: string,
   root: string,
   sensitivePaths: readonly string[] = [],
+  home: string = homedir(),
 ): string {
-  const home = homedir();
   let result = value;
   const replacements = [
     ...sensitivePaths
@@ -26,7 +26,9 @@ export function redact(
     ...(isRedactablePath(root) && root !== home
       ? ([[root, "[REDACTED_CWD]"]] as const)
       : []),
-    [home, "[REDACTED_HOME]"] as const,
+    // A root-like home (for example HOME=/ in a minimal container) would
+    // otherwise rewrite every path separator in every diagnostic line.
+    ...(isRedactablePath(home) ? ([[home, "[REDACTED_HOME]"]] as const) : []),
   ].sort(([left], [right]) => right.length - left.length);
   // Replace the most specific paths first so masking a parent never exposes a
   // sensitive child as a readable relative suffix.

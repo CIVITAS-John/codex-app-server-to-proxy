@@ -44,7 +44,7 @@ Translate the supported Chat Completions subset to app-server threads/turns and 
 - One explicit notification registry distinguishes dedicated normalization, generic `itemId`-correlated progress, intentionally ignored lifecycle metadata, and diagnostic-only methods. Unstable approval auto-review notifications and terminal-interaction input remain bounded redacted diagnostics rather than public activity. Every intentionally handled notification is structurally required to appear in the generated-protocol-typed event corpus, so adding a known method cannot silently opt it into HTTP output.
 - Non-streaming output aggregates the identical direct fields. Pre-tool text remains in `message.content`, which may coexist with calls and results.
 - Usage attribution begins only after `turn/start` returns and accepts only matching thread and turn notifications. The exact `tokenUsage.last` values are mapped; unavailable details are omitted.
-- Client abort requests `turn/interrupt` for an active turn. Streaming writes wait for HTTP drain before consuming another normalized event.
+- Client abort requests `turn/interrupt` for an active turn. Streaming writes wait for HTTP drain before consuming another normalized event, and response closure terminates that wait so a disconnected or timed-out client cannot strand the handler.
 - Stage 05 implements `previous_response_id` and tool-result continuation. Nonempty policy `x_codex` objects remain rejected until Stage 06 can enforce their full contract.
 
 These decisions expose exact reasoning, text, tool, result, and later-output order without a response-side `x_codex` activity transcript. Clients relying on unsupported policy extensions receive an explicit validation error instead of fallback behavior.

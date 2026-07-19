@@ -49,7 +49,7 @@ export async function writeFrame(
     // close may have fired synchronously during write, before listeners attach.
     if (response.destroyed || response.writableEnded)
       throw new Error("The HTTP response closed while sending an SSE frame.");
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((resolve, reject) => {
       const cleanup = (): void => {
         response.off("drain", onDrain);
         response.off("close", onClose);
@@ -60,13 +60,16 @@ export async function writeFrame(
       };
       const onClose = (): void => {
         cleanup();
-        resolve();
+        reject(
+          new Error("The HTTP response closed while sending an SSE frame."),
+        );
       };
       response.once("drain", onDrain);
       response.once("close", onClose);
+      // Defend against response-like implementations that close while the
+      // listeners are being installed rather than emitting close afterward.
+      if (response.destroyed || response.writableEnded) onClose();
     });
-    if (response.destroyed && !response.writableFinished)
-      throw new Error("The HTTP response closed while sending an SSE frame.");
   }
 }
 

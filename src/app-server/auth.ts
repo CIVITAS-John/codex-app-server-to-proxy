@@ -37,10 +37,19 @@ export interface AuthenticationOptions {
 export async function ensureAuthenticated(
   options: AuthenticationOptions,
 ): Promise<void> {
-  const account = (await options.rpc.request(
-    "account/read",
-    { refreshToken: false },
+  // Bound the probe so a stalled app-server fails startup instead of hanging it.
+  const account = (await withDeadline(
     options.signal,
+    {
+      milliseconds: options.timeoutMs,
+      timeoutReason: new Error("account/read timed out."),
+    },
+    async (deadlineSignal) =>
+      await options.rpc.request(
+        "account/read",
+        { refreshToken: false },
+        deadlineSignal,
+      ),
   )) as AccountResponse;
   if (typeof account.requiresOpenaiAuth !== "boolean")
     throw new Error(
@@ -105,11 +114,15 @@ async function startAndWaitForLogin(
                 : new Error("ChatGPT login cancelled."),
             ),
         );
+        // A transport that dies mid-login must settle the wait immediately
+        // rather than reporting a misleading timeout after the full deadline.
+        const onTransportClose = (reason: Error): void => settle(reason);
+        options.rpc.once("close", onTransportClose);
         try {
           const login = (await options.rpc.request(
             "account/login/start",
             { type: useDeviceCode ? "chatgptDeviceCode" : "chatgpt" },
-            options.signal,
+            deadlineSignal,
           )) as LoginResponse;
           loginId = login.loginId;
           if (earlyCompletion !== undefined)
@@ -138,6 +151,7 @@ async function startAndWaitForLogin(
           }
           await completion;
         } finally {
+          options.rpc.off("close", onTransportClose);
           disposeDeadline();
         }
       },

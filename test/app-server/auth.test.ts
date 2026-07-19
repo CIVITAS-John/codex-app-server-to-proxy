@@ -20,7 +20,10 @@ type LoginKind =
   | "early"
   | "device"
   | "failure"
-  | "timeout";
+  | "timeout"
+  | "stall-read"
+  | "stall-start"
+  | "close";
 
 /** Creates an in-memory app-server authentication transport. */
 function fakeRpc(kind: LoginKind): JsonRpcTransport {
@@ -40,6 +43,8 @@ function fakeRpc(kind: LoginKind): JsonRpcTransport {
       };
       buffered = buffered.slice(newline + 1);
       if (message.method === "account/read") {
+        // A probe the app-server never answers must be deadline-bounded.
+        if (kind === "stall-read") continue;
         if (kind === "missing-requirement") {
           // Deliberately incomplete response proves authentication fails closed.
           input.write(
@@ -64,6 +69,8 @@ function fakeRpc(kind: LoginKind): JsonRpcTransport {
           );
         }
       } else if (message.method === "account/login/start") {
+        // A login start the app-server never answers must also be bounded.
+        if (kind === "stall-start") continue;
         const device = message.params.type === "chatgptDeviceCode";
         input.write(
           `${JSON.stringify(
@@ -85,7 +92,10 @@ function fakeRpc(kind: LoginKind): JsonRpcTransport {
             ),
           )}\n`,
         );
-        if (kind === "early")
+        if (kind === "close")
+          // Simulate the app-server dying after the login exchange started.
+          setImmediate(() => input.end());
+        else if (kind === "early")
           input.write(
             `${JSON.stringify(protocolNotification({ method: "account/login/completed", params: { loginId: "login", success: true, error: null } }))}\n`,
           );
@@ -250,4 +260,46 @@ test("authentication records timeout while allowing browser launch to finish", a
   assert.equal(settled, false);
   finishLaunch();
   await assert.rejects(authentication, /timed out/);
+});
+
+test("authentication bounds an account/read the app-server never answers", async () => {
+  await assert.rejects(
+    ensureAuthenticated({
+      rpc: fakeRpc("stall-read"),
+      log: silentLogger,
+      timeoutMs: 10,
+      interactive: true,
+      terminal: () => {},
+    }),
+    /account\/read timed out/,
+  );
+});
+
+test("authentication bounds a login start the app-server never answers", async () => {
+  await assert.rejects(
+    ensureAuthenticated({
+      rpc: fakeRpc("stall-start"),
+      log: silentLogger,
+      timeoutMs: 10,
+      interactive: true,
+      terminal: () => {},
+      launch: async () => true,
+    }),
+    /timed out/,
+  );
+});
+
+test("authentication fails fast when the transport closes mid-login", async () => {
+  // The generous deadline proves closure settles the wait, not the timeout.
+  await assert.rejects(
+    ensureAuthenticated({
+      rpc: fakeRpc("close"),
+      log: silentLogger,
+      timeoutMs: 60_000,
+      interactive: true,
+      terminal: () => {},
+      launch: async () => true,
+    }),
+    /transport closed/,
+  );
 });

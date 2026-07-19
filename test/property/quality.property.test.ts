@@ -185,6 +185,21 @@ test("property: canonical binding material ignores recursive object key order", 
   );
 });
 
+test("canonical binding material sorts keys by UTF-16 code units", () => {
+  const value = {
+    "\ue000": "private-use",
+    "\u{10000}": "supplementary",
+    "\u00e9": "accented",
+    a: "lowercase",
+    Z: "uppercase",
+  };
+
+  assert.equal(
+    canonicalJson(value),
+    '{"Z":"uppercase","a":"lowercase","\u00e9":"accented","\u{10000}":"supplementary","\ue000":"private-use"}',
+  );
+});
+
 test("property: ignored fields produce exactly one sorted warning per request", async () => {
   const logs: Array<Record<string, unknown>> = [];
   const backend = await startFakeChatBackend(

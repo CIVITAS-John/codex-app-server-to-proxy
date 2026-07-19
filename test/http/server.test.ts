@@ -11,8 +11,16 @@ import {
   type ServeOptions,
 } from "../../src/core/config.js";
 import { createLogger } from "../../src/core/logger.js";
+import { UNRESTRICTED_POLICY_REQUIREMENTS } from "../../src/core/policy.js";
 import { createProxyServer, type ProxyServer } from "../../src/http/server.js";
 import { silentLogger } from "../support/logger.js";
+import {
+  protocolResponse,
+  protocolThread,
+  protocolThreadStartResponse,
+  protocolTurn,
+} from "../support/protocol-fixtures.js";
+import { createFakeTransport } from "../support/transport.js";
 
 /** Builds safe ephemeral listener options for a server test. */
 async function options(
@@ -319,4 +327,83 @@ test("capacity rejects with overloaded and a disconnect releases it", async () =
     const response = await pollHealth(origin, 200);
     assert.equal(response.status, 200);
   });
+});
+
+test("a timed-out backpressured stream releases its concurrency slot", async () => {
+  await withServer(
+    { maxRequests: 1, requestTimeoutMs: 500 },
+    async (origin, proxy) => {
+      const fake = createFakeTransport({
+        onMessage(message, send) {
+          const id = message.id as number;
+          if (message.method === "thread/start")
+            send(
+              protocolResponse(
+                "thread/start",
+                id,
+                protocolThreadStartResponse(protocolThread("thr_stalled")),
+              ),
+            );
+          else if (message.method === "turn/start")
+            send(
+              protocolResponse("turn/start", id, {
+                turn: protocolTurn("turn_stalled", "inProgress"),
+              }),
+            );
+          else if (message.method === "turn/interrupt")
+            send(protocolResponse("turn/interrupt", id, {}));
+        },
+      });
+      proxy.setTransport(fake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
+      proxy.setReady(true);
+
+      let reportBlockedWrite = (): void => undefined;
+      const blockedWrite = new Promise<void>((resolve) => {
+        reportBlockedWrite = resolve;
+      });
+      proxy.server.prependOnceListener("request", (_request, response) => {
+        const write = response.write.bind(response);
+        response.write = ((chunk: string | Uint8Array) => {
+          write(chunk);
+          reportBlockedWrite();
+          // No drain event follows, deterministically modeling a client whose
+          // receive window remains full for the lifetime of the request.
+          return false;
+        }) as typeof response.write;
+      });
+
+      const url = new URL(`${origin}/v1/chat/completions`);
+      const body = JSON.stringify({
+        model: "m",
+        stream: true,
+        messages: [{ role: "user", content: "stall" }],
+      });
+      const clientClosed = new Promise<void>((resolve) => {
+        const request = http.request(
+          {
+            hostname: url.hostname,
+            port: url.port,
+            path: url.pathname,
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "content-length": Buffer.byteLength(body),
+            },
+          },
+          (response) => {
+            response.resume();
+            response.once("close", resolve);
+            response.once("error", resolve);
+          },
+        );
+        request.once("error", resolve);
+        request.end(body);
+      });
+
+      await blockedWrite;
+      assert.equal((await pollHealth(origin, 429)).status, 429);
+      await clientClosed;
+      assert.equal((await pollHealth(origin, 200)).status, 200);
+    },
+  );
 });
