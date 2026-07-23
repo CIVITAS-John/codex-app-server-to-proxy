@@ -13,7 +13,7 @@ import {
 import { createLogger } from "../../src/core/logger.js";
 import { fakeCodexScript } from "../support/fake-codex.js";
 import { silentLogger } from "../support/logger.js";
-import { waitForFile } from "../support/poll.js";
+import { waitForFile, waitForFileText } from "../support/poll.js";
 import {
   protocolResponse,
   protocolServerRequest,
@@ -179,7 +179,9 @@ let initialized = false;`,
           allowedSandboxModes: null,
           allowedWebSearchModes: null,
         });
-        await new Promise((resolve) => setTimeout(resolve, 30));
+        // The final response proves every preceding request was handled and
+        // captured; a fixed delay races slower child-process I/O on macOS CI.
+        await waitForFileText(capture, '"id":"unknown"', 2_000);
         const messages = (await readFile(capture, "utf8"))
           .trim()
           .split("\n")

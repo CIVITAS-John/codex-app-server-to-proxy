@@ -31,3 +31,24 @@ export async function waitForFile(
     }
   }
 }
+
+/** Waits until a captured text file contains the expected text. */
+export async function waitForFileText(
+  path: string,
+  expected: string,
+  timeoutMs = 10_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    let contents = "";
+    try {
+      contents = await readFile(path, "utf8");
+    } catch {
+      // The producer may not have created the capture file yet.
+    }
+    if (contents.includes(expected)) return;
+    if (Date.now() >= deadline)
+      throw new Error(`Timed out waiting for ${expected} in ${path}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
