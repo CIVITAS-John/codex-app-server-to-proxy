@@ -58,6 +58,14 @@
         "$ref": "#/definitions/LegacyAppPathString"
       }
     },
+    "itemsBackwardsCursor": {
+      "description": "Opaque head cursor for hydrating paginated items backwards.\n\nPass this as `cursor` to `thread/items/list` with `sortDirection: \"desc\"`. The first page includes the cursor's head item.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "model": {
       "type": "string"
     },
@@ -107,6 +115,14 @@
     },
     "thread": {
       "$ref": "#/definitions/Thread"
+    },
+    "turnsBackwardsCursor": {
+      "description": "Opaque head cursor for hydrating paginated turns backwards.\n\nPass this as `cursor` to `thread/turns/list` with `sortDirection: \"desc\"`. The first page includes the cursor's head turn.",
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "definitions": {
@@ -568,6 +584,26 @@
             }
           },
           "title": "InputImageDynamicToolCallOutputContentItem"
+        },
+        {
+          "type": "object",
+          "required": [
+            "audioUrl",
+            "type"
+          ],
+          "properties": {
+            "audioUrl": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "inputAudio"
+              ],
+              "title": "InputAudioDynamicToolCallOutputContentItemType"
+            }
+          },
+          "title": "InputAudioDynamicToolCallOutputContentItem"
         }
       ]
     },
@@ -676,12 +712,6 @@
           ]
         },
         "resourceUri": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "templateId": {
           "type": [
             "string",
             "null"
@@ -1174,6 +1204,13 @@
           "description": "Optional role (agent_role) assigned to an AgentControl-spawned sub-agent.",
           "type": [
             "string",
+            "null"
+          ]
+        },
+        "canAcceptDirectInput": {
+          "description": "Whether the app server accepts direct turn input for this loaded thread. `None` means the capability is unavailable, such as for an unloaded stored thread.",
+          "type": [
+            "boolean",
             "null"
           ]
         },
@@ -1910,6 +1947,15 @@
             "query": {
               "type": "string"
             },
+            "results": {
+              "description": "Structured search results returned out-of-band by standalone web search.\n\nThese stay as opaque JSON at the extension/app-server boundary so new result fields and result types can pass through without a Codex release.",
+              "default": null,
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": true
+            },
             "type": {
               "type": "string",
               "enum": [
@@ -1945,6 +1991,7 @@
           "title": "ImageViewThreadItem"
         },
         {
+          "description": "Display item emitted by the interruptible `clock.sleep` tool.",
           "type": "object",
           "required": [
             "durationMs",
@@ -2409,6 +2456,46 @@
             }
           },
           "title": "LocalImageUserInput"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "url"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "audio"
+              ],
+              "title": "AudioUserInputType"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "title": "AudioUserInput"
+        },
+        {
+          "type": "object",
+          "required": [
+            "path",
+            "type"
+          ],
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "localAudio"
+              ],
+              "title": "LocalAudioUserInputType"
+            }
+          },
+          "title": "LocalAudioUserInput"
         },
         {
           "type": "object",

@@ -1,6 +1,6 @@
 # Stage 01 compatibility contract
 
-This contract targets `codex-cli 0.144.5`, pinned by the exact `@openai/codex` runtime dependency. The checked-in TypeScript and JSON Schema artifacts were generated from that package-owned executable with `--experimental`; they are the wire-type source of truth. Regenerate them with `npm run generate:protocol` after changing the package pin.
+This contract targets `codex-cli 0.145.0`, pinned by the exact `@openai/codex` runtime dependency. The checked-in TypeScript and JSON Schema artifacts were generated from that package-owned executable with `--experimental`; they are the wire-type source of truth. Regenerate them with `npm run generate:protocol` after changing the package pin.
 
 ## Request fields
 

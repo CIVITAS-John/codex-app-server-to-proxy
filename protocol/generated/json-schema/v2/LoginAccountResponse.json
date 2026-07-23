@@ -88,6 +88,22 @@
         }
       },
       "title": "ChatgptAuthTokensv2::LoginAccountResponse"
+    },
+    {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "amazonBedrock"
+          ],
+          "title": "AmazonBedrockv2::LoginAccountResponseType"
+        }
+      },
+      "title": "AmazonBedrockv2::LoginAccountResponse"
     }
   ]
 }

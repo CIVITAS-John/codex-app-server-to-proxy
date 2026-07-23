@@ -1,8 +1,8 @@
 {
   "codexPackage": "@openai/codex",
-  "codexVersion": "0.144.5",
+  "codexVersion": "0.145.0",
   "versionSource": "package.json dependencies.@openai/codex",
-  "generatedAt": "2026-07-16",
+  "generatedAt": "2026-07-23",
   "experimental": true,
   "typescriptCommand": "@openai/codex app-server generate-ts --experimental --out protocol/generated/typescript",
   "jsonSchemaCommand": "@openai/codex app-server generate-json-schema --experimental --out protocol/generated/json-schema",

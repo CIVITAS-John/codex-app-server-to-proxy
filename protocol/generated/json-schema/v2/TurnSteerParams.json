@@ -217,6 +217,46 @@
         {
           "type": "object",
           "required": [
+            "type",
+            "url"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "audio"
+              ],
+              "title": "AudioUserInputType"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "title": "AudioUserInput"
+        },
+        {
+          "type": "object",
+          "required": [
+            "path",
+            "type"
+          ],
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "localAudio"
+              ],
+              "title": "LocalAudioUserInputType"
+            }
+          },
+          "title": "LocalAudioUserInput"
+        },
+        {
+          "type": "object",
+          "required": [
             "name",
             "path",
             "type"

@@ -104,6 +104,31 @@
         }
       },
       "title": "ChatgptAuthTokensv2::LoginAccountParams"
+    },
+    {
+      "description": "[UNSTABLE] Managed Amazon Bedrock login is experimental.",
+      "type": "object",
+      "required": [
+        "apiKey",
+        "region",
+        "type"
+      ],
+      "properties": {
+        "apiKey": {
+          "type": "string"
+        },
+        "region": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "amazonBedrock"
+          ],
+          "title": "AmazonBedrockv2::LoginAccountParamsType"
+        }
+      },
+      "title": "AmazonBedrockv2::LoginAccountParams"
     }
   ],
   "definitions": {

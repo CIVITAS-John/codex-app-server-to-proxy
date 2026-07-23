@@ -34,6 +34,13 @@
         "null"
       ]
     },
+    "beforeTurnId": {
+      "description": "Optional turn id to fork before, excluding that turn and all later turns. Cannot be combined with `last_turn_id`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "config": {
       "type": [
         "object",
@@ -46,6 +53,10 @@
         "string",
         "null"
       ]
+    },
+    "deferGoalContinuation": {
+      "description": "When true, carry the source thread's current goal into the fork without starting its initial automatic continuation. The next explicit turn owns the goal lifecycle, and normal automatic continuation resumes after it.",
+      "type": "boolean"
     },
     "developerInstructions": {
       "type": [
