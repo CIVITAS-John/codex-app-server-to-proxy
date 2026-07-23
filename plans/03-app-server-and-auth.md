@@ -55,4 +55,6 @@ The CLI starts app-server before becoming ready and may initiate ChatGPT login. 
 
 The proxy declares `@openai/codex` as a runtime dependency and resolves the package's declared `codex` binary. This makes a normal local install self-contained; existing deployments that rely on a global PATH installation continue to work only as a compatibility fallback, while `--codex-path` remains the explicit override.
 
+When `--log-level debug` is enabled, bounded and path-redacted app-server stderr is included directly in the `app_server_stderr` warning instead of producing a placeholder warning followed by a separate debug-detail event. At other log levels, the warning retains its redacted placeholder.
+
 Stage 03 is complete. The focused live contract passed through the real HTTP proxy on 2026-07-14 with two scenarios under the four-turn guard. It observed role-history streaming, a two-request dynamic-tool round trip, and completed-thread continuation after restarting both the proxy and app-server while retaining only the state directory and `previous_response_id`. Policy fields remain rejected until Stage 06 implements and verifies their full enforcement matrix; this preserves the Stage 03 fail-closed compatibility decision.

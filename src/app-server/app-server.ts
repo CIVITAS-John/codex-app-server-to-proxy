@@ -131,12 +131,10 @@ export async function startAppServer(
     (stopping ??= stopChild(child, rpc, options.shutdownTimeoutMs));
   child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
     options.log("warn", "app_server_stderr", {
-      message: "[REDACTED_DIAGNOSTIC]",
+      message: options.diagnosticLogging
+        ? redact(chunk, options.root).trim().slice(0, 2_000)
+        : "[REDACTED_DIAGNOSTIC]",
     });
-    if (options.diagnosticLogging)
-      options.log("debug", "app_server_stderr_detail", {
-        message: redact(chunk, options.root).trim().slice(0, 2_000),
-      });
   });
   rpc.on("malformed", () =>
     options.log("error", "app_server_malformed_output"),

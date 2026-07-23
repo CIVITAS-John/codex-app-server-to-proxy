@@ -226,8 +226,16 @@ let initialized = false;`,
           error: { code: -32601, message: "Unsupported server request" },
         });
         app.child.stderr.emit("data", `${homedir()}/private-file`);
-        assert.doesNotMatch(logs.join(""), new RegExp(homedir()));
-        assert.match(logs.join(""), /\[REDACTED_HOME\]/);
+        const stderrLogs = logs
+          .map((entry) => JSON.parse(entry) as Record<string, unknown>)
+          .filter((entry) => entry.event === "app_server_stderr");
+        assert.equal(stderrLogs.length, 1);
+        assert.equal(stderrLogs[0]?.level, "warn");
+        assert.equal(stderrLogs[0]?.message, "[REDACTED_HOME]/private-file");
+        assert.equal(
+          logs.some((entry) => entry.includes("app_server_stderr_detail")),
+          false,
+        );
       } finally {
         await app.stop();
       }
