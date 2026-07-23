@@ -305,7 +305,7 @@ testWithPosixExecutable(
       assert.equal(code, 0);
       assert.equal(signal, null);
       assert.match(stderr, /shutdown_complete/);
-      assert.match(stderr, /"default_sandbox":"read-only"/);
+      assert.match(stderr, /"default_sandbox":"disabled"/);
       assert.match(stderr, /"default_web_search":"disabled"/);
       assert.equal(
         stderr.includes(`"proxy_version":"${CLIENT_VERSION}"`),

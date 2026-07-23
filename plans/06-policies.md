@@ -9,8 +9,8 @@ Expose per-request execution controls without weakening app-server or managed po
 1. Canonicalize the configured root and every `x_codex.cwd`. Require cwd to be an existing directory whose resolved path is the root or a descendant.
     - Default the root to the proxy's launch directory and allow an explicit `--root` override.
     - Reject relative paths, sibling paths, prefix lookalikes, and symlink escapes.
-2. Map `read-only`, `workspace-write`, and `danger-full-access` to the supported app-server sandbox/permission representation discovered in Stage 01.
-3. Never default to `danger-full-access`. Make the safe default explicit and visible in startup logs.
+2. Map public `read-only`, `workspace-write`, and `danger-full-access` selections to the supported native app-server sandbox representation. Realize public `disabled` as native `read-only` plus experimental `environments: []`, so the model has no execution environment while ignored environment selection still fails safe to read-only access.
+3. Default to `disabled`, never to a file-capable or full-access mode. Make the safe default explicit and visible in startup logs.
 4. Accept each web-search mode that app-server can enforce for the individual request. Reject unsupported modes and never mutate shared configuration to simulate them.
 5. Read effective configuration requirements via `configRequirements/read` where available (`allowedSandboxModes`, `allowedApprovalPolicies`, `allowedWebSearchModes`) and reject selections disallowed by organization or machine policy.
 6. Use non-interactive `auto_review` where effective policy permits; full access must still respect managed policy.
@@ -34,11 +34,13 @@ Expose per-request execution controls without weakening app-server or managed po
 
 ## Implementation status
 
-Stage 06 is complete through the deterministic offline gate. `x_codex` accepts canonical root-bounded `cwd`, all three generated sandbox modes, and all four generated web-search modes (`disabled`, `cached`, `indexed`, and `live`). The safe defaults are the configured root, `read-only`, and `disabled`; startup logs expose the latter two without logging the root. `--log-level debug` is the explicit diagnostic opt-in that may include root context.
+Stage 06 is complete through the deterministic offline gate. `x_codex` accepts canonical root-bounded `cwd`, the public `disabled`, `read-only`, `workspace-write`, and `danger-full-access` sandbox modes, and all four generated web-search modes (`disabled`, `cached`, `indexed`, and `live`). The safe defaults are the configured root, disabled execution environments, and disabled web search; startup logs expose the latter two without logging the root. `--log-level debug` is the explicit diagnostic opt-in that may include root context.
 
 The proxy reads `configRequirements/read` after initialization when the method is available and enforces sandbox, approval-policy, approval-reviewer, and web-search allowlists. Approval policy remains proxy-owned: it prefers the stricter `never`, falls back only to a managed-allowed supported policy, uses `auto_review` when permitted, and sends method-specific declines for every unexpected approval request.
 
-Fresh threads and resumed threads receive canonical cwd, sandbox, approval, and per-thread `config.web_search` settings. Every new turn receives explicit cwd, approval, and full sandbox-policy overrides. Continuation records bind the complete effective setting set, so changes fail before `thread/read` and cannot reinterpret prior tool activity.
+Fresh threads and resumed threads receive canonical cwd, the native sandbox realization, approval, and per-thread `config.web_search` settings. Fresh disabled threads and every disabled turn additionally receive `environments: []`; resume omits that unsupported field and the following turn reapplies it. Every new turn receives explicit cwd, approval, and full sandbox-policy overrides. Continuation records bind the public sandbox selection, so `disabled` and `read-only` cannot cross on continuation even though both use native read-only protection. Managed policy must allow native `read-only` before `disabled` can be selected.
+
+Changing the default from `read-only` to `disabled` is intentionally breaking. Requests that relied on implicit shell or file-read access must opt into `read-only`, and pre-change continuations created without an explicit sandbox must also pass `sandbox: "read-only"` or fail with `continuation_policy_mismatch`.
 
 The pinned generated protocol added the `indexed` web-search mode beyond the earlier checked-in `x_codex` schema. Stage 06 exposes it as a compatibility addition because the same per-thread `config.web_search` mapping applies to every generated mode. Deterministic tests prove exact forwarding and no shared-configuration mutation. No live policy smoke test or model call was run, so actual provider-side search behavior remains an explicit opt-in verification item rather than an offline claim.
 

@@ -551,6 +551,7 @@ async function startFreshThread(
         model: request.model,
         ephemeral: false,
         ...threadPolicyParams(request.policy),
+        ...environmentParams(request.policy),
         ...(request.dynamicTools.length
           ? { dynamicTools: request.dynamicTools }
           : {}),
@@ -629,17 +630,27 @@ function rejectDynamicCall(
   }
 }
 
-/** Builds explicit thread start/resume settings for one effective policy. */
+/** Builds native thread settings shared by thread start and resume. */
 function threadPolicyParams(policy: EffectivePolicy): Record<string, unknown> {
   return {
     cwd: policy.cwd,
-    sandbox: policy.sandbox,
+    sandbox: policy.threadSandbox,
     approvalPolicy: policy.approvalPolicy,
     ...(policy.approvalsReviewer
       ? { approvalsReviewer: policy.approvalsReviewer }
       : {}),
     config: { web_search: policy.webSearch },
   };
+}
+
+/**
+ * Builds the no-environment override realizing the public `disabled` sandbox.
+ * `environments: []` removes the execution environment entirely; thread/resume
+ * has no such field in the pinned protocol, so thread/start sets it sticky and
+ * every turn/start reapplies it to protect resumed disabled threads.
+ */
+function environmentParams(policy: EffectivePolicy): Record<string, unknown> {
+  return policy.sandbox === "disabled" ? { environments: [] } : {};
 }
 
 /** Builds sticky turn overrides so prior thread state is never inherited. */
@@ -651,6 +662,7 @@ function turnPolicyParams(policy: EffectivePolicy): Record<string, unknown> {
       ? { approvalsReviewer: policy.approvalsReviewer }
       : {}),
     sandboxPolicy: policy.sandboxPolicy,
+    ...environmentParams(policy),
   };
 }
 

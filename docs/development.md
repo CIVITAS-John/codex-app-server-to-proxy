@@ -60,7 +60,7 @@ CI sets `CODEX_TEST_COVERAGE` explicitly. The primary Node.js 24 Linux job alone
 
 ## Live contract tests
 
-The live suite exercises streaming role history, a function-tool round trip, completed-thread continuation after restarting the proxy and app-server, explicit read-only/disabled-web policy, bounded built-in tool observation, and continuation after that tool information. It runs serially, caps captured diagnostics, uses only `gpt-5.4-mini`, normally makes five model calls, and attempts at most six:
+The live suite exercises streaming role history, a function-tool round trip, completed-thread continuation after restarting the proxy and app-server, explicit read-only/disabled-web policy, default disabled-sandbox chat without execution tools, bounded built-in tool observation, and continuation after that tool information. It runs serially, caps captured diagnostics, uses only `gpt-5.4-mini`, normally makes eight model calls, and attempts at most nine:
 
 ```sh
 npm run test:live
@@ -68,7 +68,7 @@ npm run test:live
 
 Running that dedicated command is the explicit local opt-in. It uses an existing ChatGPT login when available and otherwise preserves the normal interactive login fallback in a TTY. The default executable is owned by the pinned npm package. Set `CODEX_PATH` only for an explicit override; it must report the exact pinned contract version.
 
-The checked-in online workflow is manual, serial, protected by the `codex-live-tests` GitHub environment, and fails before dependency installation when `CODEX_ACCESS_TOKEN` is absent. Headless CI suppresses device-code URLs and one-time codes; credentials are never printed. The workflow is optional and never a required pull-request or release gate. Before either live path, state the expected normal total of five `gpt-5.4-mini` calls and the hard maximum of six.
+The checked-in online workflow is manual, serial, protected by the `codex-live-tests` GitHub environment, and fails before dependency installation when `CODEX_ACCESS_TOKEN` is absent. Headless CI suppresses device-code URLs and one-time codes; credentials are never printed. The workflow is optional and never a required pull-request or release gate. Before either live path, state the expected normal total of eight `gpt-5.4-mini` calls and the hard maximum of nine.
 
 Transport framing, malformed-frame handling, process failures, and other fault injection remain fake-only because a live app-server cannot provide those cases deterministically.
 

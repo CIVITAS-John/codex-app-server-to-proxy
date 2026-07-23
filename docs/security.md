@@ -37,4 +37,4 @@ Before release:
 1. Run `npm ci && npm run check` from a clean tree.
 2. Confirm protocol regeneration is clean and coverage excludes generated artifacts.
 3. Review new logs, fixtures, and workflow artifacts for prompts, credentials, login URLs, absolute personal paths, and tool payloads.
-4. Run the opt-in live suite only with explicit authorization; state the expected five calls and six-call hard maximum first.
+4. Run the opt-in live suite only with explicit authorization; state the expected eight calls and nine-call hard maximum first.

@@ -285,7 +285,7 @@ async function runServer(options: ServeOptions, log: Logger): Promise<number> {
     codex_version: PINNED_CODEX_VERSION,
     host: address.address,
     port: address.port,
-    default_sandbox: "read-only",
+    default_sandbox: "disabled",
     default_web_search: "disabled",
     ready: false,
   });

@@ -4,8 +4,8 @@ import { afterAll, beforeAll, describe, test } from "vitest";
 /** Model fixed by the repository's live-test cost policy. */
 export const CONTRACT_MODEL = "gpt-5.4-mini";
 
-/** Hard model-turn guard with one retry above the normal seven live calls. */
-export const MAX_LIVE_MODEL_CALLS = 8;
+/** Hard model-turn guard with one retry above the normal eight live calls. */
+export const MAX_LIVE_MODEL_CALLS = 9;
 
 /** Safe root-relative file read by the live built-in command scenario. */
 export const OBSERVATION_FIXTURE = ".codex-contract-observation";
@@ -14,7 +14,7 @@ export const OBSERVATION_FIXTURE = ".codex-contract-observation";
 export const OBSERVATION_COMMAND = `cat ${OBSERVATION_FIXTURE}`;
 
 /** Maximum model turns allowed by the comprehensive offline contract. */
-const MAX_OFFLINE_MODEL_CALLS = 10;
+const MAX_OFFLINE_MODEL_CALLS = 11;
 
 /** Maximum model turns allowed for the complete tool round trip. */
 const MAX_TOOL_MODEL_CALLS = 2;
@@ -71,6 +71,7 @@ export type ChatContractScenario =
   | "aggregate"
   | "role-history-sse"
   | "dynamic-tool-restart"
+  | "disabled-sandbox-chat"
   | "safe-policy-built-in-continuation"
   | "invalid-input"
   | "disconnect";
@@ -86,6 +87,7 @@ const OFFLINE_SCENARIOS: readonly ChatContractScenario[] = [
   "aggregate",
   "role-history-sse",
   "dynamic-tool-restart",
+  "disabled-sandbox-chat",
   "safe-policy-built-in-continuation",
   "invalid-input",
   "disconnect",
@@ -366,6 +368,40 @@ export function registerChatContract(
           ),
           "restart continuation omitted the contract acknowledgment",
         );
+      }, 130_000);
+
+    if (scenarios.has("disabled-sandbox-chat"))
+      test("completes pure chat without exposing the disabled execution environment", async () => {
+        const callsBefore = backend!.modelCalls();
+        const response = await chat({
+          model: CONTRACT_MODEL,
+          messages: [
+            {
+              role: "user",
+              content: `This is the contract-disabled-sandbox check. Attempt to use a built-in shell or file tool to run ${OBSERVATION_COMMAND}. If no such tool is available, say so briefly without guessing the file contents.`,
+            },
+          ],
+        });
+        const raw = await response.text();
+        assert.equal(response.status, 200, diagnostic(raw));
+        const body = parseJson<ToolCompletion>(raw, "disabled-sandbox chat");
+        const choice = body.choices?.[0];
+        assert.equal(choice?.finish_reason, "stop");
+        assert.equal(
+          choice?.message?.tool_calls?.length ?? 0,
+          0,
+          "disabled sandbox exposed an unexpected tool call",
+        );
+        assert.equal(
+          choice?.message?.tool_results?.length ?? 0,
+          0,
+          "disabled sandbox exposed an unexpected tool result",
+        );
+        assert.ok(
+          !choice?.message?.content?.includes(backend!.observationToken),
+          "disabled sandbox disclosed the unreadable observation token",
+        );
+        assert.equal(backend!.modelCalls() - callsBefore, 1);
       }, 130_000);
 
     if (scenarios.has("safe-policy-built-in-continuation"))

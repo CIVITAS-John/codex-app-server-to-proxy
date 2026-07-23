@@ -3,12 +3,18 @@ import { access, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, sep } from "node:path";
 import { bindingHash, record } from "./canonical.js";
 
-/** Sandbox modes exposed by the x_codex request extension. */
-export const SANDBOX_MODES = [
+/** Native sandbox modes accepted by the pinned app-server protocol. */
+export const CODEX_SANDBOX_MODES = [
   "read-only",
   "workspace-write",
   "danger-full-access",
 ] as const;
+
+/** A native sandbox mode accepted by the pinned app-server protocol. */
+export type CodexSandboxMode = (typeof CODEX_SANDBOX_MODES)[number];
+
+/** Sandbox modes exposed by the x_codex request extension. */
+export const SANDBOX_MODES = ["disabled", ...CODEX_SANDBOX_MODES] as const;
 
 /** A sandbox mode exposed by the x_codex request extension. */
 export type SandboxMode = (typeof SANDBOX_MODES)[number];
@@ -44,7 +50,7 @@ export type ApprovalsReviewer = (typeof APPROVAL_REVIEWER_ORDER)[number];
 export interface PolicyRequirements {
   allowedApprovalPolicies: ApprovalPolicy[] | null;
   allowedApprovalsReviewers: ApprovalsReviewer[] | null;
-  allowedSandboxModes: SandboxMode[] | null;
+  allowedSandboxModes: CodexSandboxMode[] | null;
   allowedWebSearchModes: WebSearchMode[] | null;
 }
 
@@ -80,6 +86,7 @@ export type EffectiveSandboxPolicy =
 export interface EffectivePolicy {
   cwd: string;
   sandbox: SandboxMode;
+  threadSandbox: CodexSandboxMode;
   webSearch: WebSearchMode;
   approvalPolicy: ApprovalPolicy;
   approvalsReviewer?: ApprovalsReviewer | undefined;
@@ -209,7 +216,7 @@ export function parsePolicyRequirements(value: unknown): PolicyRequirements {
     ),
     allowedSandboxModes: stringAllowlist(
       requirements.allowedSandboxModes,
-      SANDBOX_MODES,
+      CODEX_SANDBOX_MODES,
       "allowedSandboxModes",
     ),
     allowedWebSearchModes: stringAllowlist(
@@ -233,10 +240,11 @@ export async function resolveEffectivePolicy(
     request.cwd === undefined
       ? root
       : await canonicalizeRequestCwd(request.cwd, root);
-  const sandbox = request.sandbox ?? "read-only";
+  const sandbox = request.sandbox ?? "disabled";
+  const threadSandbox = codexSandboxMode(sandbox);
   const webSearch = request.webSearch ?? "disabled";
   requireAllowed(
-    sandbox,
+    threadSandbox,
     requirements.allowedSandboxModes,
     "x_codex.sandbox",
     "sandbox_not_allowed",
@@ -252,11 +260,17 @@ export async function resolveEffectivePolicy(
   return {
     cwd,
     sandbox,
+    threadSandbox,
     webSearch,
     approvalPolicy,
     approvalsReviewer,
     sandboxPolicy: sandboxPolicy(sandbox, cwd),
   };
+}
+
+/** Maps a public sandbox selection to its native app-server realization. */
+export function codexSandboxMode(sandbox: SandboxMode): CodexSandboxMode {
+  return sandbox === "disabled" ? "read-only" : sandbox;
 }
 
 /** Selects a managed-allowed reviewer, preferring non-interactive review. */
@@ -294,17 +308,27 @@ export function sandboxPolicy(
   sandbox: SandboxMode,
   cwd: string,
 ): EffectiveSandboxPolicy {
-  if (sandbox === "read-only")
-    return { type: "readOnly", networkAccess: false };
-  if (sandbox === "workspace-write")
-    return {
-      type: "workspaceWrite",
-      writableRoots: [cwd],
-      networkAccess: false,
-      excludeTmpdirEnvVar: false,
-      excludeSlashTmp: false,
-    };
-  return { type: "dangerFullAccess" };
+  switch (sandbox) {
+    case "disabled":
+    case "read-only":
+      return { type: "readOnly", networkAccess: false };
+    case "workspace-write":
+      return {
+        type: "workspaceWrite",
+        writableRoots: [cwd],
+        networkAccess: false,
+        excludeTmpdirEnvVar: false,
+        excludeSlashTmp: false,
+      };
+    case "danger-full-access":
+      return { type: "dangerFullAccess" };
+    default: {
+      // A new public mode must name its realization explicitly; access is
+      // never the implicit fallback for an unhandled selection.
+      const unrealized: never = sandbox;
+      throw new Error(`Unrealized sandbox mode: ${String(unrealized)}`);
+    }
+  }
 }
 
 /** Returns the canonical effective fields whose meaning must not change. */

@@ -28,7 +28,8 @@ import { withTempDir } from "../support/temp.js";
 function defaultPolicyHash(cwd: string): string {
   return policyBindingHash({
     cwd,
-    sandbox: "read-only",
+    sandbox: "disabled",
+    threadSandbox: "read-only",
     webSearch: "disabled",
     approvalPolicy: "never",
     approvalsReviewer: "auto_review",

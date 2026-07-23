@@ -1108,6 +1108,7 @@ test("strips replayed assistant reasoning before injecting visible history", asy
       approvalPolicy: "never",
       approvalsReviewer: "auto_review",
       sandboxPolicy: { type: "readOnly", networkAccess: false },
+      environments: [],
     });
   });
 });
@@ -1947,9 +1948,9 @@ test("request policies map exactly, bind continuations, and honor managed denial
       );
       assert.deepEqual(managedFake.messages, []);
 
-      const disabledFake = policyCapturingAppServer();
-      proxy.setTransport(disabledFake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
-      const disabled = await fetch(`${origin}/v1/chat/completions`, {
+      const defaultFake = policyCapturingAppServer();
+      proxy.setTransport(defaultFake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
+      const defaulted = await fetch(`${origin}/v1/chat/completions`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -1957,7 +1958,22 @@ test("request policies map exactly, bind continuations, and honor managed denial
           messages: [{ role: "user", content: "offline" }],
         }),
       });
+      assert.equal(defaulted.status, 200);
+
+      const disabledFake = policyCapturingAppServer();
+      proxy.setTransport(disabledFake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
+      const disabledRequest = {
+        model: "m",
+        messages: [{ role: "user", content: "disabled" }],
+        x_codex: { sandbox: "disabled" },
+      };
+      const disabled = await fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(disabledRequest),
+      });
       assert.equal(disabled.status, 200);
+      const disabledBody = (await disabled.json()) as { id: string };
       assert.deepEqual(
         disabledFake.messages.find(
           (message) => message.method === "thread/start",
@@ -1970,6 +1986,7 @@ test("request policies map exactly, bind continuations, and honor managed denial
           approvalPolicy: "never",
           approvalsReviewer: "auto_review",
           config: { web_search: "disabled" },
+          environments: [],
         },
       );
       assert.deepEqual(
@@ -1979,13 +1996,120 @@ test("request policies map exactly, bind continuations, and honor managed denial
           threadId: "thr_policy",
           model: "m",
           summary: "detailed",
-          input: [{ type: "text", text: "offline", text_elements: [] }],
+          input: [{ type: "text", text: "disabled", text_elements: [] }],
           cwd: root,
           approvalPolicy: "never",
           approvalsReviewer: "auto_review",
           sandboxPolicy: { type: "readOnly", networkAccess: false },
+          environments: [],
         },
       );
+
+      // Omitting x_codex must behave exactly like explicit sandbox "disabled":
+      // identical thread settings and turn overrides, differing only in input.
+      assert.deepEqual(
+        defaultFake.messages.find(
+          (message) => message.method === "thread/start",
+        )?.params,
+        disabledFake.messages.find(
+          (message) => message.method === "thread/start",
+        )?.params,
+      );
+      assert.deepEqual(
+        defaultFake.messages.find((message) => message.method === "turn/start")
+          ?.params,
+        {
+          ...(disabledFake.messages.find(
+            (message) => message.method === "turn/start",
+          )?.params as Record<string, unknown>),
+          input: [{ type: "text", text: "offline", text_elements: [] }],
+        },
+      );
+
+      const continuedDisabled = await fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...disabledRequest,
+          previous_response_id: disabledBody.id,
+          messages: [{ role: "user", content: "continue disabled" }],
+        }),
+      });
+      assert.equal(continuedDisabled.status, 200);
+      const continuedDisabledBody = (await continuedDisabled.json()) as {
+        id: string;
+      };
+      assert.deepEqual(
+        disabledFake.messages.find(
+          (message) => message.method === "thread/resume",
+        )?.params,
+        {
+          threadId: "thr_policy",
+          excludeTurns: true,
+          cwd: root,
+          sandbox: "read-only",
+          approvalPolicy: "never",
+          approvalsReviewer: "auto_review",
+          config: { web_search: "disabled" },
+        },
+      );
+      assert.deepEqual(
+        disabledFake.messages
+          .filter((message) => message.method === "turn/start")
+          .at(-1)?.params,
+        {
+          threadId: "thr_policy",
+          model: "m",
+          summary: "detailed",
+          input: [
+            { type: "text", text: "continue disabled", text_elements: [] },
+          ],
+          cwd: root,
+          approvalPolicy: "never",
+          approvalsReviewer: "auto_review",
+          sandboxPolicy: { type: "readOnly", networkAccess: false },
+          environments: [],
+        },
+      );
+
+      const beforeDisabledMismatch = disabledFake.messages.length;
+      const changedDisabled = await fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...disabledRequest,
+          previous_response_id: continuedDisabledBody.id,
+          x_codex: { sandbox: "read-only" },
+        }),
+      });
+      assert.equal(changedDisabled.status, 409);
+      assert.equal(
+        ((await changedDisabled.json()) as { error: { code: string } }).error
+          .code,
+        "continuation_policy_mismatch",
+      );
+      assert.equal(disabledFake.messages.length, beforeDisabledMismatch);
+
+      const defaultDeniedFake = policyCapturingAppServer();
+      proxy.setTransport(defaultDeniedFake.rpc, {
+        ...UNRESTRICTED_POLICY_REQUIREMENTS,
+        allowedSandboxModes: ["workspace-write"],
+      });
+      const defaultDenied = await fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "m",
+          messages: [{ role: "user", content: "default denied" }],
+        }),
+      });
+      assert.equal(defaultDenied.status, 400);
+      assert.equal(
+        ((await defaultDenied.json()) as { error: { code: string } }).error
+          .code,
+        "sandbox_not_allowed",
+      );
+      assert.deepEqual(defaultDeniedFake.messages, []);
 
       const deniedFake = policyCapturingAppServer();
       proxy.setTransport(deniedFake.rpc, {

@@ -141,14 +141,14 @@ async function createContractEnvironment(): Promise<ContractEnvironment> {
   }
 }
 
-/** Rejects an unsupported safe live-test tuple before starting model work. */
+/** Requires the native read-only mode underlying both safe live scenarios. */
 function assertLivePolicyPrerequisites(requirements: PolicyRequirements): void {
   if (
     requirements.allowedSandboxModes !== null &&
     !requirements.allowedSandboxModes.includes("read-only")
   )
     throw new Error(
-      "Live contract prerequisite unsupported: managed policy disallows read-only sandboxing.",
+      "Live contract prerequisite unsupported: managed policy disallows the read-only realization used by disabled and explicit read-only sandboxing.",
     );
   if (
     requirements.allowedWebSearchModes !== null &&
@@ -217,6 +217,7 @@ function createScriptedTransport(
   const injected = new Map<string, unknown[]>();
   const pendingTools = new Map<number, { threadId: string; turnId: string }>();
   const successfulBuiltInThreads = new Set<string>();
+  const environmentDisabledThreads = new Set<string>();
   const complete = (threadId: string, turnId: string): void => {
     completeTurn(scripted.send, threadId, turnId);
     active.delete(turnId);
@@ -251,6 +252,11 @@ function createScriptedTransport(
       const params = message.params ?? {};
       if (message.method === "thread/start") {
         const threadId = `thr_contract_${++nextThread}`;
+        if (
+          Array.isArray(params.environments) &&
+          params.environments.length === 0
+        )
+          environmentDisabledThreads.add(threadId);
         send(
           protocolResponse(
             "thread/start",
@@ -311,6 +317,29 @@ function createScriptedTransport(
           }),
         );
         active.set(turnId, { threadId });
+        if (prompt.includes("contract-disabled-sandbox")) {
+          if (
+            !environmentDisabledThreads.has(threadId) ||
+            !Array.isArray(params.environments) ||
+            params.environments.length !== 0
+          )
+            throw new Error(
+              "disabled sandbox did not remove the execution environment on thread and turn start",
+            );
+          send(
+            protocolNotification({
+              method: "item/agentMessage/delta",
+              params: {
+                threadId,
+                turnId,
+                itemId: "disabled-sandbox-message",
+                delta: "No execution environment is available.",
+              },
+            }),
+          );
+          complete(threadId, turnId);
+          return;
+        }
         if (prompt.includes("contract-history-one"))
           send(
             protocolNotification({

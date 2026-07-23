@@ -714,7 +714,7 @@ test("implicit tool continuation must repeat the original x_codex policy", async
       const calls = first.choices[0]!.message.tool_calls;
 
       // Implicit continuation (no previous_response_id) that drops x_codex resolves
-      // to the default read-only policy, so its binding no longer matches the
+      // to the default disabled policy, so its binding no longer matches the
       // suspension and the tool results are rejected without being delivered.
       const dropped = await postChatCompletion(origin, {
         model: "m",

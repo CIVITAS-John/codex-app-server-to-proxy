@@ -8,6 +8,7 @@ registerChatContract("real Codex app-server", startLiveChatBackend, {
   scenarios: [
     "role-history-sse",
     "dynamic-tool-restart",
+    "disabled-sandbox-chat",
     ...(process.platform === "win32"
       ? []
       : (["safe-policy-built-in-continuation"] as const)),

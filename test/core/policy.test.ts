@@ -4,6 +4,7 @@ import {
   access,
   chmod,
   mkdir,
+  readFile,
   realpath,
   symlink,
   writeFile,
@@ -11,11 +12,13 @@ import {
 import { join, win32 } from "node:path";
 import { test } from "vitest";
 import {
+  CODEX_SANDBOX_MODES,
   SANDBOX_MODES,
   WEB_SEARCH_MODES,
   PolicyError,
   UNRESTRICTED_POLICY_REQUIREMENTS,
   canonicalizeRoot,
+  codexSandboxMode,
   isPathWithinRoot,
   parsePolicyRequirements,
   policyBindingHash,
@@ -25,6 +28,7 @@ import {
   selectApprovalsReviewer,
   selectApprovalPolicy,
   validateRequestPolicy,
+  type CodexSandboxMode,
   type PolicyRequirements,
   type SandboxMode,
   type WebSearchMode,
@@ -33,6 +37,9 @@ import { withTempDir } from "../support/temp.js";
 
 /** Every sandbox exposed by the public x_codex extension. */
 const sandboxes: SandboxMode[] = [...SANDBOX_MODES];
+
+/** Every native sandbox mode enforceable by the pinned app-server. */
+const codexSandboxes: CodexSandboxMode[] = [...CODEX_SANDBOX_MODES];
 
 /** Every web-search mode enforceable by the pinned app-server. */
 const webSearchModes: WebSearchMode[] = [...WEB_SEARCH_MODES];
@@ -87,7 +94,20 @@ test("x_codex validation accepts only cwd, all sandboxes, and all web modes", ()
   );
 });
 
-test("the complete 3 by 4 policy matrix is mapped without fallback", async () => {
+test("the published x_codex schema mirrors the runtime mode tuples", async () => {
+  const schema = JSON.parse(
+    await readFile(
+      new URL("../../protocol/schemas/x-codex.schema.json", import.meta.url),
+      "utf8",
+    ),
+  ) as {
+    properties: { sandbox: { enum: unknown }; web_search: { enum: unknown } };
+  };
+  assert.deepEqual(schema.properties.sandbox.enum, [...SANDBOX_MODES]);
+  assert.deepEqual(schema.properties.web_search.enum, [...WEB_SEARCH_MODES]);
+});
+
+test("the complete 4 by 4 policy matrix is mapped without fallback", async () => {
   await withTempDir(async (directory) => {
     const root = await canonicalizeRoot(directory);
     for (const sandbox of sandboxes) {
@@ -99,6 +119,7 @@ test("the complete 3 by 4 policy matrix is mapped without fallback", async () =>
         );
         assert.equal(effective.cwd, root);
         assert.equal(effective.sandbox, sandbox);
+        assert.equal(effective.threadSandbox, codexSandboxMode(sandbox));
         assert.equal(effective.webSearch, webSearch);
         assert.equal(effective.approvalPolicy, "never");
         assert.equal(effective.approvalsReviewer, "auto_review");
@@ -109,7 +130,7 @@ test("the complete 3 by 4 policy matrix is mapped without fallback", async () =>
               { sandbox, webSearch },
               root,
               requirements({
-                allowedSandboxModes: [sandbox],
+                allowedSandboxModes: [codexSandboxMode(sandbox)],
                 allowedWebSearchModes: [webSearch],
               }),
             )
@@ -121,8 +142,8 @@ test("the complete 3 by 4 policy matrix is mapped without fallback", async () =>
             { sandbox, webSearch },
             root,
             requirements({
-              allowedSandboxModes: sandboxes.filter(
-                (candidate) => candidate !== sandbox,
+              allowedSandboxModes: codexSandboxes.filter(
+                (candidate) => candidate !== codexSandboxMode(sandbox),
               ),
             }),
           ),
@@ -155,7 +176,8 @@ test("safe defaults are explicit and command network stays disabled", async () =
     );
     assert.deepEqual(effective, {
       cwd: root,
-      sandbox: "read-only",
+      sandbox: "disabled",
+      threadSandbox: "read-only",
       webSearch: "disabled",
       approvalPolicy: "never",
       approvalsReviewer: "auto_review",
@@ -432,6 +454,11 @@ test("requirements parsing treats null as unrestricted and rejects malformed dat
         allowedWebSearchModes: null,
       },
     },
+    {
+      requirements: {
+        allowedSandboxModes: ["disabled"],
+      },
+    },
   ])
     assert.throws(() => parsePolicyRequirements(malformed), /malformed/);
 });
@@ -442,15 +469,21 @@ test("binding material is stable and includes every effective policy choice", as
     const baseline = await resolveEffectivePolicy({}, root, requirements());
     assert.deepEqual(policyBindingInput(baseline), {
       cwd: root,
-      sandbox: "read-only",
+      sandbox: "disabled",
       webSearch: "disabled",
       approvalPolicy: "never",
       approvalsReviewer: "auto_review",
     });
     assert.equal(policyBindingHash(baseline), policyBindingHash(baseline));
+    const readOnly = await resolveEffectivePolicy(
+      { sandbox: "read-only" },
+      root,
+      requirements(),
+    );
+    assert.notEqual(policyBindingHash(readOnly), policyBindingHash(baseline));
     const variants = [
       { ...baseline, cwd: join(root, "other") },
-      { ...baseline, sandbox: "workspace-write" as const },
+      readOnly,
       { ...baseline, webSearch: "cached" as const },
       { ...baseline, approvalPolicy: "on-request" as const },
       { ...baseline, approvalsReviewer: undefined },

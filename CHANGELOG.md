@@ -2,6 +2,18 @@
 
 All notable user-facing changes are recorded here. This project follows semantic versioning once a version is published.
 
+## 0.1.0-rc.3 — July 22, 2026
+
+### Added
+
+- A nonstandard `x_codex.sandbox: "disabled"` mode removes the built-in shell and local filesystem access while retaining client-defined tools. It is realized as native `read-only` plus `environments: []` for defense in depth; hosted web search remains controlled independently.
+- Pending tool-call deadlines restart whenever an incoming request selects the pending response by `previous_response_id` or matching tool-call IDs.
+
+### Changed
+
+- **Breaking:** The default sandbox is now `disabled`. Clients that relied on implicit `read-only` shell or file access must send `x_codex.sandbox: "read-only"` explicitly.
+- **Breaking:** Pre-upgrade continuations created by requests that omitted `x_codex.sandbox` now fail with 409 `continuation_policy_mismatch`; send `x_codex.sandbox: "read-only"` explicitly to continue them.
+
 ## 0.1.0-rc.2 — July 19, 2026
 
 ### Added

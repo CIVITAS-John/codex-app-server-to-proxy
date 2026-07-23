@@ -6,7 +6,14 @@
   "additionalProperties": false,
   "properties": {
     "cwd": { "type": "string", "minLength": 1 },
-    "sandbox": { "enum": ["read-only", "workspace-write", "danger-full-access"] },
+    "sandbox": {
+      "enum": [
+        "disabled",
+        "read-only",
+        "workspace-write",
+        "danger-full-access"
+      ]
+    },
     "web_search": { "enum": ["disabled", "cached", "indexed", "live"] }
   }
 }

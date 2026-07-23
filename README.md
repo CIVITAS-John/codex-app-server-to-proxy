@@ -161,11 +161,13 @@ Per-request Codex controls live under a nonstandard top-level `x_codex` object:
 }
 ```
 
-| Field        | Values                                               | Default                 | Notes                                                                             |
-| ------------ | ---------------------------------------------------- | ----------------------- | --------------------------------------------------------------------------------- |
-| `cwd`        | absolute path                                        | the configured `--root` | Must be the root or a descendant; symlink escapes and relative paths are rejected |
-| `sandbox`    | `read-only`, `workspace-write`, `danger-full-access` | `read-only`             | Full access is never selected implicitly                                          |
-| `web_search` | `disabled`, `cached`, `indexed`, `live`              | `disabled`              | Applied per Codex thread                                                          |
+| Field        | Values                                                           | Default                 | Notes                                                                             |
+| ------------ | ---------------------------------------------------------------- | ----------------------- | --------------------------------------------------------------------------------- |
+| `cwd`        | absolute path                                                    | the configured `--root` | Must be the root or a descendant; symlink escapes and relative paths are rejected |
+| `sandbox`    | `disabled`, `read-only`, `workspace-write`, `danger-full-access` | `disabled`              | `disabled` removes the built-in shell and local file access; client tools remain  |
+| `web_search` | `disabled`, `cached`, `indexed`, `live`                          | `disabled`              | Applied per Codex thread                                                          |
+
+The `disabled` sandbox provides no built-in shell or local filesystem reads or writes through an execution environment. The proxy realizes it as Codex's native `read-only` sandbox plus `environments: []`, so managed policy requirements must allow `read-only` for a request to use `disabled`. Client-provided tools and hosted web search, when explicitly enabled, remain separate capabilities.
 
 The JSON Schema ships with the package at `protocol/schemas/x-codex.schema.json`.
 
