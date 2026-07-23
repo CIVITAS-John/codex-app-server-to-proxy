@@ -1,6 +1,6 @@
 {
   "name": "codex-openai-proxy",
-  "version": "0.1.0-rc.2",
+  "version": "0.1.0-rc.3",
   "description": "A localhost-only OpenAI Chat Completions proxy for Codex app-server",
   "license": "MIT",
   "author": "John Chen",
