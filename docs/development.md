@@ -45,12 +45,15 @@ The maintained TypeScript modules are grouped by domain so the public HTTP contr
 | `npm run format` | Apply Prettier formatting |
 | `npm run generate:protocol` | Refresh generated app-server protocol structures |
 | `npm run check:protocol` | Regenerate in a temporary root and reject checked-in protocol drift |
+| `npm run models:live` | List the authenticated live Codex model catalog without starting a model turn |
 | `npm run spike:offline` | Run the offline protocol spike |
 | `npm run test:live` | Run the opt-in live contract suite |
 
 The default local test command excludes `*.live.test.ts`, never makes a model call, and enables V8 coverage for maintained `src/` code. Generated protocol files, tests, and the executable shim do not inflate thresholds. Property tests use seed `17072026`, bounded run counts, and checked-in minimal regression examples under `protocol/fixtures/property-regressions.json`.
 
 The protocol cleanliness check seeds a temporary protocol root, regenerates there with the package-owned executable and version pin, compares the complete file set and contents, and removes the temporary root in a `finally` path. It never rewrites checked-in artifacts; `npm run generate:protocol` remains the explicit mutating command.
+
+The proxy intentionally does not expose `GET /v1/models`. From a repository checkout, run `npm run models:live` to initialize and authenticate the pinned app-server and read its paginated `model/list` catalog. The default output shows the exact model strings accepted by Codex plus advertised reasoning efforts. Pass `-- --include-hidden` to include hidden catalog entries or `-- --json` for the complete response entries. Catalog lookup makes zero model calls.
 
 ## Continuous integration
 

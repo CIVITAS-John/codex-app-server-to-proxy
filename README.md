@@ -82,6 +82,8 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 
 Harmless unsupported fields are ignored with one structured warning. Malformed or ambiguous input is rejected rather than approximated.
 
+The proxy does not expose `GET /v1/models`. From a repository checkout, run `npm run models:live` to read the authenticated live Codex catalog with zero model calls. Add `-- --include-hidden` for hidden entries or `-- --json` for complete catalog metadata.
+
 ## Streaming
 
 Set `stream: true` as usual:

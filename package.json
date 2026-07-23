@@ -38,6 +38,7 @@
     "format:check": "prettier --check .",
     "generate:protocol": "node scripts/generate-protocol.mjs",
     "lint": "eslint .",
+    "models:live": "npm run build --silent && node scripts/list-models-live.mjs",
     "prepack": "npm run build",
     "serve": "node dist/bin.js serve",
     "start": "npm run build && npm run serve",
