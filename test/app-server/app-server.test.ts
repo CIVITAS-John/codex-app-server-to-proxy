@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { test } from "vitest";
@@ -240,6 +240,151 @@ let initialized = false;`,
         await app.stop();
       }
     }, "app-server-test-");
+  },
+);
+
+testWithPosixExecutable(
+  "app-server spawns Codex with the isolated CODEX_HOME created up front",
+  async () => {
+    await withTempDir(async (directory) => {
+      const executable = join(directory, "codex");
+      const capture = join(directory, "capture.txt");
+      const codexHome = join(directory, "isolated", "codex-home");
+      await writeFile(
+        executable,
+        fakeCodexScript({
+          version: PINNED_CODEX_VERSION,
+          setup: `require("node:fs").writeFileSync(
+  ${JSON.stringify(capture)},
+  process.env.CODEX_HOME ?? "<unset>",
+);`,
+        }),
+        "utf8",
+      );
+      await chmod(executable, 0o755);
+      const app = await startAppServer({
+        codexPath: executable,
+        codexHome,
+        // A seed source that does not exist must not fail startup.
+        seedAuthFrom: join(directory, "missing-home"),
+        root: directory,
+        startupTimeoutMs: 1_000,
+        shutdownTimeoutMs: 100,
+        log: silentLogger,
+      });
+      try {
+        assert.equal(await readFile(capture, "utf8"), codexHome);
+        const homeStat = await stat(codexHome);
+        assert.ok(homeStat.isDirectory());
+        // Auth material lands in the Codex home, so it must be owner-only.
+        assert.equal(homeStat.mode & 0o777, 0o700);
+      } finally {
+        await app.stop();
+      }
+    }, "app-server-codex-home-test-");
+  },
+);
+
+testWithPosixExecutable(
+  "app-server seeds a fresh Codex home with existing auth credentials",
+  async () => {
+    await withTempDir(async (directory) => {
+      const executable = join(directory, "codex");
+      const sourceHome = join(directory, "source-home");
+      const codexHome = join(directory, "codex-home");
+      await mkdir(sourceHome, { recursive: true });
+      await writeFile(
+        join(sourceHome, "auth.json"),
+        '{"fixture":"credentials"}',
+        "utf8",
+      );
+      await writeFile(
+        executable,
+        fakeCodexScript({ version: PINNED_CODEX_VERSION }),
+        "utf8",
+      );
+      await chmod(executable, 0o755);
+      const startOptions = {
+        codexPath: executable,
+        codexHome,
+        seedAuthFrom: sourceHome,
+        root: directory,
+        startupTimeoutMs: 1_000,
+        shutdownTimeoutMs: 100,
+        log: silentLogger,
+      };
+      const app = await startAppServer(startOptions);
+      try {
+        assert.equal(
+          await readFile(join(codexHome, "auth.json"), "utf8"),
+          '{"fixture":"credentials"}',
+        );
+        const authStat = await stat(join(codexHome, "auth.json"));
+        assert.equal(authStat.mode & 0o777, 0o600);
+      } finally {
+        await app.stop();
+      }
+      // A login already present in the Codex home is never overwritten.
+      await writeFile(
+        join(sourceHome, "auth.json"),
+        '{"fixture":"rotated"}',
+        "utf8",
+      );
+      const second = await startAppServer(startOptions);
+      try {
+        assert.equal(
+          await readFile(join(codexHome, "auth.json"), "utf8"),
+          '{"fixture":"credentials"}',
+        );
+      } finally {
+        await second.stop();
+      }
+    }, "app-server-auth-seed-test-");
+  },
+);
+
+testWithPosixExecutable(
+  "auth-seed failures remain path-free and do not block startup",
+  async () => {
+    await withTempDir(async (directory) => {
+      const executable = join(directory, "codex");
+      const sourceHome = join(directory, "private-source-home");
+      const codexHome = join(directory, "codex-home");
+      await mkdir(join(sourceHome, "auth.json"), { recursive: true });
+      await writeFile(
+        executable,
+        fakeCodexScript({ version: PINNED_CODEX_VERSION }),
+        "utf8",
+      );
+      await chmod(executable, 0o755);
+      const entries: Array<Record<string, unknown>> = [];
+      const app = await startAppServer({
+        codexPath: executable,
+        codexHome,
+        seedAuthFrom: sourceHome,
+        root: directory,
+        startupTimeoutMs: 1_000,
+        shutdownTimeoutMs: 100,
+        log: createLogger("debug", (entry) => entries.push(entry)),
+      });
+      try {
+        const failure = entries.find(
+          (entry) => entry.event === "codex_auth_seed_failed",
+        );
+        assert.equal(failure?.level, "warn");
+        assert.equal(typeof failure?.code, "string");
+        assert.equal(JSON.stringify(entries).includes(sourceHome), false);
+        assert.equal(JSON.stringify(entries).includes(codexHome), false);
+        assert.equal(
+          entries.some(
+            (entry) => entry.event === "codex_auth_seed_failed_detail",
+          ),
+          false,
+        );
+      } finally {
+        await app.stop();
+      }
+    }, "app-server-auth-seed-failure-test-");
   },
 );
 

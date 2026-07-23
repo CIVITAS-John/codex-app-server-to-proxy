@@ -87,6 +87,7 @@ function tokenUsageFixture(): ThreadTokenUsage {
     total: {
       inputTokens: 4,
       cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
       outputTokens: 2,
       reasoningOutputTokens: 0,
       totalTokens: 6,
@@ -94,6 +95,7 @@ function tokenUsageFixture(): ThreadTokenUsage {
     last: {
       inputTokens: 4,
       cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
       outputTokens: 2,
       reasoningOutputTokens: 0,
       totalTokens: 6,

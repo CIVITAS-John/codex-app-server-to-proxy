@@ -81,6 +81,7 @@ test("serve options have safe documented defaults and reject ambiguity", async (
     assert.equal(parsed.toolTimeoutMs, 300_000);
     assert.equal(parsed.implicitToolContinuation, true);
     assert.equal(parsed.stateDir, undefined);
+    assert.equal(parsed.codexHome, undefined);
     const finalized = await resolveServeOptions(parsed);
     // The default state directory is namespaced under the canonical home path
     // and is lexically outside this canonical project root.
@@ -93,15 +94,23 @@ test("serve options have safe documented defaults and reject ambiguity", async (
       finalized.stateDir.startsWith(`${canonicalProject}${sep}`),
       false,
     );
+    // The default Codex home is shared across roots so login persists, while
+    // staying isolated from any differently-versioned install using ~/.codex.
+    assert.equal(
+      finalized.codexHome,
+      join(canonicalHome, ".codex-openai-proxy", "codex-home"),
+    );
 
     const explicit = parseServeOptions(
-      ["--root", projectLink, "--state-dir", "state"],
+      ["--root", projectLink, "--state-dir", "state", "--codex-home", "home"],
       "/",
     );
     assert.equal(explicit.stateDir, "state");
+    assert.equal(explicit.codexHome, "home");
     const resolvedExplicit = await resolveServeOptions(explicit);
     assert.equal(resolvedExplicit.root, canonicalProject);
     assert.equal(resolvedExplicit.stateDir, join(canonicalProject, "state"));
+    assert.equal(resolvedExplicit.codexHome, join(canonicalProject, "home"));
     assert.equal(
       (
         await resolveServeOptions(
@@ -114,6 +123,12 @@ test("serve options have safe documented defaults and reject ambiguity", async (
     await assert.rejects(
       resolveServeOptions(parseServeOptions([], homedir())),
       /default --state-dir falls inside --root/,
+    );
+    await assert.rejects(
+      resolveServeOptions(
+        parseServeOptions(["--state-dir", join(directory, "state")], homedir()),
+      ),
+      /default --codex-home falls inside --root/,
     );
     assert.throws(
       () => parseServeOptions(["--port", "80", "--port", "81"]),

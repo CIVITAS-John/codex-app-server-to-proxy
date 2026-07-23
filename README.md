@@ -26,7 +26,7 @@ Check status:
 
 ## Authentication
 
-The proxy uses Codex's ChatGPT account session — no API key is exchanged. If Codex already has a usable account, startup reuses it silently. Otherwise:
+The proxy signs in with a ChatGPT account — no API key is exchanged. The spawned Codex runs in a proxy-owned home (`~/.codex-openai-proxy/codex-home` by default; override with `--codex-home`), isolated from any `~/.codex` install. If that home has no login yet, startup copies the existing `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`) into it, so a machine where the Codex CLI is already signed in needs no interaction; the copy is never overwritten afterwards. Only without any existing login does the proxy start one:
 
 - **Interactive terminal** — the proxy opens the browser authorization page. Complete the login and leave `serve` running. If the browser can't be launched, the URL is printed to the terminal.
 - **Non-interactive (containers, services, CI)** — the proxy prints a verification URL and one-time device code to stderr. Keep stderr visible until login completes.
@@ -36,7 +36,7 @@ Notes:
 - Completions return `app_server_not_ready` and `/ready` returns 503 until login finishes.
 - The default login deadline is 5 minutes; raise it with e.g. `--tool-timeout 10m`.
 - Treat printed authorization URLs and device codes as credentials — don't paste them into issues or logs.
-- Uninstalling the proxy or deleting its state does **not** log out your Codex account; Codex owns the session.
+- The proxy's login lives in its Codex home; deleting `~/.codex-openai-proxy/codex-home` signs the proxy out without touching the Codex CLI's own `~/.codex` session.
 
 ## Use an OpenAI client
 
@@ -205,7 +205,7 @@ The request deadline aborts downstream work and closes any response that is stil
 | `/ready` returns 503             | Login or startup hasn't finished — follow [Authentication](#authentication) and check the stderr logs for `app_server_ready` or `startup_failed` |
 | Browser login never appears      | Non-terminal stderr selects device-code login; run `serve` in a foreground terminal without redirecting stderr                                   |
 | Address already in use           | Choose another loopback `--port`                                                                                                                 |
-| `--codex-path` override rejected | The override must report exactly `codex-cli 0.144.5` (the version bundled with this package); remove the flag to use the bundled executable      |
+| `--codex-path` override rejected | The override must report exactly `codex-cli 0.145.0` (the version bundled with this package); remove the flag to use the bundled executable      |
 | Policy request denied            | Managed requirements disallow the value; the proxy never silently weakens policy                                                                 |
 
 For deeper diagnosis, temporarily add `--log-level debug` — but treat its output as sensitive.
@@ -218,8 +218,8 @@ npm uninstall --global codex-openai-proxy
 npm uninstall codex-openai-proxy
 ```
 
-- Continuation state lives under `~/.codex-openai-proxy` (one namespace per `--root`), or your custom `--state-dir`. Uninstalling does not delete it.
-- Stop every proxy using a root before deleting its namespace. Deleting state invalidates its `previous_response_id` values but does not touch Codex's own threads or your ChatGPT login.
+- Continuation state lives under `~/.codex-openai-proxy` (one namespace per `--root`), or your custom `--state-dir`. The proxy's Codex home — including its ChatGPT login and Codex caches — lives at `~/.codex-openai-proxy/codex-home`, or your custom `--codex-home`. Uninstalling deletes neither.
+- Stop every proxy using a root before deleting its namespace. Deleting state invalidates its `previous_response_id` values but does not touch Codex's threads; deleting `codex-home` also signs the proxy out (the next startup re-seeds from `~/.codex` when a login exists there), while the Codex CLI's own `~/.codex` login is never affected.
 
 ## Documentation
 

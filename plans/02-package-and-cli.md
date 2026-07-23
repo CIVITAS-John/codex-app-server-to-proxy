@@ -9,8 +9,9 @@ Create an installable TypeScript CLI with strict loopback enforcement and no dep
 1. Initialize the npm package, strict application and test TypeScript configurations, formatter, linter, Vitest, build output, and executable `bin` entry.
     - Keep `npm test` non-interactive and offline by default.
     - Use a separate Vitest project or explicit opt-in script for live tests so the default include patterns cannot discover them.
-2. Implement `codex-openai-proxy serve` with `--host`, `--port`, `--root`, `--codex-path`, `--tool-timeout`, log level, state-directory, and shutdown options.
+2. Implement `codex-openai-proxy serve` with `--host`, `--port`, `--root`, `--codex-path`, `--codex-home`, `--tool-timeout`, log level, state-directory, and shutdown options.
     - `--root` defaults to the launch directory.
+    - `--codex-home` defaults to the proxy-owned `~/.codex-openai-proxy/codex-home`; relative overrides resolve from the canonical root.
     - `--tool-timeout` defaults to five minutes.
 3. Default to `127.0.0.1`; normalize and allow only `127.0.0.1`, `::1`, and `localhost`. Resolve `localhost` defensively or bind explicit loopback sockets.
 4. Refuse wildcard, LAN, DNS, mapped, or ambiguous addresses before opening a socket.
@@ -37,5 +38,7 @@ Request deadlines abort downstream work and forcibly close any already-committed
 `GET /health` reports process liveness. `GET /ready` deliberately remains unavailable until Stage 03 initializes and authenticates app-server. `POST /v1/chat/completions` validates its content type, body bound, and JSON syntax, then returns `app_server_not_ready`; translation begins in Stage 04.
 
 The package allow-list is limited to the compiled CLI declarations/source maps, README, and protocol artifacts.  No default npm script starts Codex or makes a network or model call.
+
+The CLI exposes `--codex-home` separately from the per-root continuation state directory. Its default is shared across roots so one proxy login persists, but it remains outside the allowed root and isolated from the ordinary Codex CLI home.
 
 The Stage 02 coverage is type-checked and runs through Vitest, with files split by configuration, HTTP server, and CLI lifecycle responsibilities. Vitest is a development dependency, and the default non-watch configuration excludes opt-in live-test filenames. 

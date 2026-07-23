@@ -1,4 +1,5 @@
 import {
+  DEFAULT_CODEX_HOME_DESCRIPTION,
   DEFAULT_STATE_DIR_DESCRIPTION,
   parseServeOptions,
   resolveServeOptions,
@@ -19,6 +20,8 @@ import {
 } from "../app-server/app-server.js";
 import { ensureAuthenticated } from "../app-server/auth.js";
 import { abortableDelay } from "../core/abort.js";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 /** Delays before bounded app-server restart attempts after an unexpected exit. */
 export const APP_SERVER_RECOVERY_DELAYS_MS = [
@@ -35,6 +38,8 @@ Options:
   --port <port>                 TCP port, or 0 for an ephemeral port (default: 8787)
   --root <directory>            Allowed working-directory root (default: launch directory)
   --codex-path <path>           Override the package-owned Codex executable
+  --codex-home <directory>      Codex home for the spawned app-server
+                                (default: ${DEFAULT_CODEX_HOME_DESCRIPTION})
   --tool-timeout <duration>     Dynamic tool deadline (default: 5m)
   --implicit-tool-continuation <true|false>
                                 Resolve tool results by tool_call_id (default: true)
@@ -71,13 +76,18 @@ export async function run(argv: readonly string[]): Promise<number> {
 
 /** Derives one redaction context from parsed or finalized configuration. */
 function redactionContext(
-  options: Pick<ParsedServeOptions, "root" | "codexPath" | "stateDir">,
+  options: Pick<
+    ParsedServeOptions,
+    "root" | "codexPath" | "stateDir" | "codexHome"
+  >,
 ): RedactionContext {
   return {
     root: options.root,
-    sensitivePaths: [options.stateDir, options.codexPath].filter(
-      (path): path is string => path !== undefined,
-    ),
+    sensitivePaths: [
+      options.stateDir,
+      options.codexPath,
+      options.codexHome,
+    ].filter((path): path is string => path !== undefined),
   };
 }
 
@@ -173,6 +183,9 @@ class AppServerSupervisor {
   async #initialize(): Promise<AppServer> {
     const next = await startAppServer({
       codexPath: this.#options.codexPath,
+      codexHome: this.#options.codexHome,
+      // Seed the isolated home from the login Codex itself would have used.
+      seedAuthFrom: process.env.CODEX_HOME ?? join(homedir(), ".codex"),
       root: this.#options.root,
       startupTimeoutMs: this.#options.toolTimeoutMs,
       shutdownTimeoutMs: this.#options.shutdownTimeoutMs,

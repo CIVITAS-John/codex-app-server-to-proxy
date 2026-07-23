@@ -11,6 +11,10 @@ export const DEFAULT_BODY_LIMIT = 1024 * 1024;
 export const DEFAULT_STATE_DIR_DESCRIPTION =
   "per-root under ~/.codex-openai-proxy";
 
+/** User-facing description of the isolated Codex home default. */
+export const DEFAULT_CODEX_HOME_DESCRIPTION =
+  "~/.codex-openai-proxy/codex-home";
+
 /** Fully validated configuration for the proxy server. */
 export interface ServeOptions {
   host: "127.0.0.1" | "::1";
@@ -25,11 +29,16 @@ export interface ServeOptions {
   maxRequests: number;
   logLevel: LogLevel;
   stateDir: string;
+  codexHome: string;
 }
 
 /** Syntactically valid CLI options awaiting canonical root finalization. */
-export interface ParsedServeOptions extends Omit<ServeOptions, "stateDir"> {
+export interface ParsedServeOptions extends Omit<
+  ServeOptions,
+  "stateDir" | "codexHome"
+> {
   stateDir?: string | undefined;
+  codexHome?: string | undefined;
 }
 
 /** Supported structured-log severity levels. */
@@ -118,6 +127,14 @@ function defaultStateDir(root: string): string {
   return join(realpathSync(homedir()), ".codex-openai-proxy", namespace);
 }
 
+/** Builds the default proxy-owned Codex home shared across roots. */
+// Isolating CODEX_HOME keeps the pinned app-server's on-disk caches (for
+// example models_cache.json) from clashing with differently-versioned Codex
+// installs that share ~/.codex, at the cost of a proxy-scoped ChatGPT login.
+function defaultCodexHome(): string {
+  return join(realpathSync(homedir()), ".codex-openai-proxy", "codex-home");
+}
+
 /** Canonicalizes the root and derives every root-dependent serve option. */
 export async function resolveServeOptions(
   parsed: ParsedServeOptions,
@@ -134,7 +151,18 @@ export async function resolveServeOptions(
     throw new Error(
       "The default --state-dir falls inside --root; set --state-dir to a directory outside the root.",
     );
-  return { ...parsed, root: canonicalRoot, stateDir };
+  const usesDefaultCodexHome = parsed.codexHome === undefined;
+  const codexHome =
+    parsed.codexHome === undefined
+      ? defaultCodexHome()
+      : isAbsolute(parsed.codexHome)
+        ? parsed.codexHome
+        : resolve(canonicalRoot, parsed.codexHome);
+  if (usesDefaultCodexHome && isPathWithinRoot(canonicalRoot, codexHome))
+    throw new Error(
+      "The default --codex-home falls inside --root; set --codex-home to a directory outside the root.",
+    );
+  return { ...parsed, root: canonicalRoot, stateDir, codexHome };
 }
 
 /** Parses and validates CLI syntax without accessing the filesystem. */
@@ -169,12 +197,14 @@ export function parseServeOptions(
     "--max-requests",
     "--log-level",
     "--state-dir",
+    "--codex-home",
   ]);
   for (const name of values.keys())
     if (!known.has(name)) throw new Error(`Unknown option: ${name}.`);
 
   const root = resolve(cwd, values.get("--root") ?? ".");
   const stateValue = values.get("--state-dir");
+  const codexHomeValue = values.get("--codex-home");
   const logLevel = oneOf(
     "--log-level",
     values.get("--log-level") ?? "info",
@@ -215,5 +245,6 @@ export function parseServeOptions(
     ),
     logLevel,
     ...(stateValue === undefined ? {} : { stateDir: stateValue }),
+    ...(codexHomeValue === undefined ? {} : { codexHome: codexHomeValue }),
   };
 }

@@ -17,6 +17,8 @@ Reliably own one initialized app-server child process and complete ChatGPT login
     - Do not advertise `mcpServerOpenaiFormElicitation` or any user-input elicitation capability.
     - Pick one stable `clientInfo.name` and keep it fixed; app-server forwards it for compliance logging.
 5. Query account state at startup. If unauthenticated, call `account/login/start` with ChatGPT browser login.
+    - Start the package-owned app-server with `CODEX_HOME` set to the proxy-owned home.
+    - Before first startup, copy an existing Codex `auth.json` only when the proxy home has none. Never overwrite an existing proxy login, and treat a missing or unreadable seed as a path-free, non-fatal diagnostic before continuing through normal login.
 6. Attempt to open the authorization URL using a narrowly scoped platform launcher.
     - If launching fails, write the authorization URL once to the interactive terminal with instructions; send only a redacted event to structured logs and never persist the URL.
     - Wait for `account/login/completed` and support cancellation/timeout.
@@ -36,6 +38,7 @@ Reliably own one initialized app-server child process and complete ChatGPT login
 
 - A fake app-server verifies initialization ordering, interleaved requests/notifications, overload errors, malformed output, crash loops, and graceful shutdown.
 - Auth tests cover already logged in, browser launch success, device-code fallback, login failure, cancellation, and timeout.
+- Codex-home tests cover environment propagation, owner-only POSIX permissions, first-run auth seeding, non-overwrite behavior, and path-free seed failure.
 - Tests prove the fallback authorization URL reaches only the interactive terminal sink while structured logs, diagnostics, and state redact or omit it.
 - Elicitation capabilities are absent from initialization and unexpected elicitation requests receive an immediate fail-closed response.
 - No shell interpolation is used for spawning Codex or opening the browser.
@@ -54,6 +57,10 @@ The shared JSON-RPC transport permits its bounded request population to subscrib
 The CLI starts app-server before becoming ready and may initiate ChatGPT login. Stage 04 implements `POST /v1/chat/completions`. The isolated `npm run test:live` command runs one shared HTTP contract against the real app-server, serially attempts at most four `gpt-5.4-mini` calls, bounds diagnostics, and unconditionally cleans up; default tests run that contract against only a deterministic fake backend.
 
 The proxy declares `@openai/codex` as a runtime dependency and resolves the package's declared `codex` binary. This makes a normal local install self-contained; existing deployments that rely on a global PATH installation continue to work only as a compatibility fallback, while `--codex-path` remains the explicit override.
+
+The spawned app-server uses `~/.codex-openai-proxy/codex-home` by default, shared across proxy roots and isolated from the ordinary Codex CLI home. A missing proxy login is seeded once from `$CODEX_HOME/auth.json` or `~/.codex/auth.json`; an existing proxy login is authoritative and is never overwritten. Seed failures contain only a sanitized filesystem error code and fall through to normal authentication. Passing `--codex-home ~/.codex` deliberately restores the earlier shared-home behavior.
+
+The unversioned proxy home is accepted for the pinned `0.145.0` contract. Before a later Codex pin is released, Stage 03 and the release plan must either record cache-compatibility evidence or choose a versioned-home or explicit migration path.
 
 When `--log-level debug` is enabled, bounded and path-redacted app-server stderr is included directly in the `app_server_stderr` warning instead of producing a placeholder warning followed by a separate debug-detail event. At other log levels, the warning retains its redacted placeholder.
 

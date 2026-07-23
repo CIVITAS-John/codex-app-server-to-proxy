@@ -4,6 +4,9 @@ import {
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
 import { once } from "node:events";
+import { constants } from "node:fs";
+import { chmod, copyFile, mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import { JsonRpcTransport, RpcError, type ServerRequest } from "./json-rpc.js";
 import type { Logger } from "../core/logger.js";
 import {
@@ -92,6 +95,10 @@ export interface AppServer {
 /** Configures app-server process startup and shutdown. */
 export interface StartAppServerOptions {
   codexPath: string;
+  /** Codex home for the child; isolates its caches and auth from ~/.codex. */
+  codexHome?: string | undefined;
+  /** Existing Codex home whose login seeds a codexHome that has none. */
+  seedAuthFrom?: string | undefined;
   root: string;
   startupTimeoutMs: number;
   shutdownTimeoutMs: number;
@@ -107,11 +114,24 @@ export async function startAppServer(
 ): Promise<AppServer> {
   const spawnProcess = options.spawnProcess ?? spawn;
   const invocation = resolveCodexInvocation(options.codexPath);
+  let env = process.env;
+  if (options.codexHome !== undefined) {
+    // Auth material lands here, so keep the directory owner-only.
+    await mkdir(options.codexHome, { recursive: true, mode: 0o700 });
+    if (options.seedAuthFrom !== undefined)
+      await seedAuthCredentials(
+        options.seedAuthFrom,
+        options.codexHome,
+        options.log,
+      );
+    env = { ...process.env, CODEX_HOME: options.codexHome };
+  }
   await verifyCodex(
     invocation,
     options.root,
     options.startupTimeoutMs,
     spawnProcess,
+    env,
     options.signal,
   );
   if (options.signal?.aborted) throw abortReason(options.signal);
@@ -120,6 +140,7 @@ export async function startAppServer(
     [...invocation.prefixArgs, "app-server"],
     {
       cwd: options.root,
+      env,
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
     },
@@ -214,12 +235,40 @@ async function readConfigRequirements(
   return requirements;
 }
 
+/** Copies an existing login into a Codex home that has none, so first startup
+ * skips re-authentication. Never overwrites, and never fails startup: without a
+ * seed the normal login flow still runs. */
+async function seedAuthCredentials(
+  sourceHome: string,
+  targetHome: string,
+  log: Logger,
+): Promise<void> {
+  const source = join(sourceHome, "auth.json");
+  const target = join(targetHome, "auth.json");
+  if (source === target) return;
+  try {
+    // EXCL keeps a concurrently-written login from being clobbered.
+    await copyFile(source, target, constants.COPYFILE_EXCL);
+    await chmod(target, 0o600);
+    log("info", "codex_auth_seeded");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "EEXIST") return;
+    // The source can be an arbitrary CODEX_HOME outside every configured
+    // redaction root. Keep this best-effort failure path-free by construction.
+    log("warn", "codex_auth_seed_failed", {
+      code: typeof code === "string" ? code : "UNKNOWN",
+    });
+  }
+}
+
 /** Verifies that a configured executable matches the pinned contract version. */
 async function verifyCodex(
   invocation: CodexInvocation,
   cwd: string,
   timeoutMs: number,
   spawnProcess: typeof spawn,
+  env: NodeJS.ProcessEnv,
   externalSignal?: AbortSignal,
 ): Promise<void> {
   if (externalSignal?.aborted) throw abortReason(externalSignal);
@@ -228,6 +277,7 @@ async function verifyCodex(
     [...invocation.prefixArgs, "--version"],
     {
       cwd,
+      env,
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
     },

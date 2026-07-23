@@ -740,6 +740,7 @@ test("normalizes interleaved text, reasoning, internal items, tools, usage, and 
           outputTokens: 5,
           totalTokens: 15,
           cachedInputTokens: 2,
+          cacheWriteInputTokens: 0,
           reasoningOutputTokens: 1,
         },
         last: {
@@ -747,6 +748,7 @@ test("normalizes interleaved text, reasoning, internal items, tools, usage, and 
           outputTokens: 5,
           totalTokens: 15,
           cachedInputTokens: 2,
+          cacheWriteInputTokens: 0,
           reasoningOutputTokens: 1,
         },
         modelContextWindow: null,

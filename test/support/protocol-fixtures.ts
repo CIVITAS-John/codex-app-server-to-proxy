@@ -77,6 +77,8 @@ export function protocolThreadResumeResponse(
   return {
     ...protocolThreadStartResponse(thread, cwd),
     initialTurnsPage: null,
+    turnsBackwardsCursor: null,
+    itemsBackwardsCursor: null,
   };
 }
 
@@ -122,6 +124,7 @@ export function protocolThread(
     agentRole: null,
     gitInfo: null,
     name: null,
+    canAcceptDirectInput: null,
     turns: [],
   };
 }

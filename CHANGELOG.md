@@ -2,6 +2,17 @@
 
 All notable user-facing changes are recorded here. This project follows semantic versioning once a version is published.
 
+## 0.1.0-rc.4 — July 23, 2026
+
+### Added
+
+- `--codex-home <directory>` selects the Codex home used by the spawned app-server.
+
+### Changed
+
+- **Breaking:** The spawned Codex now runs in an isolated, proxy-owned home (`~/.codex-openai-proxy/codex-home` by default) instead of sharing `~/.codex`. This stops differently-versioned Codex installs from clashing over shared caches (for example `models_cache.json` failing to load with `missing field` errors). An existing `~/.codex/auth.json` login is copied into the isolated home on first startup (never overwritten afterwards), so re-authentication is only needed where no login exists. Pass `--codex-home ~/.codex` to restore the previous shared behavior.
+- Pins `@openai/codex` to exactly `0.145.0` (previously `0.144.5`); `--codex-path` overrides must report that same version.
+
 ## 0.1.0-rc.3 — July 22, 2026
 
 ### Added
