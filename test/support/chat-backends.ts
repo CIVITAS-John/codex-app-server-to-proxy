@@ -218,8 +218,12 @@ function createScriptedTransport(
   const pendingTools = new Map<number, { threadId: string; turnId: string }>();
   const successfulBuiltInThreads = new Set<string>();
   const environmentDisabledThreads = new Set<string>();
-  const complete = (threadId: string, turnId: string): void => {
-    completeTurn(scripted.send, threadId, turnId);
+  const complete = (
+    threadId: string,
+    turnId: string,
+    reasoningOutputTokens = 0,
+  ): void => {
+    completeTurn(scripted.send, threadId, turnId, reasoningOutputTokens);
     active.delete(turnId);
   };
   const scripted = createFakeTransport({
@@ -461,7 +465,15 @@ function createScriptedTransport(
           }),
         );
         if (prompt.includes("10000")) return;
-        const timer = setTimeout(() => complete(threadId, turnId), 1);
+        const timer = setTimeout(
+          () =>
+            complete(
+              threadId,
+              turnId,
+              prompt.includes("contract-history-one") ? 128 : 0,
+            ),
+          1,
+        );
         active.set(turnId, { threadId, timer });
         return;
       }

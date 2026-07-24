@@ -38,17 +38,42 @@ const POSIX_SHELL_LAUNCHERS = new Set([
   "/usr/bin/zsh",
 ]);
 
-/** Accepts only the fixture read or a bounded POSIX shell display wrapper. */
-export function isBoundedObservationCommand(command: string): boolean {
-  if (command === OBSERVATION_COMMAND) return true;
+/** Harmless path spellings accepted for the observation fixture. */
+const OBSERVATION_PATH_SPELLINGS = [
+  OBSERVATION_FIXTURE,
+  `./${OBSERVATION_FIXTURE}`,
+  `'${OBSERVATION_FIXTURE}'`,
+  `"${OBSERVATION_FIXTURE}"`,
+  `'./${OBSERVATION_FIXTURE}'`,
+  `"./${OBSERVATION_FIXTURE}"`,
+];
 
-  const match = /^(\S+) -lc (.+)$/.exec(command);
+/** Exact direct commands that can only read the observation fixture. */
+const BOUNDED_OBSERVATION_COMMANDS = new Set(
+  ["cat", "/bin/cat", "/usr/bin/cat"].flatMap((executable) =>
+    OBSERVATION_PATH_SPELLINGS.flatMap((path) => [
+      `${executable} ${path}`,
+      `${executable} -- ${path}`,
+    ]),
+  ),
+);
+
+/** Accepts harmless fixture-read spellings or a bounded POSIX shell wrapper. */
+export function isBoundedObservationCommand(command: string): boolean {
+  const trimmed = command.trim();
+  if (BOUNDED_OBSERVATION_COMMANDS.has(trimmed)) return true;
+
+  const match = /^(\S+)[ \t]+-(?:l)?c[ \t]+(.+)$/.exec(trimmed);
   if (match === null || !POSIX_SHELL_LAUNCHERS.has(match[1]!)) return false;
-  return [
-    OBSERVATION_COMMAND,
-    `'${OBSERVATION_COMMAND}'`,
-    `"${OBSERVATION_COMMAND}"`,
-  ].includes(match[2]!);
+  const argument = match[2]!.trim();
+  const quote = argument[0];
+  const payload =
+    argument.length >= 2 &&
+    (quote === "'" || quote === '"') &&
+    argument.at(-1) === quote
+      ? argument.slice(1, -1)
+      : argument;
+  return BOUNDED_OBSERVATION_COMMANDS.has(payload);
 }
 
 /** A ready proxy backed by either a scripted or real app-server. */
@@ -174,14 +199,14 @@ export function registerChatContract(
         const callsBefore = backend!.modelCalls();
         const first = await chat({
           model: CONTRACT_MODEL,
-          reasoning_effort: "high",
+          reasoning_effort: "xhigh",
           messages: [
             { role: "system", content: "Answer briefly." },
             { role: "developer", content: "Do not use markdown." },
             {
               role: "user",
               content:
-                "Remember the word cedar. Reason briefly, then reply exactly with contract-history-one.",
+                "Remember the word cedar. Before answering, compute 37 × 43 independently using long multiplication and the distributive property, then verify that both methods agree. After reasoning, reply exactly with contract-history-one.",
             },
           ],
           stream: true,
@@ -213,7 +238,23 @@ export function registerChatContract(
         const usage = firstChunks.find(
           (chunk) => chunk.choices?.length === 0 && chunk.usage,
         )?.usage;
-        if (usage) assertUsage(usage);
+        assert.ok(usage, "high-reasoning stream omitted usage");
+        assertUsage(usage);
+        assert.equal(
+          typeof usage.prompt_tokens_details?.cached_tokens,
+          "number",
+          "usage omitted prompt_tokens_details.cached_tokens",
+        );
+        const reasoningTokens =
+          usage.completion_tokens_details?.reasoning_tokens;
+        assert.ok(
+          typeof reasoningTokens === "number",
+          "usage omitted completion_tokens_details.reasoning_tokens",
+        );
+        assert.ok(
+          reasoningTokens > 100,
+          `high-reasoning stream reported ${reasoningTokens} reasoning tokens; expected more than 100`,
+        );
 
         const second = await chat({
           model: CONTRACT_MODEL,
@@ -679,6 +720,8 @@ interface Usage {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
+  prompt_tokens_details?: { cached_tokens?: number };
+  completion_tokens_details?: { reasoning_tokens?: number };
 }
 
 /** Streaming response subset asserted by the shared contract. */

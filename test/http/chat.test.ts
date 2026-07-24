@@ -970,10 +970,16 @@ test("streaming and aggregate responses share content and exact usage", async ()
     assert.equal(aggregate.status, 200);
     const body = (await aggregate.json()) as {
       choices: Array<{ message: { content: string } }>;
-      usage: { total_tokens: number };
+      usage: {
+        total_tokens: number;
+        prompt_tokens_details?: { cached_tokens?: number };
+        completion_tokens_details?: { reasoning_tokens?: number };
+      };
     };
     assert.equal(body.choices[0]?.message.content, "Hello");
     assert.equal(body.usage.total_tokens, 6);
+    assert.equal(body.usage.prompt_tokens_details?.cached_tokens, 0);
+    assert.equal(body.usage.completion_tokens_details?.reasoning_tokens, 0);
 
     const streaming = await fetch(`${origin}/v1/chat/completions`, {
       method: "POST",
@@ -1003,14 +1009,18 @@ test("streaming and aggregate responses share content and exact usage", async ()
       .map((choice) => choice.delta.content ?? "")
       .join("");
     assert.equal(text, "Hello");
-    assert.equal(
-      (
-        chunks.find(
-          (chunk) => Array.isArray(chunk.choices) && chunk.choices.length === 0,
-        )?.usage as { total_tokens: number }
-      ).total_tokens,
-      6,
-    );
+    const streamedUsage = chunks.find(
+      (chunk) => Array.isArray(chunk.choices) && chunk.choices.length === 0,
+    )?.usage as
+      | {
+          total_tokens: number;
+          prompt_tokens_details?: { cached_tokens?: number };
+          completion_tokens_details?: { reasoning_tokens?: number };
+        }
+      | undefined;
+    assert.equal(streamedUsage?.total_tokens, 6);
+    assert.equal(streamedUsage?.prompt_tokens_details?.cached_tokens, 0);
+    assert.equal(streamedUsage?.completion_tokens_details?.reasoning_tokens, 0);
   });
 });
 

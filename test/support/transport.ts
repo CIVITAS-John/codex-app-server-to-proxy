@@ -82,14 +82,14 @@ export function createFakeTransport(
 }
 
 /** Builds the canonical deterministic token-usage fixture. */
-function tokenUsageFixture(): ThreadTokenUsage {
+function tokenUsageFixture(reasoningOutputTokens = 0): ThreadTokenUsage {
   return {
     total: {
       inputTokens: 4,
       cachedInputTokens: 0,
       cacheWriteInputTokens: 0,
       outputTokens: 2,
-      reasoningOutputTokens: 0,
+      reasoningOutputTokens,
       totalTokens: 6,
     },
     last: {
@@ -97,7 +97,7 @@ function tokenUsageFixture(): ThreadTokenUsage {
       cachedInputTokens: 0,
       cacheWriteInputTokens: 0,
       outputTokens: 2,
-      reasoningOutputTokens: 0,
+      reasoningOutputTokens,
       totalTokens: 6,
     },
     modelContextWindow: null,
@@ -109,11 +109,16 @@ export function completeTurn(
   send: FakeTransportSend,
   threadId: string,
   turnId: string,
+  reasoningOutputTokens = 0,
 ): void {
   send(
     protocolNotification({
       method: "thread/tokenUsage/updated",
-      params: { threadId, turnId, tokenUsage: tokenUsageFixture() },
+      params: {
+        threadId,
+        turnId,
+        tokenUsage: tokenUsageFixture(reasoningOutputTokens),
+      },
     }),
   );
   send(
