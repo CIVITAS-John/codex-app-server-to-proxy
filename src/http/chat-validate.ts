@@ -31,6 +31,13 @@ function isReasoningEffort(value: unknown): value is ChatReasoningEffort {
   return typeof value === "string" && REASONING_EFFORT_SET.has(value);
 }
 
+/**
+ * Response-only reasoning field names accepted on a replayed assistant message.
+ * `reasoning` is the proxy's own x_codex extension; `reasoning_content` is the
+ * equivalent field OpenAI-compatible clients such as the Vercel AI SDK replay.
+ */
+const REASONING_FIELDS = ["reasoning", "reasoning_content"] as const;
+
 /** A validated text or tool-only Chat Completions message. */
 export interface ChatMessage {
   role: "system" | "developer" | "user" | "assistant" | "tool";
@@ -195,20 +202,29 @@ function validateMessage(value: unknown, index: number): ChatMessage {
     "tool_call_id",
     "tool_calls",
     "tool_results",
-    "reasoning",
+    ...REASONING_FIELDS,
   ]);
-  if (Object.keys(message).some((key) => !allowed.has(key)))
-    invalid("This message contains unsupported fields.", param);
-  // `reasoning` is a response-only x_codex extension. Accept the proxy's own
-  // output when a client replays a transcript, but never make it model-visible.
-  if (
-    message.reasoning !== undefined &&
-    (message.role !== "assistant" || typeof message.reasoning !== "string")
-  )
+  // Name the offending keys: clients send provider-specific extras, and a bare
+  // rejection gives them nothing to fix.
+  const unsupported = Object.keys(message)
+    .filter((key) => !allowed.has(key))
+    .sort();
+  if (unsupported.length)
     invalid(
-      "reasoning is supported only as a string on assistant messages.",
-      `${param}.reasoning`,
+      `This message contains unsupported fields: ${unsupported.join(", ")}.`,
+      param,
     );
+  // These fields are response-only. Accept the proxy's own output when a client
+  // replays a transcript, but never make either one model-visible.
+  for (const field of REASONING_FIELDS)
+    if (
+      message[field] !== undefined &&
+      (message.role !== "assistant" || typeof message[field] !== "string")
+    )
+      invalid(
+        `${field} is supported only as a string on assistant messages.`,
+        `${param}.${field}`,
+      );
   let toolCalls: ChatMessage["toolCalls"];
   if (message.role === "assistant" && message.tool_calls !== undefined) {
     if (!Array.isArray(message.tool_calls))

@@ -1107,6 +1107,9 @@ test("strips replayed assistant reasoning before injecting visible history", asy
           {
             role: "assistant",
             reasoning: "reasoning from the first response",
+            // OpenAI-compatible clients replay the same text under their own
+            // field name; both must be accepted and both must stay invisible.
+            reasoning_content: "reasoning replayed by an AI SDK client",
             tool_calls: [
               {
                 id: "internal_command",
@@ -1463,6 +1466,32 @@ test("request timeout wakes a silent turn and closes its SSE stream", async () =
   }, 50);
 });
 
+test("names the unsupported message fields it rejects", async () => {
+  await withChatServer(async (origin) => {
+    const response = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        messages: [
+          { role: "user", content: "x" },
+          { role: "assistant", content: "y", refusal: null, annotations: [] },
+          { role: "user", content: "z" },
+        ],
+      }),
+    });
+    assert.equal(response.status, 400);
+    const error = ((await response.json()) as { error: Record<string, string> })
+      .error;
+    assert.equal(error.code, "invalid_request");
+    assert.equal(error.param, "messages.1");
+    assert.equal(
+      error.message,
+      "This message contains unsupported fields: annotations, refusal.",
+    );
+  });
+});
+
 test("rejects ambiguous history and unknown continuation before app-server work", async () => {
   await withChatServer(async (origin) => {
     for (const body of [
@@ -1479,6 +1508,19 @@ test("rejects ambiguous history and unknown continuation before app-server work"
         model: "m",
         messages: [
           { role: "assistant", content: "x", reasoning: { text: "bad" } },
+          { role: "user", content: "continue" },
+        ],
+      },
+      {
+        model: "m",
+        messages: [
+          { role: "user", content: "x", reasoning_content: "not allowed" },
+        ],
+      },
+      {
+        model: "m",
+        messages: [
+          { role: "assistant", content: "x", reasoning_content: { t: "bad" } },
           { role: "user", content: "continue" },
         ],
       },
