@@ -5,7 +5,11 @@ import { mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
-import { EventNormalizer, normalizeNotification } from "../../src/http/chat.js";
+import {
+  EventNormalizer,
+  normalizeNotification,
+  type Usage,
+} from "../../src/http/chat.js";
 import { createLogger } from "../../src/core/logger.js";
 import type { ProxyServer } from "../../src/http/server.js";
 import {
@@ -21,24 +25,59 @@ import {
   UNRESTRICTED_POLICY_REQUIREMENTS,
   type PolicyRequirements,
 } from "../../src/core/policy.js";
+import type { TokenUsageBreakdown } from "../../protocol/generated/typescript/v2/TokenUsageBreakdown.js";
 import { startProxyWithTransport } from "../support/http.js";
 import { silentLogger } from "../support/logger.js";
 import { withTempDir } from "../support/temp.js";
 import {
   completeTurn,
   createFakeTransport,
+  sendTokenUsage,
+  tokenUsageFixture,
   type FakeTransport,
 } from "../support/transport.js";
 
 /** Minimal fake transport view accepted when replacing an HTTP test transport. */
 type ChatTestTransport = Pick<FakeTransport, "rpc">;
 
+/** One decoded streaming chunk with the fields these tests assert on. */
+interface StreamedChunk {
+  choices?: Array<{
+    delta?: { content?: string; reasoning?: string };
+    finish_reason?: string | null;
+  }>;
+  usage?: Usage;
+}
+
+/** Decodes one complete SSE body into its chunks, asserting the DONE frame. */
+function streamedChunks(body: string): StreamedChunk[] {
+  const frames = body
+    .split("\n\n")
+    .filter(Boolean)
+    .map((frame) => frame.slice(6));
+  assert.equal(frames.at(-1), "[DONE]");
+  return frames.slice(0, -1).map((frame) => JSON.parse(frame) as StreamedChunk);
+}
+
+/** Turn behavior selected by one offline fake app-server. */
+interface FakeAppServerOptions {
+  complete?: boolean;
+  onInterrupt?: () => void;
+  requestTool?: boolean;
+  usageAfterCompletion?: boolean;
+  usageBeforeTool?: boolean;
+  extraModelRequest?: boolean;
+}
+
 /** Creates an offline fake app-server transport with deliberately split frames. */
-function fakeAppServer(
+function fakeAppServer({
   complete = true,
-  onInterrupt: () => void = () => {},
+  onInterrupt = () => {},
   requestTool = false,
-): FakeTransport {
+  usageAfterCompletion = false,
+  usageBeforeTool = false,
+  extraModelRequest = false,
+}: FakeAppServerOptions = {}): FakeTransport {
   let thread = "";
   return createFakeTransport({
     fragmentCount: 2,
@@ -66,6 +105,10 @@ function fakeAppServer(
           }),
         );
         if (requestTool) {
+          // The model request that produced the tool call has completed, so
+          // app-server can report its usage before the turn suspends.
+          if (usageBeforeTool)
+            sendTokenUsage(send, thread, "turn_test", tokenUsageFixture(3));
           send(
             protocolServerRequest({
               id: 8_001,
@@ -82,6 +125,10 @@ function fakeAppServer(
           );
           return;
         }
+        // A turn that runs internal activity spans several model requests, each
+        // reporting its own usage against grown cumulative counters.
+        if (extraModelRequest)
+          sendTokenUsage(send, thread, "turn_test", tokenUsageFixture());
         send(
           protocolNotification({
             method: "item/agentMessage/delta",
@@ -94,7 +141,10 @@ function fakeAppServer(
           }),
         );
         if (complete) {
-          completeTurn(send, thread, "turn_test");
+          completeTurn(send, thread, "turn_test", {
+            usageAfterCompletion,
+            priorRequests: extraModelRequest ? 1 : 0,
+          });
         }
       } else if (message.method === "turn/interrupt") {
         onInterrupt();
@@ -796,6 +846,104 @@ test("normalizes interleaved text, reasoning, internal items, tools, usage, and 
   );
 });
 
+test("attributes every model request of one turn from cumulative usage", () => {
+  const normalizer = new EventNormalizer();
+  /** Builds one thread-scoped usage notification from its two breakdowns. */
+  const usageNotification = (
+    last: TokenUsageBreakdown,
+    total: TokenUsageBreakdown,
+  ) =>
+    protocolNotification({
+      method: "thread/tokenUsage/updated",
+      params: {
+        threadId: "thread",
+        turnId: "turn",
+        tokenUsage: { last, total, modelContextWindow: null },
+      },
+    });
+  /** Builds one complete breakdown from its distinguishable counters. */
+  const breakdown = (
+    inputTokens: number,
+    cachedInputTokens: number,
+    outputTokens: number,
+    reasoningOutputTokens: number,
+  ): TokenUsageBreakdown => ({
+    inputTokens,
+    cachedInputTokens,
+    cacheWriteInputTokens: 0,
+    outputTokens,
+    reasoningOutputTokens,
+    totalTokens: inputTokens + outputTokens,
+  });
+  /** Normalizes one usage notification down to its single usage event. */
+  const usageOf = (notification: ReturnType<typeof usageNotification>) =>
+    normalizer.normalize(notification.method, notification.params)[0]?.usage;
+
+  // The thread already carries usage from earlier turns, so this turn owns only
+  // what the cumulative totals gain while it runs.
+  const first = usageNotification(
+    breakdown(10, 2, 5, 4),
+    breakdown(110, 12, 25, 14),
+  );
+  assert.deepEqual(usageOf(first), {
+    prompt_tokens: 10,
+    completion_tokens: 5,
+    total_tokens: 15,
+    prompt_tokens_details: { cached_tokens: 2 },
+    completion_tokens_details: { reasoning_tokens: 4 },
+  });
+  // A repeated breakdown must not be counted twice.
+  assert.deepEqual(usageOf(first), usageOf(first));
+  // A second model request in the same turn reports no reasoning of its own,
+  // yet the response must still account for the reasoning already streamed.
+  const second = usageNotification(
+    breakdown(20, 1, 3, 0),
+    breakdown(130, 13, 28, 14),
+  );
+  assert.deepEqual(usageOf(second), {
+    prompt_tokens: 30,
+    completion_tokens: 8,
+    total_tokens: 38,
+    prompt_tokens_details: { cached_tokens: 3 },
+    completion_tokens_details: { reasoning_tokens: 4 },
+  });
+  // Cumulative counters dropping means app-server reset them, which ends exact
+  // attribution: the reported request is mapped instead of a negative count.
+  const afterReset = usageNotification(
+    breakdown(5, 0, 1, 0),
+    breakdown(5, 0, 1, 0),
+  );
+  assert.deepEqual(usageOf(afterReset), {
+    prompt_tokens: 5,
+    completion_tokens: 1,
+    total_tokens: 6,
+    prompt_tokens_details: { cached_tokens: 0 },
+    completion_tokens_details: { reasoning_tokens: 0 },
+  });
+  // An app-server build that omits a counter cannot be attributed by
+  // subtraction either, so its last reported request is mapped as it arrived.
+  const partialTotal: Partial<TokenUsageBreakdown> = breakdown(200, 20, 40, 20);
+  delete partialTotal.reasoningOutputTokens;
+  assert.deepEqual(
+    normalizer.normalize("thread/tokenUsage/updated", {
+      threadId: "thread",
+      turnId: "turn",
+      tokenUsage: {
+        last: breakdown(9, 1, 4, 2),
+        total: partialTotal,
+        modelContextWindow: null,
+      },
+    })[0]?.usage,
+    {
+      prompt_tokens: 9,
+      completion_tokens: 4,
+      total_tokens: 13,
+      prompt_tokens_details: { cached_tokens: 1 },
+      completion_tokens_details: { reasoning_tokens: 2 },
+    },
+  );
+});
+
 test("backfills completed reasoning without duplicating streamed prefixes", () => {
   /** Builds a completed reasoning item with the supplied final text. */
   const completedReasoning = (
@@ -1092,6 +1240,102 @@ test("streaming and aggregate responses share content and exact usage", async ()
   });
 });
 
+test("reports usage that app-server streams after turn completion", async () => {
+  await withChatServer(async (origin, _proxy, useTransport) => {
+    useTransport(fakeAppServer({ usageAfterCompletion: true }));
+    const aggregate = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        messages: [{ role: "user", content: "Hello" }],
+      }),
+    });
+    assert.equal(aggregate.status, 200);
+    const body = (await aggregate.json()) as { usage?: Usage };
+    assert.deepEqual(body.usage, {
+      prompt_tokens: 4,
+      completion_tokens: 2,
+      total_tokens: 6,
+      prompt_tokens_details: { cached_tokens: 0 },
+      completion_tokens_details: { reasoning_tokens: 0 },
+    });
+
+    useTransport(fakeAppServer({ usageAfterCompletion: true }));
+    const streaming = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        messages: [{ role: "user", content: "Hello" }],
+        stream: true,
+        stream_options: { include_usage: true },
+      }),
+    });
+    assert.equal(streaming.status, 200);
+    const chunks = streamedChunks(await streaming.text());
+    // The usage chunk stays last, after the chunk carrying the finish reason.
+    assert.equal(chunks.at(-2)?.choices?.[0]?.finish_reason, "stop");
+    assert.equal(
+      (chunks.at(-1)?.usage as Usage | undefined)?.completion_tokens_details
+        ?.reasoning_tokens,
+      0,
+    );
+  });
+});
+
+test("reports usage for every model request behind one response", async () => {
+  await withChatServer(async (origin, _proxy, useTransport) => {
+    useTransport(fakeAppServer({ extraModelRequest: true }));
+    const response = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        messages: [{ role: "user", content: "Hello" }],
+      }),
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { usage?: Usage };
+    // Both requests, not the final one alone: two requests of four prompt and
+    // two completion tokens each.
+    assert.deepEqual(body.usage, {
+      prompt_tokens: 8,
+      completion_tokens: 4,
+      total_tokens: 12,
+      prompt_tokens_details: { cached_tokens: 0 },
+      completion_tokens_details: { reasoning_tokens: 0 },
+    });
+  });
+});
+
+test("reports usage captured with a suspended client tool batch", async () => {
+  await withChatServer(async (origin, _proxy, useTransport) => {
+    useTransport(fakeAppServer({ requestTool: true, usageBeforeTool: true }));
+    const response = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        tools: [
+          { type: "function", function: { name: "lookup", parameters: {} } },
+        ],
+        messages: [{ role: "user", content: "use lookup" }],
+        stream: true,
+        stream_options: { include_usage: true },
+      }),
+    });
+    assert.equal(response.status, 200);
+    const chunks = streamedChunks(await response.text());
+    assert.equal(chunks.at(-2)?.choices?.[0]?.finish_reason, "tool_calls");
+    assert.equal(
+      (chunks.at(-1)?.usage as Usage | undefined)?.completion_tokens_details
+        ?.reasoning_tokens,
+      3,
+    );
+  });
+});
+
 test("strips replayed assistant reasoning before injecting visible history", async () => {
   await withChatServer(async (origin, _proxy, useTransport) => {
     const fake = policyCapturingAppServer();
@@ -1316,7 +1560,7 @@ test("app-server reasoning summaries default to detailed", async () => {
 
 test("aggregate tool-only responses use null content", async () => {
   await withChatServer(async (origin, _proxy, useTransport) => {
-    useTransport(fakeAppServer(true, () => {}, true));
+    useTransport(fakeAppServer({ requestTool: true }));
     const response = await fetch(`${origin}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1450,7 +1694,7 @@ test("persistence failure emits an SSE error before finish reason or usage", asy
 
 test("request timeout wakes a silent turn and closes its SSE stream", async () => {
   await withChatServer(async (origin, _proxy, useTransport) => {
-    useTransport(fakeAppServer(false));
+    useTransport(fakeAppServer({ complete: false }));
     const response = await fetch(`${origin}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1633,8 +1877,11 @@ test("client disconnect interrupts an active app-server turn", async () => {
   await withChatServer(async (origin, _proxy, useTransport) => {
     let interrupted = false;
     useTransport(
-      fakeAppServer(false, () => {
-        interrupted = true;
+      fakeAppServer({
+        complete: false,
+        onInterrupt: () => {
+          interrupted = true;
+        },
       }),
     );
     const response = await fetch(`${origin}/v1/chat/completions`, {

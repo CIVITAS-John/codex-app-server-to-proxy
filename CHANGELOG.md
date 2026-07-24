@@ -8,6 +8,12 @@ All notable user-facing changes are recorded here. This project follows semantic
 
 - Replayed assistant messages may carry `reasoning_content` in place of the nonstandard `reasoning` response field. OpenAI-compatible clients such as the Vercel AI SDK write reasoning back under that name, which previously failed the request with `invalid_request` on the replayed message. Both fields are response-only, accepted only as a string on an assistant message, and discarded before history injection.
 
+### Fixed
+
+- Usage is no longer dropped when app-server reports `thread/tokenUsage/updated` after `turn/completed`. Responses previously omitted `usage` entirely — including `completion_tokens_details.reasoning_tokens` — even though reasoning was streamed.
+- Responses that end in `finish_reason: "tool_calls"` now report the usage app-server had already attributed to the suspended turn, emitted after the terminal chunk instead of before it.
+- Usage now covers every model request behind one response instead of only the most recent one. A turn that ran internal tools, retried, or compacted previously reported the final request alone, which under-reported prompt and completion tokens and could report zero reasoning tokens next to streamed reasoning.
+
 ### Changed
 
 - Rejecting a message with unsupported fields now names them (`This message contains unsupported fields: annotations, refusal.`) instead of reporting only the message index.

@@ -235,10 +235,21 @@ export function registerChatContract(
           ),
           true,
         );
-        const usage = firstChunks.find(
-          (chunk) => chunk.choices?.length === 0 && chunk.usage,
-        )?.usage;
+        // Usage closes the stream. App-server reports it separately from turn
+        // completion, so a usage record that arrives with or after the terminal
+        // notification must still reach the client, and only after its chunk.
+        assert.equal(
+          firstChunks.at(-2)?.choices?.[0]?.finish_reason,
+          "stop",
+          "the finish reason did not immediately precede the usage chunk",
+        );
+        const usage = firstChunks.at(-1)?.usage;
         assert.ok(usage, "high-reasoning stream omitted usage");
+        assert.equal(
+          firstChunks.at(-1)?.choices?.length,
+          0,
+          "the usage chunk carried choices",
+        );
         assertUsage(usage);
         assert.equal(
           typeof usage.prompt_tokens_details?.cached_tokens,
@@ -340,6 +351,10 @@ export function registerChatContract(
           call?.function.name === "contract_lookup",
           "dynamic tool name did not match the contract fixture",
         );
+        // A suspended turn reports whatever app-server had already attributed to
+        // it. Whether that record exists yet depends on app-server, but a
+        // reported one must describe the model request behind these calls.
+        if (firstBody.usage) assertUsage(firstBody.usage);
         const callArguments = parseJson<Record<string, unknown>>(
           call?.function.arguments ?? "",
           "dynamic-tool arguments",
@@ -380,6 +395,12 @@ export function registerChatContract(
           ),
           "tool-result completion omitted the contract acknowledgment",
         );
+        const secondUsage = secondBody.usage;
+        assert.ok(
+          secondUsage,
+          "tool-result completion omitted usage for a completed turn",
+        );
+        assertUsage(secondUsage);
         assert.ok(
           backend!.modelCalls() - callsBefore <= MAX_TOOL_MODEL_CALLS,
           `tool round trip exceeded ${MAX_TOOL_MODEL_CALLS} model calls`,
@@ -463,6 +484,7 @@ export function registerChatContract(
             },
           ],
           stream: true,
+          stream_options: { include_usage: true },
           x_codex: policy,
         });
         const raw = await response.text();
@@ -538,6 +560,20 @@ export function registerChatContract(
           .flatMap((chunk) => chunk.choices ?? [])
           .map((choice) => choice.delta?.reasoning ?? "")
           .join("");
+        // A built-in command splits this turn across more than one model
+        // request, and app-server attributes usage per request. The response
+        // must account for every request it reported, not the final one alone.
+        const builtInUsage = chunks.at(-1)?.usage;
+        assert.ok(
+          builtInUsage,
+          "built-in command stream omitted usage for a completed turn",
+        );
+        assertUsage(builtInUsage);
+        assert.ok(
+          builtInUsage.prompt_tokens! > 0 &&
+            builtInUsage.completion_tokens! > 0,
+          "built-in command stream reported no tokens for a multi-request turn",
+        );
         const responseId = chunks.find((chunk) => chunk.id)?.id;
         assert.match(responseId ?? "", /^chatcmpl_codex_/);
 
@@ -783,6 +819,7 @@ interface ToolCompletion {
       tool_results?: Array<{ id: string }>;
     };
   }>;
+  usage?: Usage;
 }
 
 /** Validates reported usage without estimating omitted counts. */
@@ -793,6 +830,20 @@ function assertUsage(usage: Usage): void {
   assert.equal(
     usage.total_tokens,
     usage.prompt_tokens! + usage.completion_tokens!,
+  );
+  // Details are a subset of the counts they refine. One response can span
+  // several model requests, so mixing counts attributed across the response
+  // with details from one request alone would surface here.
+  const cached = usage.prompt_tokens_details?.cached_tokens;
+  assert.ok(
+    cached === undefined || (cached >= 0 && cached <= usage.prompt_tokens!),
+    "cached input tokens did not fall within the reported prompt tokens",
+  );
+  const reasoning = usage.completion_tokens_details?.reasoning_tokens;
+  assert.ok(
+    reasoning === undefined ||
+      (reasoning >= 0 && reasoning <= usage.completion_tokens!),
+    "reasoning tokens did not fall within the reported completion tokens",
   );
 }
 

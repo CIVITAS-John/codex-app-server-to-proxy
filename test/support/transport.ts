@@ -82,26 +82,57 @@ export function createFakeTransport(
 }
 
 /** Builds the canonical deterministic token-usage fixture. */
-function tokenUsageFixture(reasoningOutputTokens = 0): ThreadTokenUsage {
+export function tokenUsageFixture(
+  reasoningOutputTokens = 0,
+  // App-server reports `last` for the model request that just finished and
+  // `total` for every request the thread has run, so a turn's later requests
+  // report the same breakdown against grown cumulative counters.
+  priorRequests = 0,
+): ThreadTokenUsage {
+  // Reasoning tokens are part of what the model emitted, so the fixture grows
+  // its output and total counts with them rather than reporting a breakdown no
+  // app-server could produce.
+  const outputTokens = 2 + reasoningOutputTokens;
+  const last = {
+    inputTokens: 4,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    outputTokens,
+    reasoningOutputTokens,
+    totalTokens: 4 + outputTokens,
+  };
+  const requests = priorRequests + 1;
   return {
-    total: {
-      inputTokens: 4,
-      cachedInputTokens: 0,
-      cacheWriteInputTokens: 0,
-      outputTokens: 2,
-      reasoningOutputTokens,
-      totalTokens: 6,
-    },
-    last: {
-      inputTokens: 4,
-      cachedInputTokens: 0,
-      cacheWriteInputTokens: 0,
-      outputTokens: 2,
-      reasoningOutputTokens,
-      totalTokens: 6,
-    },
+    total: Object.fromEntries(
+      Object.entries(last).map(([name, count]) => [name, count * requests]),
+    ) as typeof last,
+    last,
     modelContextWindow: null,
   };
+}
+
+/** Emits one typed thread-scoped token-usage notification. */
+export function sendTokenUsage(
+  send: FakeTransportSend,
+  threadId: string,
+  turnId: string,
+  tokenUsage: ThreadTokenUsage,
+): void {
+  send(
+    protocolNotification({
+      method: "thread/tokenUsage/updated",
+      params: { threadId, turnId, tokenUsage },
+    }),
+  );
+}
+
+/** Final usage and wire ordering selected by one scripted turn completion. */
+export interface CompleteTurnOptions {
+  reasoningOutputTokens?: number;
+  priorRequests?: number;
+  // App-server streams usage separately from completion, so both wire orders
+  // are legal and both must produce the same response usage.
+  usageAfterCompletion?: boolean;
 }
 
 /** Emits typed usage and successful completion notifications for one turn. */
@@ -109,22 +140,31 @@ export function completeTurn(
   send: FakeTransportSend,
   threadId: string,
   turnId: string,
-  reasoningOutputTokens = 0,
+  {
+    reasoningOutputTokens = 0,
+    priorRequests = 0,
+    usageAfterCompletion = false,
+  }: CompleteTurnOptions = {},
 ): void {
-  send(
-    protocolNotification({
-      method: "thread/tokenUsage/updated",
-      params: {
-        threadId,
-        turnId,
-        tokenUsage: tokenUsageFixture(reasoningOutputTokens),
-      },
-    }),
-  );
-  send(
-    protocolNotification({
-      method: "turn/completed",
-      params: { threadId, turn: protocolTurn(turnId, "completed") },
-    }),
-  );
+  const usage = (): void =>
+    sendTokenUsage(
+      send,
+      threadId,
+      turnId,
+      tokenUsageFixture(reasoningOutputTokens, priorRequests),
+    );
+  const completed = (): void =>
+    send(
+      protocolNotification({
+        method: "turn/completed",
+        params: { threadId, turn: protocolTurn(turnId, "completed") },
+      }),
+    );
+  if (usageAfterCompletion) {
+    completed();
+    usage();
+    return;
+  }
+  usage();
+  completed();
 }

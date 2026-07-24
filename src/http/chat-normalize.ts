@@ -176,6 +176,7 @@ export class EventNormalizer {
   readonly #reasoningContent = new Map<string, string>();
   #nextToolIndex = 0;
   #sawClientTool = false;
+  #usageBaseline: UsageCounters | undefined;
 
   /** Converts one authoritative dynamic request to a function tool call. */
   dynamicToolCall(call: PendingToolCall): NormalizedEvent {
@@ -242,9 +243,10 @@ export class EventNormalizer {
       return [{ delta: { reasoning: params.delta } }];
     }
     if (method === "thread/tokenUsage/updated") {
-      const usage = record(record(params.tokenUsage)?.last);
-      if (!usage) return [];
-      return [{ usage: toUsage(usage) }];
+      const tokenUsage = record(params.tokenUsage);
+      const last = record(tokenUsage?.last);
+      if (!last) return [];
+      return [{ usage: this.#turnUsage(last, counters(tokenUsage?.total)) }];
     }
     if (method === "error") {
       const error = record(params.error);
@@ -315,6 +317,23 @@ export class EventNormalizer {
       reasoningRemainder(item.summary, streamedSummary) +
       reasoningRemainder(item.content, streamedContent);
     return reasoning ? [{ delta: { reasoning } }] : [];
+  }
+
+  /** Attributes every model request of the turn, not only the most recent one. */
+  #turnUsage(
+    last: Record<string, unknown>,
+    total: UsageCounters | undefined,
+  ): Usage {
+    const request = counters(last);
+    // App-server reports `last` for the most recent model request, while one
+    // Chat Completions turn can span several of them (internal tools, retries,
+    // compaction). Subtracting the pre-turn baseline from the cumulative thread
+    // counters attributes them all with reported values only, and stays exact
+    // when app-server repeats one breakdown.
+    if (!request || !total) return toUsage(last);
+    const baseline = (this.#usageBaseline ??= difference(total, request));
+    const turn = baseline && difference(total, baseline);
+    return turn ? countersToUsage(turn) : toUsage(last);
   }
 
   /** Emits an internal call, or a self-correlating call/result pair. */
@@ -511,7 +530,67 @@ function normalizeError(value: unknown): NormalizedError {
   };
 }
 
-/** Maps exact app-server last-turn usage to the standard usage object. */
+/** Complete exact counters of one app-server token usage breakdown. */
+interface UsageCounters {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
+}
+
+/** Counter names required before cumulative usage may be attributed by subtraction. */
+const USAGE_COUNTERS = [
+  "inputTokens",
+  "cachedInputTokens",
+  "outputTokens",
+  "reasoningOutputTokens",
+  "totalTokens",
+] as const;
+
+/** Reads one breakdown, refusing any that omits a counter this turn needs. */
+function counters(value: unknown): UsageCounters | undefined {
+  const breakdown = record(value);
+  if (!breakdown) return undefined;
+  const result = {} as UsageCounters;
+  for (const name of USAGE_COUNTERS) {
+    const count = breakdown[name];
+    if (typeof count !== "number" || !Number.isFinite(count)) return undefined;
+    result[name] = count;
+  }
+  return result;
+}
+
+/** Subtracts counters, refusing any result app-server could not have reported. */
+function difference(
+  total: UsageCounters,
+  base: UsageCounters,
+): UsageCounters | undefined {
+  const result = {} as UsageCounters;
+  for (const name of USAGE_COUNTERS) {
+    const count = total[name] - base[name];
+    // Counters only ever grow within a thread. A negative difference means the
+    // app-server reset them, so attribution by subtraction is no longer exact.
+    if (count < 0) return undefined;
+    result[name] = count;
+  }
+  return result;
+}
+
+/** Maps complete attributed counters to the standard usage object. */
+function countersToUsage(value: UsageCounters): Usage {
+  return {
+    prompt_tokens: value.inputTokens,
+    completion_tokens: value.outputTokens,
+    total_tokens: value.totalTokens,
+    prompt_tokens_details: { cached_tokens: value.cachedInputTokens },
+    completion_tokens_details: {
+      reasoning_tokens: value.reasoningOutputTokens,
+    },
+  };
+}
+
+/** Maps exact app-server last-request usage to the standard usage object. */
 function toUsage(value: Record<string, unknown>): Usage {
   const input = finite(value.inputTokens, "inputTokens");
   const output = finite(value.outputTokens, "outputTokens");

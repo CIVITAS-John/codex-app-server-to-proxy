@@ -183,6 +183,8 @@ The JSON Schema ships with the package at `protocol/schemas/x-codex.schema.json`
 
 When Codex reports exact usage for the turn, responses include standard `prompt_tokens`, `completion_tokens`, and `total_tokens`, plus cached-input and reasoning-token detail when available. When no complete record exists, `usage` is omitted — never estimated.
 
+One response can span several Codex model requests, for example when internal tools run before the answer. Usage covers every request the response reported, not only the last one, so reasoning tokens still account for reasoning summaries streamed earlier in the same response. A response that ends in `finish_reason: "tool_calls"` reports usage for the requests it covered; the continuation reports the rest.
+
 ## Safety and limits
 
 - The listener accepts loopback only (`127.0.0.1`, `::1`, `localhost`); non-loopback `Host` authorities and any request with an `Origin` header are rejected.

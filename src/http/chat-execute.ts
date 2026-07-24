@@ -126,6 +126,22 @@ class IngressQueue {
     return captured;
   }
 
+  /** Consumes retained notifications, leaving dynamic requests for cleanup. */
+  drainNotifications(): Array<Extract<IngressEvent, { type: "notification" }>> {
+    const drained: Array<Extract<IngressEvent, { type: "notification" }>> = [];
+    const retained: QueuedIngress[] = [];
+    for (const queued of this.#ingress.splice(0)) {
+      if (queued.event.type === "notification") drained.push(queued.event);
+      else retained.push(queued);
+    }
+    this.#ingress.push(...retained);
+    this.#ingressBytes = retained.reduce(
+      (sum, queued) => sum + queued.bytes,
+      0,
+    );
+    return drained;
+  }
+
   /** Waits until ingress, failure, or abort can advance the consumer. */
   async waitForActivity(signal: AbortSignal): Promise<void> {
     await new Promise<void>((resolve) => {
@@ -309,7 +325,16 @@ export async function execute(
               handle,
             );
             handle.suspended = true;
-            yield* emitCapturedBatch(captured, normalizer, handle);
+            for (const event of emitCapturedBatch(
+              captured,
+              normalizer,
+              handle,
+            )) {
+              // Usage for the model request that produced this batch belongs
+              // after the terminal frame, exactly as a completed turn reports it.
+              if (event.usage) pendingUsage = event.usage;
+              else yield event;
+            }
             yield { finishReason: "tool_calls" };
             handle.terminal = true;
             continue;
@@ -335,6 +360,15 @@ export async function execute(
               yield event;
             }
           }
+        }
+        if (!failed) {
+          // App-server streams usage separately from turn completion, so
+          // `thread/tokenUsage/updated` can follow the terminal notification on
+          // the wire. Let already-readable frames land, then consume whatever
+          // arrived instead of discarding exact usage with the terminal event.
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          const late = collectLateUsage(queue, normalizer, handle);
+          if (late) pendingUsage = late;
         }
         if (
           !handle.suspended &&
@@ -366,6 +400,23 @@ export async function execute(
       }
     })();
   return { events, dispose: cleanup };
+}
+
+/** Consumes usage that arrived with or after the turn's terminal notification. */
+function collectLateUsage(
+  queue: IngressQueue,
+  normalizer: EventNormalizer,
+  handle: TurnHandle,
+): Usage | undefined {
+  let usage: Usage | undefined;
+  for (const event of queue.drainNotifications()) {
+    if (!matchesTurn(event.params, handle.threadId, handle.turnId)) continue;
+    for (const normalized of normalizer.normalize(event.method, event.params))
+      // Only usage is recovered here. Every other late event would have to
+      // follow the terminal frame this response has already committed to.
+      if (normalized.usage) usage = normalized.usage;
+  }
+  return usage;
 }
 
 /** Captures and durably suspends the current dynamic-tool batch synchronously. */

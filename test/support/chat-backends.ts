@@ -33,6 +33,9 @@ import { silentLogger } from "./logger.js";
 import {
   completeTurn,
   createFakeTransport,
+  sendTokenUsage,
+  tokenUsageFixture,
+  type CompleteTurnOptions,
   type FakeTransport,
 } from "./transport.js";
 
@@ -221,9 +224,9 @@ function createScriptedTransport(
   const complete = (
     threadId: string,
     turnId: string,
-    reasoningOutputTokens = 0,
+    options: CompleteTurnOptions = {},
   ): void => {
-    completeTurn(scripted.send, threadId, turnId, reasoningOutputTokens);
+    completeTurn(scripted.send, threadId, turnId, options);
     active.delete(turnId);
   };
   const scripted = createFakeTransport({
@@ -387,6 +390,10 @@ function createScriptedTransport(
           return;
         }
         if (prompt.includes("built-in shell command")) {
+          // Running a built-in command splits the turn into two model requests:
+          // one that asks for the command and one that answers with its result.
+          // App-server reports usage for each as it finishes.
+          sendTokenUsage(scripted.send, threadId, turnId, tokenUsageFixture());
           const itemId = "contract-observation";
           const command = `/bin/sh -lc '${OBSERVATION_COMMAND}'`;
           const baseItem = {
@@ -444,7 +451,12 @@ function createScriptedTransport(
               },
             }),
           );
-          complete(threadId, turnId);
+          // The answering request completes the turn, and its usage arrives
+          // after completion to exercise the documented separate usage stream.
+          complete(threadId, turnId, {
+            priorRequests: 1,
+            usageAfterCompletion: true,
+          });
           return;
         }
         send(
@@ -477,11 +489,11 @@ function createScriptedTransport(
         if (prompt.includes("10000")) return;
         const timer = setTimeout(
           () =>
-            complete(
-              threadId,
-              turnId,
-              prompt.includes("contract-history-one") ? 128 : 0,
-            ),
+            complete(threadId, turnId, {
+              reasoningOutputTokens: prompt.includes("contract-history-one")
+                ? 128
+                : 0,
+            }),
           1,
         );
         active.set(turnId, { threadId, timer });
