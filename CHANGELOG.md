@@ -2,6 +2,26 @@
 
 All notable user-facing changes are recorded here. This project follows semantic versioning once a version is published.
 
+## 0.1.0-rc.6 — Unreleased
+
+### Added
+
+- Replayed assistant messages may carry `reasoning_content` in place of the nonstandard `reasoning` response field. OpenAI-compatible clients such as the Vercel AI SDK write reasoning back under that name, which previously failed the request with `invalid_request` on the replayed message. Both fields are response-only, accepted only as a string on an assistant message, and discarded before history injection.
+
+### Changed
+
+- Rejecting a message with unsupported fields now names them (`This message contains unsupported fields: annotations, refusal.`) instead of reporting only the message index.
+
+## 0.1.0-rc.5 — July 24, 2026
+
+### Fixed
+
+- Reasoning that app-server reports only in the completed reasoning item is now emitted instead of dropped. Streamed summary and raw-reasoning deltas are tracked per item, so the completed item contributes only text that was not already streamed.
+
+### Changed
+
+- Documentation and live-test examples use `gpt-5.6-luna`.
+
 ## 0.1.0-rc.4 — July 23, 2026
 
 ### Added
