@@ -303,12 +303,18 @@ function createScriptedTransport(
         const turnId = `turn_contract_${++nextTurn}`;
         const input = params.input as Array<{ text?: string }>;
         const prompt = input?.[0]?.text ?? "";
+        const expectedHistoryEffort = prompt.includes("contract-history-one")
+          ? "xhigh"
+          : prompt.includes("contract-history-two")
+            ? "high"
+            : undefined;
         if (
-          prompt.includes("contract-history-") &&
-          (params.effort !== "high" || params.summary !== "detailed")
+          expectedHistoryEffort !== undefined &&
+          (params.effort !== expectedHistoryEffort ||
+            params.summary !== "detailed")
         )
           throw new Error(
-            "role history did not apply high reasoning effort with a detailed summary",
+            `role history did not apply ${expectedHistoryEffort} reasoning effort with a detailed summary`,
           );
         if (
           prompt.includes("remembered word") &&
