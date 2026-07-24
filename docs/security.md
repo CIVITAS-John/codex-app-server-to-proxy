@@ -24,7 +24,7 @@ The proxy rejects every request containing an `Origin` header, even if the value
 
 ## Data and diagnostics audit
 
-Required CI is offline and uploads only maintained-source coverage. It does not upload app-server transcripts, login output, continuation state, or live-test diagnostics. Synthetic fixtures use placeholder identifiers, loopback addresses, temporary paths, and `gpt-5.4-mini`; they contain no captured production requests.
+Required CI is offline and uploads only maintained-source coverage. It does not upload app-server transcripts, login output, continuation state, or live-test diagnostics. Synthetic fixtures use placeholder identifiers, loopback addresses, temporary paths, and `gpt-5.6-luna`; they contain no captured production requests.
 
 Default structured logs may include event names, HTTP method/path, status, timing, request IDs, retry attempts, and stable error categories. They must not include prompts, message bodies, login URLs, credentials, cwd, tool names/arguments/results, or raw child stderr. A first-run authorization URL may be written once to the interactive terminal fallback, but it does not enter structured logs.
 

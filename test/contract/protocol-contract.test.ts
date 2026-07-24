@@ -156,7 +156,7 @@ test("continuation schema examples agree with the production store reader", asyn
     responseId: "response_schema_valid",
     threadId: "thread_schema_valid",
     state: "ready",
-    model: "gpt-5.4-mini",
+    model: "gpt-5.6-luna",
     cwd: "/tmp/workspace",
     toolsHash: "a".repeat(64),
     policyHash: "b".repeat(64),

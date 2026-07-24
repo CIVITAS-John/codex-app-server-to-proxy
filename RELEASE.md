@@ -50,7 +50,7 @@ These results are local source-tree evidence, not remote-matrix or registry evid
 
 This check costs model calls and requires explicit authorization. It is isolated from default tests and is never a pull-request prerequisite.
 
-- [ ] Before starting on POSIX, record: model `gpt-5.4-mini`; expected normal total **8 calls**; hard maximum **9 calls**; candidate version, commit SHA, and operator.
+- [ ] Before starting on POSIX, record: model `gpt-5.6-luna`; expected normal total **8 calls**; hard maximum **9 calls**; candidate version, commit SHA, and operator.
 - [ ] Run the dedicated live configuration serially through the authorized `codex-live-tests` environment, or locally with the same pinned package and an existing ChatGPT login:
 
   ```sh
@@ -123,7 +123,7 @@ git push origin main
 - [ ] For an OIDC-published candidate, verify the npm provenance attestation links to the expected repository, workflow, `main` dispatch ref, dispatch commit, and tested tarball. Separately verify that the release tag names the generated version commit whose parent is that dispatch commit. Verify registry signatures and attestations from a clean temporary install where supported. For the one-time manual bootstrap, record that provenance is unavailable rather than claiming it passed.
 - [ ] Install the exact registry version in a clean temporary project with lifecycle scripts disabled, invoke `codex-openai-proxy --version` through its npm bin shim, and repeat the bounded published-package smoke.
 - [ ] In an explicitly authorized disposable login profile with no existing Codex session, start the exact registry-installed bin shim on loopback and record that browser or device-code login reaches `/ready`. An already-authenticated startup is not first-run login evidence. Do not record the authorization URL, device code, token, or profile path.
-- [ ] From the exact registry-installed bin shim, run the published-prerelease live scenarios with only `gpt-5.4-mini`: on POSIX, declare the expected normal total of **8 calls** and hard maximum of **9 calls** before starting, then record the exact count. Cover high `reasoning_effort`, streamed reasoning, reasoning- and internal-activity-stripped role-history replay, client-defined tool continuation, usage when reported, default disabled-sandbox chat without execution-tool activity, explicit read-only policy selection, and completed-thread continuation after restarting both the installed proxy and its app-server. The fake packed smoke and source-level `npm run test:live` do not satisfy this item.
+- [ ] From the exact registry-installed bin shim, run the published-prerelease live scenarios with only `gpt-5.6-luna`: on POSIX, declare the expected normal total of **8 calls** and hard maximum of **9 calls** before starting, then record the exact count. Cover high `reasoning_effort`, streamed reasoning, reasoning- and internal-activity-stripped role-history replay, client-defined tool continuation, usage when reported, default disabled-sandbox chat without execution-tool activity, explicit read-only policy selection, and completed-thread continuation after restarting both the installed proxy and its app-server. The fake packed smoke and source-level `npm run test:live` do not satisfy this item.
 - [ ] Confirm [CHANGELOG.md](CHANGELOG.md) records the verified publication date.
 
 ## Promote a stable release

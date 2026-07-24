@@ -51,7 +51,7 @@ const client = new OpenAI({
 });
 
 const completion = await client.chat.completions.create({
-  model: "gpt-5.4-mini",
+  model: "gpt-5.6-luna",
   messages: [{ role: "user", content: "Summarize this project." }],
 });
 
@@ -64,7 +64,7 @@ Or with `curl`:
 curl http://127.0.0.1:8787/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "gpt-5.4-mini",
+    "model": "gpt-5.6-luna",
     "messages": [{"role": "user", "content": "Summarize this project."}]
   }'
 ```
@@ -92,7 +92,7 @@ Set `stream: true` as usual:
 curl -N http://127.0.0.1:8787/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "gpt-5.4-mini",
+    "model": "gpt-5.6-luna",
     "reasoning_effort": "high",
     "messages": [{"role": "user", "content": "Describe this repository."}],
     "stream": true,
@@ -123,7 +123,7 @@ Pass the `id` of the newest completed response as top-level `previous_response_i
 
 ```json
 {
-  "model": "gpt-5.4-mini",
+  "model": "gpt-5.6-luna",
   "messages": [{ "role": "user", "content": "Now explain the test strategy." }],
   "previous_response_id": "chatcmpl_codex_..."
 }
@@ -143,6 +143,10 @@ Responses can include two nonstandard fields on the assistant delta/message:
 | `reasoning`    | Codex's reasoning summary (string)                                                            |
 | `tool_results` | Status/results of Codex's internal activity (commands, file changes, MCP calls, web searches) |
 
+Reasoning deltas stream as they arrive. If app-server supplies reasoning only in
+the completed item, the proxy emits that final text without repeating any
+prefix already streamed for the same item.
+
 Internal activity also appears as function-shaped entries in `tool_calls`. These are **observational** — Codex already executed them. Do not execute them, and do not send tool results for them; they never cause `finish_reason: "tool_calls"`. Only your own client-defined functions suspend the turn and require `role: "tool"` follow-ups.
 
 If your client replays a prior assistant message verbatim in a fresh request, the proxy strips these observational fields automatically.
@@ -153,7 +157,7 @@ Per-request Codex controls live under a nonstandard top-level `x_codex` object:
 
 ```json
 {
-  "model": "gpt-5.4-mini",
+  "model": "gpt-5.6-luna",
   "messages": [{ "role": "user", "content": "Review this project." }],
   "x_codex": {
     "cwd": "/absolute/path/to/project",

@@ -8,8 +8,8 @@ import {
 
 /** Complete catalog entry used by the live-model script tests. */
 const catalogModel = {
-  id: "gpt-5.4-mini",
-  model: "gpt-5.4-mini",
+  id: "gpt-5.6-luna",
+  model: "gpt-5.6-luna",
   upgrade: null,
   upgradeInfo: null,
   availabilityNux: null,
@@ -55,12 +55,12 @@ test("live model catalog follows pagination and preserves advertised order", asy
   ]);
   assert.deepEqual(
     models.map((model: { model: string }) => model.model),
-    ["gpt-5.4-mini", "hidden-model"],
+    ["gpt-5.6-luna", "hidden-model"],
   );
   assert.equal(
     formatModelCatalog(models),
     [
-      "gpt-5.4-mini (default)",
+      "gpt-5.6-luna (default)",
       "  GPT-5.4 mini; reasoning: medium, high",
       "hidden-model (hidden)",
       "  GPT-5.4 mini; reasoning: medium, high",

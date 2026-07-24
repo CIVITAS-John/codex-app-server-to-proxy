@@ -23,7 +23,7 @@ import { withTempDir } from "../support/temp.js";
 
 /** Common immutable binding used by persistence tests. */
 const binding = {
-  model: "gpt-5.4-mini",
+  model: "gpt-5.6-luna",
   reasoningEffort: "high",
   cwd: "/tmp/workspace",
   toolsHash: bindingHash([{ name: "lookup" }]),

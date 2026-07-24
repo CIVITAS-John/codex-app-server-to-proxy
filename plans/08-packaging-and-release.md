@@ -47,7 +47,7 @@ These local results prove source-tree mechanics for this candidate. They do not 
 - The GitHub Actions offline matrix must finish green on every retained Node.js and operating-system line. A checked-in workflow is not evidence of a remote pass.
 - The dispatch-only registry-backed package smoke must pass on clean macOS, Linux, and Windows runners with Node.js 24. Its results are separate from the required offline matrix.
 - The registry-facing dependency audit must complete against current npm advisory data.
-- The opt-in live smoke must be explicitly authorized, use only `gpt-5.4-mini`, state the expected normal count of eight and hard maximum of nine model calls on POSIX before execution, and record the exact count afterward.
+- The opt-in live smoke must be explicitly authorized, use only `gpt-5.6-luna`, state the expected normal count of eight and hard maximum of nine model calls on POSIX before execution, and record the exact count afterward.
 - If the package name is unclaimed, the one-time owner/2FA bootstrap must be recorded and the trusted publisher configured immediately afterward. Otherwise the candidate must be published through trusted publishing. In both cases its repository, license, tarball integrity, and `next` dist-tag must be verified; provenance is required for every OIDC-published candidate but cannot be claimed for the manual bootstrap.
 - Install, login, high reasoning-effort streaming, the retained Stage 01 behaviors, usage when reported, and completed-thread continuation across a proxy/app-server restart must be verified from the published prerelease.
 - A stable version and stable-promotion workflow remain pending. Do not move `latest` until prerelease evidence is accepted; the Stage 08 prerelease workflow intentionally cannot publish a stable version.
@@ -61,7 +61,7 @@ No remote CI, live, registry, provenance, or stable-promotion result is recorded
 | Publishable package metadata, license, narrow allow-list, exact Codex pin, `--version`, and published-user docs | Local gate passed |
 | Fresh tarball installation and generated npm bin shim | Local offline smoke passed; remote OS evidence pending |
 | Remote offline Node.js/OS matrix | Pending external evidence |
-| Opt-in `gpt-5.4-mini` live smoke with exact call record | Pending explicit authorization |
+| Opt-in `gpt-5.6-luna` live smoke with exact call record | Pending explicit authorization |
 | npm `next` publication, metadata, and integrity | Pending registry publication or one-time bootstrap |
 | Trusted-publishing provenance | Pending for the first OIDC-published candidate; not available for a manual bootstrap |
 | Stable `latest` promotion | Pending prerelease acceptance and a stable workflow decision |

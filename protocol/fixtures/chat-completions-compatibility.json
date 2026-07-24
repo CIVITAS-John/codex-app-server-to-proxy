@@ -5,7 +5,7 @@
       "name": "published-curl-aggregate",
       "client": "curl",
       "request": {
-        "model": "gpt-5.4-mini",
+        "model": "gpt-5.6-luna",
         "messages": [{ "role": "user", "content": "Reply briefly." }]
       },
       "expectedObject": "chat.completion"
@@ -14,7 +14,7 @@
       "name": "generic-http-sse",
       "client": "node-http",
       "request": {
-        "model": "gpt-5.4-mini",
+        "model": "gpt-5.6-luna",
         "messages": [{ "role": "user", "content": "Reply briefly." }],
         "stream": true,
         "stream_options": { "include_usage": true }

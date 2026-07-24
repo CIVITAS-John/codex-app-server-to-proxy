@@ -235,7 +235,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     requiresOpenaiAuth: true
   }});
   else if (message.method === "thread/start") send({ id: message.id, result: {
-    thread, model: "gpt-5.4-mini", modelProvider: "openai", serviceTier: null, cwd,
+    thread, model: "gpt-5.6-luna", modelProvider: "openai", serviceTier: null, cwd,
     runtimeWorkspaceRoots: [], instructionSources: [], approvalPolicy: "never",
     approvalsReviewer: "auto_review", sandbox: { type: "readOnly", networkAccess: false },
     activePermissionProfile: null, reasoningEffort: null, multiAgentMode: "explicitRequestOnly"
@@ -470,7 +470,7 @@ async function main() {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          model: "gpt-5.4-mini",
+          model: "gpt-5.6-luna",
           messages: [{ role: "user", content: "Return the package smoke fixture." }],
         }),
       });

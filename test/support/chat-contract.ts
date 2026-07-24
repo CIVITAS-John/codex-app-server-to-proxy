@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterAll, beforeAll, describe, test } from "vitest";
 
 /** Model fixed by the repository's live-test cost policy. */
-export const CONTRACT_MODEL = "gpt-5.4-mini";
+export const CONTRACT_MODEL = "gpt-5.6-luna";
 
 /** Hard model-turn guard with one retry above the normal eight live calls. */
 export const MAX_LIVE_MODEL_CALLS = 9;
@@ -206,7 +206,7 @@ export function registerChatContract(
             {
               role: "user",
               content:
-                "Remember the word cedar. Before answering, compute 37 × 43 independently using long multiplication and the distributive property, then verify that both methods agree. After reasoning, reply exactly with contract-history-one.",
+                "Remember the word cedar. Before answering, compute 3751 × 4325 independently using long multiplication and the distributive property, then verify that both methods agree. After reasoning, reply exactly with contract-history-one.",
             },
           ],
           stream: true,

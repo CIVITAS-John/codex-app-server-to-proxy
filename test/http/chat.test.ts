@@ -796,6 +796,74 @@ test("normalizes interleaved text, reasoning, internal items, tools, usage, and 
   );
 });
 
+test("backfills completed reasoning without duplicating streamed prefixes", () => {
+  /** Builds a completed reasoning item with the supplied final text. */
+  const completedReasoning = (
+    id: string,
+    summary: string[],
+    content: string[] = [],
+  ) =>
+    protocolNotification({
+      method: "item/completed",
+      params: {
+        threadId: "thread",
+        turnId: "turn",
+        completedAtMs: 1,
+        item: { type: "reasoning", id, summary, content },
+      },
+    });
+
+  const completionOnly = completedReasoning("completion-only", [
+    "final ",
+    "summary",
+  ]);
+  assert.deepEqual(
+    new EventNormalizer().normalize(
+      completionOnly.method,
+      completionOnly.params,
+    ),
+    [{ delta: { reasoning: "final summary" } }],
+  );
+
+  const partial = new EventNormalizer();
+  assert.deepEqual(
+    partial.normalize("item/reasoning/summaryTextDelta", {
+      threadId: "thread",
+      turnId: "turn",
+      itemId: "partial",
+      summaryIndex: 0,
+      delta: "final ",
+    }),
+    [{ delta: { reasoning: "final " } }],
+  );
+  const partialCompletion = completedReasoning("partial", ["final summary"]);
+  assert.deepEqual(
+    partial.normalize(partialCompletion.method, partialCompletion.params),
+    [{ delta: { reasoning: "summary" } }],
+  );
+
+  const fullyStreamed = new EventNormalizer();
+  for (const delta of ["final ", "summary"])
+    fullyStreamed.normalize("item/reasoning/summaryTextDelta", {
+      threadId: "thread",
+      turnId: "turn",
+      itemId: "complete",
+      summaryIndex: 0,
+      delta,
+    });
+  const fullCompletion = completedReasoning("complete", ["final summary"]);
+  assert.deepEqual(
+    fullyStreamed.normalize(fullCompletion.method, fullCompletion.params),
+    [],
+  );
+
+  const rawCompletion = completedReasoning("raw", [], ["raw ", "reasoning"]);
+  assert.deepEqual(
+    new EventNormalizer().normalize(rawCompletion.method, rawCompletion.params),
+    [{ delta: { reasoning: "raw reasoning" } }],
+  );
+});
+
 test("allocates unique call indexes across internal, dynamic, continuation, and orphan progress", () => {
   const normalizer = new EventNormalizer();
   const internal = normalizer.normalize("item/started", {

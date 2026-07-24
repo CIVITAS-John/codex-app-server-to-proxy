@@ -347,13 +347,17 @@ function createScriptedTransport(
         if (prompt.includes("contract-history-one"))
           send(
             protocolNotification({
-              method: "item/reasoning/summaryTextDelta",
+              method: "item/completed",
               params: {
                 threadId,
                 turnId,
-                itemId: "contract-history-reasoning",
-                summaryIndex: 0,
-                delta: "checked replay history",
+                completedAtMs: Date.now(),
+                item: {
+                  type: "reasoning",
+                  id: "contract-history-reasoning",
+                  summary: ["checked replay history"],
+                  content: [],
+                },
               },
             }),
           );

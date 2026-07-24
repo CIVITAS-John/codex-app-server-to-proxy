@@ -42,11 +42,11 @@ Reliably own one initialized app-server child process and complete ChatGPT login
 - Tests prove the fallback authorization URL reaches only the interactive terminal sink while structured logs, diagnostics, and state redact or omit it.
 - Elicitation capabilities are absent from initialization and unexpected elicitation requests receive an immediate fail-closed response.
 - No shell interpolation is used for spawning Codex or opening the browser.
-- The opt-in protocol spike records text, tool round trip, and persisted restart/resume observations using at most four model calls, all with `gpt-5.4-mini` and small output limits.
+- The opt-in protocol spike records text, tool round trip, and persisted restart/resume observations using at most four model calls, all with `gpt-5.6-luna` and small output limits.
 
 ## Cost guard
 
-The implemented live HTTP contract attempts at most four model turns: streaming role history, a dynamic-tool turn, its tool-result continuation, and a completed-thread continuation after restart. All use `gpt-5.4-mini`, small output limits, bounded diagnostics, and unconditional cleanup.
+The implemented live HTTP contract attempts at most four model turns: streaming role history, a dynamic-tool turn, its tool-result continuation, and a completed-thread continuation after restart. All use `gpt-5.6-luna`, small output limits, bounded diagnostics, and unconditional cleanup.
 
 ## Implementation status
 
@@ -54,7 +54,7 @@ The offline Stage 03 implementation owns and version-checks a shell-free app-ser
 
 The shared JSON-RPC transport permits its bounded request population to subscribe to notifications and close events without emitting the default low-concurrency `EventEmitter` warning. A response containing an `error` member is always treated as failure; malformed error objects are rejected rather than being reinterpreted as a successful response with an absent result.
 
-The CLI starts app-server before becoming ready and may initiate ChatGPT login. Stage 04 implements `POST /v1/chat/completions`. The isolated `npm run test:live` command runs one shared HTTP contract against the real app-server, serially attempts at most four `gpt-5.4-mini` calls, bounds diagnostics, and unconditionally cleans up; default tests run that contract against only a deterministic fake backend.
+The CLI starts app-server before becoming ready and may initiate ChatGPT login. Stage 04 implements `POST /v1/chat/completions`. The isolated `npm run test:live` command runs one shared HTTP contract against the real app-server, serially attempts at most four `gpt-5.6-luna` calls, bounds diagnostics, and unconditionally cleans up; default tests run that contract against only a deterministic fake backend.
 
 The proxy declares `@openai/codex` as a runtime dependency and resolves the package's declared `codex` binary. This makes a normal local install self-contained; existing deployments that rely on a global PATH installation continue to work only as a compatibility fallback, while `--codex-path` remains the explicit override.
 

@@ -54,7 +54,7 @@ export function protocolThreadStartResponse(
 ): ThreadStartResponse {
   return {
     thread,
-    model: "gpt-5.4-mini",
+    model: "gpt-5.6-luna",
     modelProvider: "openai",
     serviceTier: null,
     cwd,

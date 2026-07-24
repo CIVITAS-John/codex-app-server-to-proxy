@@ -172,6 +172,8 @@ export function normalizeNotification(
 /** Maintains stable item-to-choice indexes while normalizing interleaved events. */
 export class EventNormalizer {
   readonly #toolCalls = new Map<string, NormalizedToolCall>();
+  readonly #reasoningSummaries = new Map<string, string>();
+  readonly #reasoningContent = new Map<string, string>();
   #nextToolIndex = 0;
   #sawClientTool = false;
 
@@ -220,13 +222,25 @@ export class EventNormalizer {
     if (
       method === "item/reasoning/summaryTextDelta" &&
       typeof params.delta === "string"
-    )
+    ) {
+      if (typeof params.itemId === "string")
+        this.#reasoningSummaries.set(
+          params.itemId,
+          (this.#reasoningSummaries.get(params.itemId) ?? "") + params.delta,
+        );
       return [{ delta: { reasoning: params.delta } }];
+    }
     if (
       method === "item/reasoning/textDelta" &&
       typeof params.delta === "string"
-    )
+    ) {
+      if (typeof params.itemId === "string")
+        this.#reasoningContent.set(
+          params.itemId,
+          (this.#reasoningContent.get(params.itemId) ?? "") + params.delta,
+        );
       return [{ delta: { reasoning: params.delta } }];
+    }
     if (method === "thread/tokenUsage/updated") {
       const usage = record(record(params.tokenUsage)?.last);
       if (!usage) return [];
@@ -271,13 +285,12 @@ export class EventNormalizer {
         );
         return [{ delta: { tool_calls: [publicCall] } }];
       }
-      if (
-        !item ||
-        item.type === "agentMessage" ||
-        item.type === "reasoning" ||
-        item.type === "userMessage"
-      )
+      if (!item || item.type === "agentMessage" || item.type === "userMessage")
         return [];
+      if (item.type === "reasoning")
+        return method === "item/completed"
+          ? this.#completedReasoning(item)
+          : [];
       return [
         this.#internalItem(
           method === "item/started" ? "started" : "completed",
@@ -288,6 +301,20 @@ export class EventNormalizer {
     if (notificationBehavior(method) === "progress")
       return [this.#internalProgress(method, params)];
     return [];
+  }
+
+  /** Backfills reasoning omitted from deltas without repeating streamed text. */
+  #completedReasoning(item: Record<string, unknown>): NormalizedEvent[] {
+    const id = typeof item.id === "string" ? item.id : "";
+    const streamedSummary = this.#reasoningSummaries.get(id) ?? "";
+    const streamedContent = this.#reasoningContent.get(id) ?? "";
+    this.#reasoningSummaries.delete(id);
+    this.#reasoningContent.delete(id);
+
+    const reasoning =
+      reasoningRemainder(item.summary, streamedSummary) +
+      reasoningRemainder(item.content, streamedContent);
+    return reasoning ? [{ delta: { reasoning } }] : [];
   }
 
   /** Emits an internal call, or a self-correlating call/result pair. */
@@ -355,6 +382,15 @@ export class EventNormalizer {
     this.#toolCalls.set(id, call);
     return call;
   }
+}
+
+/** Returns only the completed reasoning suffix not already streamed. */
+function reasoningRemainder(value: unknown, streamed: string): string {
+  if (!Array.isArray(value) || value.some((part) => typeof part !== "string"))
+    return "";
+  const completed = value.join("");
+  if (!streamed) return completed;
+  return completed.startsWith(streamed) ? completed.slice(streamed.length) : "";
 }
 
 /** Extracts the turn identifier a notification correlates to, if present. */

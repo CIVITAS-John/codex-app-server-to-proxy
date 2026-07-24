@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   live:
-    name: Serial gpt-5.4-mini compatibility
+    name: Serial gpt-5.6-luna compatibility
     runs-on: ubuntu-latest
     environment: codex-live-tests
     timeout-minutes: 20

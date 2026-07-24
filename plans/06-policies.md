@@ -30,7 +30,7 @@ Expose per-request execution controls without weakening app-server or managed po
 - Root equality, valid descendants, sibling paths, prefix lookalikes, symlink escapes, nonexistent paths, files, relative paths, permission-denied paths, and platform-specific paths are tested.
 - Network/web-search disabled requests do not silently fall back to live search.
 - `danger-full-access` can only be selected explicitly and cannot bypass stricter effective policy.
-- Live policy smoke tests, if required, use `gpt-5.4-mini` and the minimum number of calls.
+- Live policy smoke tests, if required, use `gpt-5.6-luna` and the minimum number of calls.
 
 ## Implementation status
 

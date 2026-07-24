@@ -215,7 +215,7 @@ test("property: ignored fields produce exactly one sorted warning per request", 
         async (keys) => {
           logs.length = 0;
           const body: Record<string, unknown> = {
-            model: "gpt-5.4-mini",
+            model: "gpt-5.6-luna",
             messages: [{ role: "user", content: "bounded property" }],
           };
           for (const [index, key] of keys.entries()) body[key] = index;

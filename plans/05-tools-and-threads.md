@@ -52,7 +52,7 @@ Support client-defined tools across requests while preserving safe Codex thread 
 - Unknown or non-resumable `previous_response_id` values never create a new thread, including a superseded response on a multi-response thread and a thread that changes state between preflight and `thread/resume`.
 - A pending tool continuation returns a clear non-retryable error after restart.
 - Mapping writes survive abrupt termination without corrupting other records.
-- One opt-in live scenario completes a tool round trip with `gpt-5.4-mini` using at most two model calls.
+- One opt-in live scenario completes a tool round trip with `gpt-5.6-luna` using at most two model calls.
 
 ## Implemented decisions
 
@@ -75,4 +75,4 @@ Support client-defined tools across requests while preserving safe Codex thread 
 
 Stage 05 is complete. Function-oriented offline suites cover dynamic-tool streaming and aggregation, parallel and out-of-order results, large payloads, mismatches, replay, timeouts, transport replacement, thread serialization, continuation bindings, every fail-closed thread status, restart recovery, resume races, and atomic state migration/rollback. Resume now requires the app-server to return the exact persisted thread ID, and a partial failure while delivering parallel tool results expires and releases the suspension instead of leaving a timerless busy owner.
 
-The opt-in live contract passed on 2026-07-14. Its two-request `gpt-5.4-mini` function-tool round trip stayed within the two-call guard, and the resulting completed response then resumed after a full proxy/app-server restart. Request policy selection remains a Stage 06 concern; Stage 05 binds the currently empty effective-policy hash and rejects all nonempty policy requests.
+The opt-in live contract passed on 2026-07-14. Its two-request `gpt-5.6-luna` function-tool round trip stayed within the two-call guard, and the resulting completed response then resumed after a full proxy/app-server restart. Request policy selection remains a Stage 06 concern; Stage 05 binds the currently empty effective-policy hash and rejects all nonempty policy requests.
