@@ -35,6 +35,7 @@ import {
   sendTokenUsage,
   tokenUsageFixture,
   type FakeTransport,
+  type UsageWireOrder,
 } from "../support/transport.js";
 
 /** Minimal fake transport view accepted when replacing an HTTP test transport. */
@@ -64,8 +65,8 @@ interface FakeAppServerOptions {
   complete?: boolean;
   onInterrupt?: () => void;
   requestTool?: boolean;
-  usageAfterCompletion?: boolean;
-  usageBeforeTool?: boolean;
+  usageOrder?: UsageWireOrder;
+  usageAfterTool?: boolean;
   extraModelRequest?: boolean;
 }
 
@@ -74,8 +75,8 @@ function fakeAppServer({
   complete = true,
   onInterrupt = () => {},
   requestTool = false,
-  usageAfterCompletion = false,
-  usageBeforeTool = false,
+  usageOrder = "before_completion",
+  usageAfterTool = false,
   extraModelRequest = false,
 }: FakeAppServerOptions = {}): FakeTransport {
   let thread = "";
@@ -105,10 +106,6 @@ function fakeAppServer({
           }),
         );
         if (requestTool) {
-          // The model request that produced the tool call has completed, so
-          // app-server can report its usage before the turn suspends.
-          if (usageBeforeTool)
-            sendTokenUsage(send, thread, "turn_test", tokenUsageFixture(3));
           send(
             protocolServerRequest({
               id: 8_001,
@@ -123,6 +120,15 @@ function fakeAppServer({
               },
             }),
           );
+          if (usageAfterTool) {
+            // Deliver usage on a later transport read after suspension begins.
+            const timer = setTimeout(
+              () =>
+                sendTokenUsage(send, thread, "turn_test", tokenUsageFixture(3)),
+              5,
+            );
+            timer.unref();
+          }
           return;
         }
         // A turn that runs internal activity spans several model requests, each
@@ -142,7 +148,7 @@ function fakeAppServer({
         );
         if (complete) {
           completeTurn(send, thread, "turn_test", {
-            usageAfterCompletion,
+            usageOrder,
             priorRequests: extraModelRequest ? 1 : 0,
           });
         }
@@ -281,6 +287,58 @@ function failingIngressAppServer(mode: "overflow" | "mismatch" | "suspend"): {
     responderErrors,
     interruptCount: () => interrupts,
   };
+}
+
+/**
+ * Creates a turn that completes normally and then loses its transport before
+ * the optional trailing usage and idle boundary can arrive.
+ */
+function completeThenDropTransport(): FakeTransport {
+  const fake: FakeTransport = createFakeTransport({
+    onMessage(rawMessage, send) {
+      const message = rawMessage as { id: number; method: string };
+      if (message.method === "thread/start") {
+        send(
+          protocolResponse(
+            "thread/start",
+            message.id,
+            protocolThreadStartResponse(protocolThread("thr_dropped")),
+          ),
+        );
+        return;
+      }
+      if (message.method !== "turn/start") return;
+      send(
+        protocolResponse("turn/start", message.id, {
+          turn: protocolTurn("turn_dropped", "inProgress"),
+        }),
+      );
+      send(
+        protocolNotification({
+          method: "item/agentMessage/delta",
+          params: {
+            threadId: "thr_dropped",
+            turnId: "turn_dropped",
+            itemId: "text",
+            delta: "Hello",
+          },
+        }),
+      );
+      send(
+        protocolNotification({
+          method: "turn/completed",
+          params: {
+            threadId: "thr_dropped",
+            turn: protocolTurn("turn_dropped", "completed"),
+          },
+        }),
+      );
+      // No usage and no idle transition follow: the app-server dies inside the
+      // grace period the proxy would otherwise spend waiting for them.
+      setImmediate(() => fake.rpc.close(new Error("transport lost")));
+    },
+  });
+  return fake;
 }
 
 /** Creates a turn that fails only after turn/start has committed successfully. */
@@ -847,7 +905,6 @@ test("normalizes interleaved text, reasoning, internal items, tools, usage, and 
 });
 
 test("attributes every model request of one turn from cumulative usage", () => {
-  const normalizer = new EventNormalizer();
   /** Builds one thread-scoped usage notification from its two breakdowns. */
   const usageNotification = (
     last: TokenUsageBreakdown,
@@ -875,6 +932,7 @@ test("attributes every model request of one turn from cumulative usage", () => {
     reasoningOutputTokens,
     totalTokens: inputTokens + outputTokens,
   });
+  const normalizer = new EventNormalizer(breakdown(100, 10, 20, 10));
   /** Normalizes one usage notification down to its single usage event. */
   const usageOf = (notification: ReturnType<typeof usageNotification>) =>
     normalizer.normalize(notification.method, notification.params)[0]?.usage;
@@ -920,6 +978,19 @@ test("attributes every model request of one turn from cumulative usage", () => {
     prompt_tokens_details: { cached_tokens: 0 },
     completion_tokens_details: { reasoning_tokens: 0 },
   });
+  // Growing beyond the stale pre-reset baseline must not silently re-enable
+  // subtraction; this response can now expose only the exact last request.
+  const afterResetGrowth = usageNotification(
+    breakdown(7, 1, 2, 1),
+    breakdown(210, 21, 42, 21),
+  );
+  assert.deepEqual(usageOf(afterResetGrowth), {
+    prompt_tokens: 7,
+    completion_tokens: 2,
+    total_tokens: 9,
+    prompt_tokens_details: { cached_tokens: 1 },
+    completion_tokens_details: { reasoning_tokens: 1 },
+  });
   // An app-server build that omits a counter cannot be attributed by
   // subtraction either, so its last reported request is mapped as it arrived.
   const partialTotal: Partial<TokenUsageBreakdown> = breakdown(200, 20, 40, 20);
@@ -942,6 +1013,48 @@ test("attributes every model request of one turn from cumulative usage", () => {
       completion_tokens_details: { reasoning_tokens: 2 },
     },
   );
+});
+
+test("uses an authoritative baseline when the first observed update is coalesced", () => {
+  const normalizer = new EventNormalizer({
+    inputTokens: 100,
+    cachedInputTokens: 10,
+    outputTokens: 20,
+    reasoningOutputTokens: 10,
+    totalTokens: 120,
+  });
+  const events = normalizer.normalize("thread/tokenUsage/updated", {
+    threadId: "thread",
+    turnId: "turn",
+    tokenUsage: {
+      // The first observed update is for request B, while the cumulative total
+      // already includes both A and B.
+      last: {
+        inputTokens: 20,
+        cachedInputTokens: 1,
+        cacheWriteInputTokens: 0,
+        outputTokens: 3,
+        reasoningOutputTokens: 0,
+        totalTokens: 23,
+      },
+      total: {
+        inputTokens: 130,
+        cachedInputTokens: 13,
+        cacheWriteInputTokens: 0,
+        outputTokens: 28,
+        reasoningOutputTokens: 14,
+        totalTokens: 158,
+      },
+      modelContextWindow: null,
+    },
+  });
+  assert.deepEqual(events[0]?.usage, {
+    prompt_tokens: 30,
+    completion_tokens: 8,
+    total_tokens: 38,
+    prompt_tokens_details: { cached_tokens: 3 },
+    completion_tokens_details: { reasoning_tokens: 4 },
+  });
 });
 
 test("backfills completed reasoning without duplicating streamed prefixes", () => {
@@ -1242,7 +1355,10 @@ test("streaming and aggregate responses share content and exact usage", async ()
 
 test("reports usage that app-server streams after turn completion", async () => {
   await withChatServer(async (origin, _proxy, useTransport) => {
-    useTransport(fakeAppServer({ usageAfterCompletion: true }));
+    // Usage in the same transport read as the terminal frame is recovered by
+    // the drain alone; the streaming case below defers it to a later read so
+    // recovery depends on the idle lifecycle boundary rather than timing luck.
+    useTransport(fakeAppServer({ usageOrder: "after_completion" }));
     const aggregate = await fetch(`${origin}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1261,7 +1377,7 @@ test("reports usage that app-server streams after turn completion", async () => 
       completion_tokens_details: { reasoning_tokens: 0 },
     });
 
-    useTransport(fakeAppServer({ usageAfterCompletion: true }));
+    useTransport(fakeAppServer({ usageOrder: "later_read" }));
     const streaming = await fetch(`${origin}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1281,6 +1397,48 @@ test("reports usage that app-server streams after turn completion", async () => 
         ?.reasoning_tokens,
       0,
     );
+  });
+});
+
+test("keeps a completed turn when the transport dies before optional usage", async () => {
+  await withChatServer(async (origin, _proxy, useTransport) => {
+    useTransport(completeThenDropTransport());
+    const aggregate = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        messages: [{ role: "user", content: "Hello" }],
+      }),
+    });
+    // Usage is optional output. Losing the transport while waiting for it must
+    // not retract frames the completed turn already earned.
+    assert.equal(aggregate.status, 200);
+    const body = (await aggregate.json()) as {
+      choices: Array<{ finish_reason: string; message: { content: string } }>;
+      usage?: Usage;
+    };
+    assert.equal(body.choices[0]?.finish_reason, "stop");
+    assert.equal(body.choices[0]?.message.content, "Hello");
+    assert.equal(body.usage, undefined);
+
+    useTransport(completeThenDropTransport());
+    const streaming = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        messages: [{ role: "user", content: "Hello" }],
+        stream: true,
+        stream_options: { include_usage: true },
+      }),
+    });
+    assert.equal(streaming.status, 200);
+    const text = await streaming.text();
+    const chunks = streamedChunks(text);
+    assert.equal(chunks.at(-1)?.choices?.[0]?.finish_reason, "stop");
+    // A completed stream still terminates normally instead of emitting an error.
+    assert.ok(text.includes("data: [DONE]"));
   });
 });
 
@@ -1311,7 +1469,7 @@ test("reports usage for every model request behind one response", async () => {
 
 test("reports usage captured with a suspended client tool batch", async () => {
   await withChatServer(async (origin, _proxy, useTransport) => {
-    useTransport(fakeAppServer({ requestTool: true, usageBeforeTool: true }));
+    useTransport(fakeAppServer({ requestTool: true, usageAfterTool: true }));
     const response = await fetch(`${origin}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },

@@ -48,6 +48,13 @@ test("atomic mappings survive reload and supersede older thread responses", asyn
       responseId: "response_2",
       threadId: "thread_1",
       state: "ready",
+      usageTotal: {
+        inputTokens: 10,
+        cachedInputTokens: 2,
+        outputTokens: 5,
+        reasoningOutputTokens: 1,
+        totalTokens: 15,
+      },
       ...binding,
     });
 
@@ -55,6 +62,7 @@ test("atomic mappings survive reload and supersede older thread responses", asyn
     assert.equal(reloaded.get("response_1")?.state, "superseded");
     assert.equal(reloaded.get("response_2")?.state, "ready");
     assert.equal(reloaded.get("response_2")?.reasoningEffortBound, true);
+    assert.equal(reloaded.get("response_2")?.usageTotal?.totalTokens, 15);
     const disk = JSON.parse(
       await readFile(join(directory, "continuations.json"), "utf8"),
     ) as {
@@ -119,6 +127,25 @@ test("state loading rejects schema-invalid record details", async () => {
     { ...valid, policyHash: "f".repeat(63) },
     { ...valid, reasoningEffort: "" },
     { ...valid, reasoningEffortBound: false },
+    {
+      ...valid,
+      usageTotal: {
+        inputTokens: -1,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        reasoningOutputTokens: 0,
+        totalTokens: 0,
+      },
+    },
+    {
+      ...valid,
+      usageTotal: {
+        inputTokens: 1,
+        cachedInputTokens: 0,
+        outputTokens: 1,
+        reasoningOutputTokens: 0,
+      },
+    },
     { ...valid, responseId: "" },
   ];
   for (const [index, invalid] of invalidRecords.entries()) {
@@ -279,6 +306,27 @@ test("pending tool_call_id values implicitly select exactly one response", async
         turnId: "turn_1",
       },
     ]);
+    coordinator.recordSuspendedUsage("response_1", {
+      inputTokens: 4,
+      cachedInputTokens: 0,
+      outputTokens: 2,
+      reasoningOutputTokens: 0,
+      totalTokens: 6,
+    });
+    assert.equal(
+      coordinator.store.get("response_1")?.usageTotal?.totalTokens,
+      6,
+    );
+    // Best-effort persistence: an unknown or no-longer-pending mapping is a
+    // silent no-op rather than a failure that would retract the suspension.
+    coordinator.recordSuspendedUsage("response_absent", {
+      inputTokens: 1,
+      cachedInputTokens: 0,
+      outputTokens: 1,
+      reasoningOutputTokens: 0,
+      totalTokens: 2,
+    });
+    assert.equal(coordinator.store.get("response_absent"), undefined);
     assert.equal(coordinator.findPendingResponse(["call_1"]), "response_1");
     assert.throws(
       () => coordinator.findPendingResponse(["foreign"]),

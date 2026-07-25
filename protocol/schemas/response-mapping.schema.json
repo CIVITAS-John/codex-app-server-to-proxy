@@ -33,6 +33,18 @@
           "type": "array",
           "uniqueItems": true,
           "items": { "type": "string" }
+        },
+        "usageTotal": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["inputTokens", "cachedInputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens"],
+          "properties": {
+            "inputTokens": { "type": "number", "minimum": 0 },
+            "cachedInputTokens": { "type": "number", "minimum": 0 },
+            "outputTokens": { "type": "number", "minimum": 0 },
+            "reasoningOutputTokens": { "type": "number", "minimum": 0 },
+            "totalTokens": { "type": "number", "minimum": 0 }
+          }
         }
       }
     }

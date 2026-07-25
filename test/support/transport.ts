@@ -126,13 +126,22 @@ export function sendTokenUsage(
   );
 }
 
+/**
+ * Wire position of a turn's final usage relative to its completion. App-server
+ * streams usage separately from completion, so all three orders are legal and
+ * every one must produce the same response usage.
+ */
+export type UsageWireOrder =
+  "before_completion" | "after_completion" | "later_read";
+
+/** Milliseconds by which `later_read` defers usage past the completion frame. */
+const LATER_READ_DELAY_MS = 5;
+
 /** Final usage and wire ordering selected by one scripted turn completion. */
 export interface CompleteTurnOptions {
   reasoningOutputTokens?: number;
   priorRequests?: number;
-  // App-server streams usage separately from completion, so both wire orders
-  // are legal and both must produce the same response usage.
-  usageAfterCompletion?: boolean;
+  usageOrder?: UsageWireOrder;
 }
 
 /** Emits typed usage and successful completion notifications for one turn. */
@@ -143,7 +152,7 @@ export function completeTurn(
   {
     reasoningOutputTokens = 0,
     priorRequests = 0,
-    usageAfterCompletion = false,
+    usageOrder = "before_completion",
   }: CompleteTurnOptions = {},
 ): void {
   const usage = (): void =>
@@ -160,11 +169,30 @@ export function completeTurn(
         params: { threadId, turn: protocolTurn(turnId, "completed") },
       }),
     );
-  if (usageAfterCompletion) {
-    completed();
+  const idle = (): void =>
+    send(
+      protocolNotification({
+        method: "thread/status/changed",
+        params: { threadId, status: { type: "idle" } },
+      }),
+    );
+  if (usageOrder === "before_completion") {
     usage();
+    completed();
+    idle();
     return;
   }
-  usage();
   completed();
+  if (usageOrder === "after_completion") {
+    usage();
+    idle();
+    return;
+  }
+  // `later_read` delivers usage and the idle boundary on a transport read the
+  // proxy has not performed yet when the turn's terminal frame is consumed.
+  const timer = setTimeout(() => {
+    usage();
+    idle();
+  }, LATER_READ_DELAY_MS);
+  timer.unref();
 }

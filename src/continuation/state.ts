@@ -23,6 +23,10 @@ import {
   canonicalJson,
   record as asRecord,
 } from "../core/canonical.js";
+import {
+  tokenUsageCounters,
+  type TokenUsageCounters,
+} from "../core/token-usage.js";
 
 export { bindingHash, canonicalJson };
 
@@ -50,6 +54,8 @@ export interface ResponseRecord extends ThreadBinding {
   createdAt: number;
   expiresAt: number;
   callIds?: string[];
+  /** Latest exact cumulative app-server total at this response boundary. */
+  usageTotal?: TokenUsageCounters;
 }
 
 /** Durable atomic response mapping store with bounded retention. */
@@ -436,6 +442,23 @@ export class ContinuationCoordinator {
     this.#pending.set(responseId, { calls, timer });
   }
 
+  /**
+   * Persists the final cumulative usage snapshot for a live suspension.
+   * The suspension mapping itself is already durable, so this best-effort
+   * update only improves the next response's attribution and never reports
+   * failure: a disposed generation or a mapping that already left
+   * `pending_tool` simply forgoes the baseline.
+   */
+  recordSuspendedUsage(
+    responseId: string,
+    usageTotal: TokenUsageCounters | undefined,
+  ): void {
+    if (this.#disposed || !usageTotal) return;
+    const record = this.store.get(responseId);
+    if (!record || record.state !== "pending_tool") return;
+    this.store.update(responseId, { usageTotal });
+  }
+
   /** Returns the live suspension, distinguishing restart tombstones from unknown IDs. */
   pending(responseId: string): PendingToolCall[] | undefined {
     return this.#pending.get(responseId)?.calls;
@@ -511,9 +534,16 @@ export class ContinuationCoordinator {
     responseId: string,
     threadId: string,
     binding: ThreadBinding,
+    usageTotal?: TokenUsageCounters,
   ): boolean {
     if (this.#disposed) return false;
-    this.store.put({ responseId, threadId, state: "ready", ...binding });
+    this.store.put({
+      responseId,
+      threadId,
+      state: "ready",
+      ...binding,
+      ...(usageTotal ? { usageTotal } : {}),
+    });
     return true;
   }
 
@@ -551,6 +581,7 @@ function isResponseRecord(value: unknown): value is ResponseRecord {
     "createdAt",
     "expiresAt",
     "callIds",
+    "usageTotal",
   ]);
   const validStates = new Set([
     "ready",
@@ -575,6 +606,8 @@ function isResponseRecord(value: unknown): value is ResponseRecord {
         record.reasoningEffort.length > 0)) &&
     (record.reasoningEffortBound === undefined ||
       record.reasoningEffortBound === true) &&
+    (record.usageTotal === undefined ||
+      tokenUsageCounters(record.usageTotal) !== undefined) &&
     typeof record.cwd === "string" &&
     record.cwd.length > 0 &&
     validHash(record.toolsHash) &&

@@ -153,6 +153,13 @@ export const exposedEvents = [
     },
   },
   {
+    method: "thread/status/changed",
+    params: {
+      threadId: "thr_fixture",
+      status: { type: "idle" },
+    },
+  },
+  {
     method: "error",
     params: {
       error: {

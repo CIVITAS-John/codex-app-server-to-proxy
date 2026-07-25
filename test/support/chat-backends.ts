@@ -219,6 +219,7 @@ function createScriptedTransport(
   >();
   const injected = new Map<string, unknown[]>();
   const pendingTools = new Map<number, { threadId: string; turnId: string }>();
+  const modelRequests = new Map<string, number>();
   const successfulBuiltInThreads = new Set<string>();
   const environmentDisabledThreads = new Set<string>();
   const complete = (
@@ -226,8 +227,28 @@ function createScriptedTransport(
     turnId: string,
     options: CompleteTurnOptions = {},
   ): void => {
-    completeTurn(scripted.send, threadId, turnId, options);
+    const priorRequests = modelRequests.get(threadId) ?? 0;
+    completeTurn(scripted.send, threadId, turnId, {
+      ...options,
+      priorRequests,
+    });
+    modelRequests.set(threadId, priorRequests + 1);
     active.delete(turnId);
+  };
+  /** Emits and accounts for one nonterminal model request on a thread. */
+  const sendUsage = (
+    threadId: string,
+    turnId: string,
+    reasoningOutputTokens = 0,
+  ): void => {
+    const priorRequests = modelRequests.get(threadId) ?? 0;
+    sendTokenUsage(
+      scripted.send,
+      threadId,
+      turnId,
+      tokenUsageFixture(reasoningOutputTokens, priorRequests),
+    );
+    modelRequests.set(threadId, priorRequests + 1);
   };
   const scripted = createFakeTransport({
     fragmentCount: 2,
@@ -393,7 +414,7 @@ function createScriptedTransport(
           // Running a built-in command splits the turn into two model requests:
           // one that asks for the command and one that answers with its result.
           // App-server reports usage for each as it finishes.
-          sendTokenUsage(scripted.send, threadId, turnId, tokenUsageFixture());
+          sendUsage(threadId, turnId);
           const itemId = "contract-observation";
           const command = `/bin/sh -lc '${OBSERVATION_COMMAND}'`;
           const baseItem = {
@@ -453,10 +474,7 @@ function createScriptedTransport(
           );
           // The answering request completes the turn, and its usage arrives
           // after completion to exercise the documented separate usage stream.
-          complete(threadId, turnId, {
-            priorRequests: 1,
-            usageAfterCompletion: true,
-          });
+          complete(threadId, turnId, { usageOrder: "after_completion" });
           return;
         }
         send(

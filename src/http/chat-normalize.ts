@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 import type { JsonRpcTransport } from "../app-server/json-rpc.js";
 import { record } from "../core/canonical.js";
 import type { Logger } from "../core/logger.js";
+import {
+  subtractTokenUsage,
+  tokenUsageCounters,
+  type TokenUsageCounters,
+} from "../core/token-usage.js";
 import type { PendingToolCall } from "../continuation/state.js";
 import { HttpError } from "./errors.js";
 
@@ -84,7 +89,8 @@ export interface AggregatedNormalizedEvents {
 const MAX_DIAGNOSTIC_METHODS = 32;
 
 /** Explicit handling selected for one pinned app-server notification method. */
-type NotificationBehavior = "normalize" | "progress" | "ignore" | "diagnose";
+export type NotificationBehavior =
+  "normalize" | "progress" | "lifecycle" | "ignore" | "diagnose";
 
 /** Classifies pinned notification methods without implicitly exposing them. */
 const NOTIFICATION_BEHAVIORS = new Map<string, NotificationBehavior>([
@@ -104,6 +110,7 @@ const NOTIFICATION_BEHAVIORS = new Map<string, NotificationBehavior>([
   ["item/started", "normalize"],
   ["item/completed", "normalize"],
   ["serverRequest/resolved", "ignore"],
+  ["thread/status/changed", "lifecycle"],
   ["thread/tokenUsage/updated", "normalize"],
   ["turn/completed", "normalize"],
 ]);
@@ -176,7 +183,23 @@ export class EventNormalizer {
   readonly #reasoningContent = new Map<string, string>();
   #nextToolIndex = 0;
   #sawClientTool = false;
-  #usageBaseline: UsageCounters | undefined;
+  readonly #usageBaseline: TokenUsageCounters | undefined;
+  #latestUsageTotal: TokenUsageCounters | undefined;
+  #cumulativeUsageValid = true;
+
+  /**
+   * Binds the exact cumulative total at this response's attribution boundary.
+   * The baseline is fixed for the normalizer's lifetime, so no observed usage
+   * can ever be attributed against a boundary it did not begin from.
+   */
+  constructor(usageBaseline?: TokenUsageCounters) {
+    this.#usageBaseline = usageBaseline;
+  }
+
+  /** Returns the newest complete cumulative total for continuation persistence. */
+  usageTotal(): TokenUsageCounters | undefined {
+    return this.#latestUsageTotal ? { ...this.#latestUsageTotal } : undefined;
+  }
 
   /** Converts one authoritative dynamic request to a function tool call. */
   dynamicToolCall(call: PendingToolCall): NormalizedEvent {
@@ -244,9 +267,13 @@ export class EventNormalizer {
     }
     if (method === "thread/tokenUsage/updated") {
       const tokenUsage = record(params.tokenUsage);
+      const total = tokenUsageCounters(tokenUsage?.total);
+      // The cumulative total is the next response's baseline whether or not
+      // this notification also carries an attributable `last` breakdown.
+      if (total) this.#latestUsageTotal = total;
       const last = record(tokenUsage?.last);
       if (!last) return [];
-      return [{ usage: this.#turnUsage(last, counters(tokenUsage?.total)) }];
+      return [{ usage: this.#turnUsage(last, total) }];
     }
     if (method === "error") {
       const error = record(params.error);
@@ -322,17 +349,18 @@ export class EventNormalizer {
   /** Attributes every model request of the turn, not only the most recent one. */
   #turnUsage(
     last: Record<string, unknown>,
-    total: UsageCounters | undefined,
+    total: TokenUsageCounters | undefined,
   ): Usage {
-    const request = counters(last);
-    // App-server reports `last` for the most recent model request, while one
-    // Chat Completions turn can span several of them (internal tools, retries,
-    // compaction). Subtracting the pre-turn baseline from the cumulative thread
-    // counters attributes them all with reported values only, and stays exact
-    // when app-server repeats one breakdown.
-    if (!request || !total) return toUsage(last);
-    const baseline = (this.#usageBaseline ??= difference(total, request));
-    const turn = baseline && difference(total, baseline);
+    // Only a persisted pre-response snapshot (or zero for a fresh thread) is an
+    // authoritative baseline. Deriving one from `total - last` would silently
+    // lose earlier model requests when the first observed update was coalesced.
+    if (!this.#usageBaseline || !total || !this.#cumulativeUsageValid)
+      return toUsage(last);
+    const turn = subtractTokenUsage(total, this.#usageBaseline);
+    // A reset invalidates the old baseline for the rest of this response. Keep
+    // the newest total for the next response, but never resume subtraction
+    // merely because reset counters later grow beyond the stale snapshot.
+    if (!turn) this.#cumulativeUsageValid = false;
     return turn ? countersToUsage(turn) : toUsage(last);
   }
 
@@ -530,55 +558,8 @@ function normalizeError(value: unknown): NormalizedError {
   };
 }
 
-/** Complete exact counters of one app-server token usage breakdown. */
-interface UsageCounters {
-  inputTokens: number;
-  cachedInputTokens: number;
-  outputTokens: number;
-  reasoningOutputTokens: number;
-  totalTokens: number;
-}
-
-/** Counter names required before cumulative usage may be attributed by subtraction. */
-const USAGE_COUNTERS = [
-  "inputTokens",
-  "cachedInputTokens",
-  "outputTokens",
-  "reasoningOutputTokens",
-  "totalTokens",
-] as const;
-
-/** Reads one breakdown, refusing any that omits a counter this turn needs. */
-function counters(value: unknown): UsageCounters | undefined {
-  const breakdown = record(value);
-  if (!breakdown) return undefined;
-  const result = {} as UsageCounters;
-  for (const name of USAGE_COUNTERS) {
-    const count = breakdown[name];
-    if (typeof count !== "number" || !Number.isFinite(count)) return undefined;
-    result[name] = count;
-  }
-  return result;
-}
-
-/** Subtracts counters, refusing any result app-server could not have reported. */
-function difference(
-  total: UsageCounters,
-  base: UsageCounters,
-): UsageCounters | undefined {
-  const result = {} as UsageCounters;
-  for (const name of USAGE_COUNTERS) {
-    const count = total[name] - base[name];
-    // Counters only ever grow within a thread. A negative difference means the
-    // app-server reset them, so attribution by subtraction is no longer exact.
-    if (count < 0) return undefined;
-    result[name] = count;
-  }
-  return result;
-}
-
 /** Maps complete attributed counters to the standard usage object. */
-function countersToUsage(value: UsageCounters): Usage {
+function countersToUsage(value: TokenUsageCounters): Usage {
   return {
     prompt_tokens: value.inputTokens,
     completion_tokens: value.outputTokens,

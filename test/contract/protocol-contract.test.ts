@@ -138,6 +138,10 @@ test("continuation schema examples agree with the production store reader", asyn
           reasoningEffortBound: { const: boolean };
           toolsHash: { pattern: string };
           callIds: { uniqueItems: boolean };
+          usageTotal: {
+            additionalProperties: boolean;
+            required: string[];
+          };
         };
       };
     };
@@ -151,6 +155,14 @@ test("continuation schema examples agree with the production store reader", asyn
   assert.equal(recordSchema.properties.reasoningEffortBound.const, true);
   assert.equal(recordSchema.properties.toolsHash.pattern, "^[a-f0-9]{64}$");
   assert.equal(recordSchema.properties.callIds.uniqueItems, true);
+  assert.equal(recordSchema.properties.usageTotal.additionalProperties, false);
+  assert.deepEqual(recordSchema.properties.usageTotal.required.sort(), [
+    "cachedInputTokens",
+    "inputTokens",
+    "outputTokens",
+    "reasoningOutputTokens",
+    "totalTokens",
+  ]);
 
   const accepted = {
     responseId: "response_schema_valid",
@@ -163,11 +175,18 @@ test("continuation schema examples agree with the production store reader", asyn
     createdAt: 1,
     expiresAt: Date.now() + 60_000,
     callIds: ["call_1", "call_2"],
+    usageTotal: {
+      inputTokens: 10,
+      cachedInputTokens: 2,
+      outputTokens: 5,
+      reasoningOutputTokens: 1,
+      totalTokens: 15,
+    },
   };
   assert.deepEqual(
     [...recordSchema.required].sort(),
     Object.keys(accepted)
-      .filter((key) => key !== "callIds")
+      .filter((key) => key !== "callIds" && key !== "usageTotal")
       .sort(),
   );
   assert.equal(

@@ -11,6 +11,7 @@
 {"method":"item/mcpToolCall/progress","params":{"threadId":"thr_fixture","turnId":"turn_fixture","itemId":"item_mcp","message":"running"}}
 {"method":"thread/tokenUsage/updated","params":{"threadId":"thr_fixture","turnId":"turn_fixture","tokenUsage":{"total":{"totalTokens":15,"inputTokens":10,"cachedInputTokens":2,"cacheWriteInputTokens":0,"outputTokens":5,"reasoningOutputTokens":1},"last":{"totalTokens":15,"inputTokens":10,"cachedInputTokens":2,"cacheWriteInputTokens":0,"outputTokens":5,"reasoningOutputTokens":1},"modelContextWindow":128000}}}
 {"method":"turn/completed","params":{"threadId":"thr_fixture","turn":{"id":"turn_fixture","items":[],"itemsView":"full","status":"completed","error":null,"startedAt":null,"completedAt":null,"durationMs":null}}}
+{"method":"thread/status/changed","params":{"threadId":"thr_fixture","status":{"type":"idle"}}}
 {"method":"error","params":{"error":{"message":"fixture failure","codexErrorInfo":null,"additionalDetails":null},"willRetry":false,"threadId":"thr_fixture","turnId":"turn_fixture"}}
 {"method":"item/tool/call","id":41,"params":{"threadId":"thr_fixture","turnId":"turn_fixture","callId":"call_fixture","namespace":null,"tool":"lookup","arguments":{"id":"T-1"}}}
 {"method":"item/commandExecution/requestApproval","id":42,"params":{"threadId":"thr_fixture","turnId":"turn_fixture","itemId":"item_command","startedAtMs":0,"environmentId":null,"reason":"fixture"}}

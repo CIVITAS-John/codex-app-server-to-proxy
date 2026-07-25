@@ -10,9 +10,10 @@ All notable user-facing changes are recorded here. This project follows semantic
 
 ### Fixed
 
-- Usage is no longer dropped when app-server reports `thread/tokenUsage/updated` after `turn/completed`. Responses previously omitted `usage` entirely — including `completion_tokens_details.reasoning_tokens` — even though reasoning was streamed.
+- Usage is no longer dropped when app-server reports `thread/tokenUsage/updated` after `turn/completed`; the proxy consumes correlated notifications through the thread's `idle` lifecycle boundary. Responses previously omitted `usage` entirely — including `completion_tokens_details.reasoning_tokens` — even though reasoning was streamed.
 - Responses that end in `finish_reason: "tool_calls"` now report the usage app-server had already attributed to the suspended turn, emitted after the terminal chunk instead of before it.
 - Usage now covers every model request behind one response instead of only the most recent one. A turn that ran internal tools, retried, or compacted previously reported the final request alone, which under-reported prompt and completion tokens and could report zero reasoning tokens next to streamed reasoning.
+- Recovering usage after a turn completes can no longer fail that turn. An app-server that exits, or an activity queue that overflows, while the proxy waits for trailing usage now ends the wait and still reports the completed response and records its `previous_response_id` mapping, instead of returning an app-server error for work that had already succeeded.
 
 ### Changed
 

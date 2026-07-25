@@ -7,6 +7,10 @@ import {
   type PolicyRequirements,
 } from "../core/policy.js";
 import {
+  ZERO_TOKEN_USAGE,
+  type TokenUsageCounters,
+} from "../core/token-usage.js";
+import {
   bindingHash,
   type ContinuationCoordinator,
   type PendingToolCall,
@@ -33,6 +37,9 @@ const MAX_INGRESS_EVENTS = 1_024;
 
 /** Maximum approximate JSON bytes retained in one response's ingress queue. */
 const MAX_INGRESS_BYTES = 8 * 1024 * 1024;
+
+/** Maximum wait for terminal usage when app-server has no turn-idle boundary. */
+const TERMINAL_USAGE_GRACE_MS = 100;
 
 /** One arrival-ordered app-server notification or dynamic tool request. */
 type IngressEvent =
@@ -61,6 +68,19 @@ class IngressQueue {
   /** Reports whether no retained event is ready for consumption. */
   get empty(): boolean {
     return this.#ingress.length === 0;
+  }
+
+  /** Reports whether any retained event is a notification. */
+  get hasNotification(): boolean {
+    return this.#ingress.some(({ event }) => event.type === "notification");
+  }
+
+  /**
+   * Reports a terminal failure without throwing, for callers that must stop
+   * consuming ingress rather than fail the work already completed.
+   */
+  get failing(): boolean {
+    return Boolean(this.#transportError ?? this.#queueError);
   }
 
   /** Returns the next retained event without consuming it. */
@@ -142,19 +162,48 @@ class IngressQueue {
     return drained;
   }
 
-  /** Waits until ingress, failure, or abort can advance the consumer. */
-  async waitForActivity(signal: AbortSignal): Promise<void> {
-    await new Promise<void>((resolve) => {
-      this.#wake = resolve;
-      if (
-        this.#ingress.length ||
-        this.#queueError ||
-        this.#transportError ||
-        signal.aborted
-      )
-        resolve();
+  /**
+   * Waits until retained ingress, terminal failure, or abort can advance the
+   * consumer. `ready` selects which retained events count as progress, and
+   * `timeoutMs` bounds the wait; the result reports whether progress is
+   * possible rather than that the timeout elapsed.
+   */
+  async wait(
+    signal: AbortSignal,
+    {
+      ready = (): boolean => this.#ingress.length > 0,
+      timeoutMs,
+    }: {
+      ready?: () => boolean;
+      timeoutMs?: number;
+    } = {},
+  ): Promise<boolean> {
+    if (timeoutMs !== undefined && timeoutMs <= 0) return false;
+    return await new Promise<boolean>((resolve) => {
+      // Held in a cell because the timer is created after `finish` closes over it.
+      const pending: { timer?: NodeJS.Timeout } = {};
+      const settled = (): boolean =>
+        ready() ||
+        Boolean(this.#queueError ?? this.#transportError) ||
+        signal.aborted;
+      const finish = (progressed: boolean): void => {
+        // Only clear the shared wake slot if this waiter still owns it.
+        if (this.#wake === wake) this.#wake = undefined;
+        if (pending.timer) clearTimeout(pending.timer);
+        resolve(progressed);
+      };
+      const wake = (): void => {
+        if (settled()) finish(true);
+      };
+      this.#wake = wake;
+      if (settled()) {
+        finish(true);
+        return;
+      }
+      if (timeoutMs === undefined) return;
+      pending.timer = setTimeout(() => finish(false), timeoutMs);
+      pending.timer.unref();
     });
-    this.#wake = undefined;
   }
 
   /** Rejects every retained dynamic request during unsuspended cleanup. */
@@ -190,6 +239,12 @@ interface TurnHandle {
   suspended: boolean;
 }
 
+/** Setup output shared by ready and pending-tool continuation paths. */
+interface ContinuationSetup {
+  results: Array<{ call: PendingToolCall; content: string }>;
+  usageBaseline: TokenUsageCounters | undefined;
+}
+
 /** Runs or resumes a Codex thread and yields its normalized event stream. */
 export async function execute(
   request: ChatRequest,
@@ -205,6 +260,14 @@ export async function execute(
       return;
     }
     if (behavior === "ignore") return;
+    if (behavior === "lifecycle") {
+      // Thread lifecycle transitions describe the thread, not one turn, so they
+      // are correlated by thread alone and must bypass the turn-id filter below.
+      if (handle.threadId && record(params)?.threadId !== handle.threadId)
+        return;
+      queue.enqueue({ type: "notification", method, params });
+      return;
+    }
     // Notifications can arrive while thread/start or turn/start is still
     // resolving. Once both identifiers are established, discard unrelated work
     // before it consumes this request's bounded ingress budget.
@@ -232,7 +295,6 @@ export async function execute(
   options.rpc.on("notification", onNotification);
   options.rpc.once("close", onClose);
   let disposed = false;
-  const normalizer = new EventNormalizer();
   let continuationResults: Array<{ call: PendingToolCall; content: string }> =
     [];
   const binding: ThreadBinding = {
@@ -273,17 +335,22 @@ export async function execute(
     if (!handle.suspended) queue.rejectQueuedDynamicCalls();
   };
   options.signal.addEventListener("abort", onAbort, { once: true });
+  let usageBaseline: TokenUsageCounters | undefined;
   try {
     if (request.previousResponseId) {
-      continuationResults = await resumeContinuation(
+      const continuation = await resumeContinuation(
         request,
         options,
         binding,
         handle,
         onToolRequest,
       );
+      continuationResults = continuation.results;
+      usageBaseline = continuation.usageBaseline;
     } else {
       await startFreshThread(request, options, handle, onToolRequest);
+      // A thread this request created has provably consumed nothing yet.
+      usageBaseline = ZERO_TOKEN_USAGE;
     }
   } catch (error) {
     // Setup failures occur before HTTP headers, but still must release any
@@ -291,6 +358,9 @@ export async function execute(
     await cleanup();
     throw error;
   }
+  // Constructed only once the attribution boundary is known, so no notification
+  // can be normalized against a baseline this response did not begin from.
+  const normalizer = new EventNormalizer(usageBaseline);
 
   const events =
     (async function* streamExecution(): AsyncGenerator<NormalizedEvent> {
@@ -311,7 +381,7 @@ export async function execute(
               "server_error",
               "request_timeout",
             );
-          if (queue.empty) await queue.waitForActivity(options.signal);
+          if (queue.empty) await queue.wait(options.signal);
           queue.assertHealthy();
           if (queue.peek()?.type === "dynamic_tool") {
             // Let parallel app-server requests arriving in this event-loop turn
@@ -335,7 +405,7 @@ export async function execute(
               if (event.usage) pendingUsage = event.usage;
               else yield event;
             }
-            yield { finishReason: "tool_calls" };
+            pendingFinishReason = "tool_calls";
             handle.terminal = true;
             continue;
           }
@@ -362,14 +432,24 @@ export async function execute(
           }
         }
         if (!failed) {
-          // App-server streams usage separately from turn completion, so
-          // `thread/tokenUsage/updated` can follow the terminal notification on
-          // the wire. Let already-readable frames land, then consume whatever
-          // arrived instead of discarding exact usage with the terminal event.
-          await new Promise<void>((resolve) => setImmediate(resolve));
-          const late = collectLateUsage(queue, normalizer, handle);
+          // A completed turn ends at its thread's idle transition; a suspension
+          // never reaches one, so it settles for the first usage it can observe.
+          const late = await collectTerminalUsage(
+            queue,
+            normalizer,
+            handle,
+            options.signal,
+            handle.suspended ? "usage" : "idle",
+          );
           if (late) pendingUsage = late;
         }
+        // Usage is optional output. Persisting it for the next response is
+        // best-effort and must never fail a suspension that is already durable.
+        if (handle.suspended && !failed)
+          options.continuations.recordSuspendedUsage(
+            responseId,
+            normalizer.usageTotal(),
+          );
         if (
           !handle.suspended &&
           !failed &&
@@ -378,6 +458,7 @@ export async function execute(
             responseId,
             handle.threadId,
             binding,
+            normalizer.usageTotal(),
           )
         )
           throw new Error(
@@ -402,21 +483,60 @@ export async function execute(
   return { events, dispose: cleanup };
 }
 
-/** Consumes usage that arrived with or after the turn's terminal notification. */
-function collectLateUsage(
+/**
+ * Consumes notifications that follow the turn's terminal event until the
+ * response's boundary, the bounded grace period, or abort. The turn already
+ * succeeded here, so every terminal condition — including transport failure and
+ * ingress overflow — merely stops collection. Usage is optional output and must
+ * never retract a completed turn's frames or its continuation mapping.
+ */
+async function collectTerminalUsage(
   queue: IngressQueue,
   normalizer: EventNormalizer,
   handle: TurnHandle,
-): Usage | undefined {
+  signal: AbortSignal,
+  boundary: "idle" | "usage",
+): Promise<Usage | undefined> {
   let usage: Usage | undefined;
-  for (const event of queue.drainNotifications()) {
-    if (!matchesTurn(event.params, handle.threadId, handle.turnId)) continue;
-    for (const normalized of normalizer.normalize(event.method, event.params))
-      // Only usage is recovered here. Every other late event would have to
-      // follow the terminal frame this response has already committed to.
-      if (normalized.usage) usage = normalized.usage;
+  let idle = false;
+  const deadline = Date.now() + TERMINAL_USAGE_GRACE_MS;
+  const reached = (): boolean => (boundary === "idle" ? idle : Boolean(usage));
+  while (!signal.aborted && !queue.failing) {
+    for (const event of queue.drainNotifications()) {
+      if (
+        notificationBehavior(event.method) === "lifecycle" &&
+        isIdleThreadStatus(event.params, handle.threadId)
+      ) {
+        idle = true;
+        continue;
+      }
+      if (!matchesTurn(event.params, handle.threadId, handle.turnId)) continue;
+      for (const normalized of normalizer.normalize(event.method, event.params))
+        // Only usage is recovered here. Every other late event would have to
+        // follow the terminal frame this response has already committed to.
+        if (normalized.usage) usage = normalized.usage;
+    }
+    if (reached()) break;
+    const ready = (): boolean => queue.hasNotification;
+    if (
+      !(await queue.wait(signal, { ready, timeoutMs: deadline - Date.now() }))
+    )
+      break;
   }
   return usage;
+}
+
+/** Recognizes the authoritative idle boundary for one completed thread. */
+function isIdleThreadStatus(
+  value: unknown,
+  threadId: string | undefined,
+): boolean {
+  const params = record(value);
+  return Boolean(
+    params &&
+    params.threadId === threadId &&
+    record(params.status)?.type === "idle",
+  );
 }
 
 /** Captures and durably suspends the current dynamic-tool batch synchronously. */
@@ -482,7 +602,7 @@ async function resumeContinuation(
   binding: ThreadBinding,
   handle: TurnHandle,
   onToolRequest: (toolRequest: PendingToolCall) => void,
-): Promise<Array<{ call: PendingToolCall; content: string }>> {
+): Promise<ContinuationSetup> {
   const stored = options.continuations.store.get(request.previousResponseId!);
   if (!stored) continuationFailure(404, "unknown_previous_response_id");
   // Selecting a live suspension proves that this request is a continuation attempt.
@@ -533,7 +653,10 @@ async function resumeContinuation(
       content: results.get(call.callId)!,
     }));
     options.continuations.resolve(request.previousResponseId!, results);
-    return continuationResults;
+    return {
+      results: continuationResults,
+      usageBaseline: stored.usageTotal,
+    };
   }
 
   if (stored.state === "expired")
@@ -585,7 +708,7 @@ async function resumeContinuation(
   if (resumedThreadId !== handle.threadId)
     continuationFailure(409, "thread_not_resumable");
   await startTurn(request, options, handle);
-  return [];
+  return { results: [], usageBaseline: stored.usageTotal };
 }
 
 /** Starts one fresh durable thread and its initial turn. */
