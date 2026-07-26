@@ -130,6 +130,7 @@ export function createProxyServer(
       options.root,
       requirements,
       options.implicitToolContinuation,
+      options.usageGraceMs,
       log,
       requestId,
       url,
@@ -237,6 +238,7 @@ async function route(
   root: string,
   requirements: PolicyRequirements,
   implicitToolContinuation: boolean,
+  usageGraceMs: number,
   log: Logger,
   requestId: string,
   url: URL | undefined,
@@ -287,6 +289,7 @@ async function route(
       root,
       requirements,
       implicitToolContinuation,
+      usageGraceMs,
     });
     return;
   }

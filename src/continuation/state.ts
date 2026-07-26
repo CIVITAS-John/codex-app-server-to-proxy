@@ -443,16 +443,21 @@ export class ContinuationCoordinator {
   }
 
   /**
-   * Persists the final cumulative usage snapshot for a live suspension.
-   * The suspension mapping itself is already durable, so this best-effort
-   * update only improves the next response's attribution and never reports
-   * failure: a disposed generation or a mapping that already left
-   * `pending_tool` simply forgoes the baseline.
+   * Persists the exact cumulative boundary the continuation must subtract from.
+   * A suspension that observed no usage persists the boundary it started from,
+   * so the model requests behind the suspended tool calls are attributed by the
+   * continuation instead of being lost. The suspension mapping itself is
+   * already durable, so this best-effort update never reports failure: a
+   * disposed generation or a mapping that already left `pending_tool` simply
+   * forgoes the boundary.
    */
   recordSuspendedUsage(
     responseId: string,
     usageTotal: TokenUsageCounters | undefined,
   ): void {
+    // An all-zero boundary is a legal, meaningful value — a fresh thread that
+    // suspended before app-server attributed anything. Only the absent object
+    // may be skipped; never test a counter's value for truthiness here.
     if (this.#disposed || !usageTotal) return;
     const record = this.store.get(responseId);
     if (!record || record.state !== "pending_tool") return;
@@ -542,6 +547,8 @@ export class ContinuationCoordinator {
       threadId,
       state: "ready",
       ...binding,
+      // Object truthiness only: an all-zero boundary must persist like any
+      // other, or the next response would lose the requests behind it.
       ...(usageTotal ? { usageTotal } : {}),
     });
     return true;

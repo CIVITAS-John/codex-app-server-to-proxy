@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { test } from "vitest";
 import {
   EventNormalizer,
+  HANDLED_NOTIFICATION_METHODS,
   normalizeNotification,
   type Usage,
 } from "../../src/http/chat.js";
@@ -1055,6 +1056,99 @@ test("uses an authoritative baseline when the first observed update is coalesced
     prompt_tokens_details: { cached_tokens: 3 },
     completion_tokens_details: { reasoning_tokens: 4 },
   });
+});
+
+test("hands the next response a boundary even when nothing was attributed", () => {
+  const baseline = {
+    inputTokens: 100,
+    cachedInputTokens: 10,
+    outputTokens: 20,
+    reasoningOutputTokens: 10,
+    totalTokens: 120,
+  };
+  /** Builds one usage notification from its optional breakdowns. */
+  const usage = (
+    last: Record<string, number> | undefined,
+    total: Record<string, number>,
+  ) => ({
+    threadId: "thread",
+    turnId: "turn",
+    tokenUsage: {
+      ...(last ? { last } : {}),
+      total,
+      modelContextWindow: null,
+    },
+  });
+  const total = {
+    inputTokens: 130,
+    cachedInputTokens: 13,
+    cacheWriteInputTokens: 0,
+    outputTokens: 28,
+    reasoningOutputTokens: 14,
+    totalTokens: 158,
+  };
+  const last = {
+    inputTokens: 20,
+    cachedInputTokens: 1,
+    cacheWriteInputTokens: 0,
+    outputTokens: 3,
+    reasoningOutputTokens: 0,
+    totalTokens: 23,
+  };
+
+  // A response that observed nothing hands forward the boundary it started
+  // from, so the requests it could not report are attributed by its successor.
+  const unreported = new EventNormalizer(baseline);
+  assert.deepEqual(unreported.usageBoundary(), baseline);
+  assert.notEqual(unreported.usageBoundary(), baseline);
+
+  // A total whose delta was never emitted must not advance the boundary past
+  // tokens no response reported.
+  assert.deepEqual(
+    unreported.normalize("thread/tokenUsage/updated", usage(undefined, total)),
+    [],
+  );
+  assert.deepEqual(unreported.usageBoundary(), baseline);
+
+  // Once a delta is reported, the newest total becomes the next boundary.
+  unreported.normalize("thread/tokenUsage/updated", usage(last, total));
+  assert.deepEqual(unreported.usageBoundary(), {
+    inputTokens: 130,
+    cachedInputTokens: 13,
+    outputTokens: 28,
+    reasoningOutputTokens: 14,
+    totalTokens: 158,
+  });
+
+  // A prerelease mapping without a stored snapshot still has no boundary to
+  // offer, preserving the documented one-response last-request fallback.
+  assert.equal(new EventNormalizer().usageBoundary(), undefined);
+});
+
+test("internal raw-response usage is diagnosed rather than exposed", () => {
+  // `rawResponse/completed` carries exact per-request usage, but it is an
+  // internal-only per-request delta rather than a cumulative total, so it is
+  // deliberately excluded from the exposed surface instead of normalized.
+  assert.equal(
+    HANDLED_NOTIFICATION_METHODS.has("rawResponse/completed"),
+    false,
+  );
+  assert.deepEqual(
+    normalizeNotification("rawResponse/completed", {
+      threadId: "thread",
+      turnId: "turn",
+      responseId: "resp_1",
+      usage: {
+        inputTokens: 4,
+        cachedInputTokens: 0,
+        cacheWriteInputTokens: 0,
+        outputTokens: 2,
+        reasoningOutputTokens: 1,
+        totalTokens: 6,
+      },
+    }),
+    [],
+  );
 });
 
 test("backfills completed reasoning without duplicating streamed prefixes", () => {

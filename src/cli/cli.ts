@@ -43,6 +43,8 @@ Options:
   --tool-timeout <duration>     Dynamic tool deadline (default: 5m)
   --implicit-tool-continuation <true|false>
                                 Resolve tool results by tool_call_id (default: true)
+  --usage-grace <duration>      Wait for Codex usage after a turn's last frame,
+                                0 to disable (default: 100ms)
   --request-timeout <duration>  HTTP request deadline (default: 30s)
   --shutdown-timeout <duration> Graceful shutdown deadline (default: 10s)
   --body-limit <bytes>          Maximum request body (default: 1048576)

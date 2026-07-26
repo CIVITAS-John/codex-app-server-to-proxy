@@ -109,6 +109,11 @@ const NOTIFICATION_BEHAVIORS = new Map<string, NotificationBehavior>([
   ["item/reasoning/textDelta", "normalize"],
   ["item/started", "normalize"],
   ["item/completed", "normalize"],
+  // Internal-only usage for one upstream model response. It is a per-request
+  // delta rather than a cumulative total, so folding it into the subtraction
+  // model would require inferring whether the same tokens reappear in a later
+  // `thread/tokenUsage/updated.total`. Diagnosed, never exposed.
+  ["rawResponse/completed", "diagnose"],
   ["serverRequest/resolved", "ignore"],
   ["thread/status/changed", "lifecycle"],
   ["thread/tokenUsage/updated", "normalize"],
@@ -196,9 +201,18 @@ export class EventNormalizer {
     this.#usageBaseline = usageBaseline;
   }
 
-  /** Returns the newest complete cumulative total for continuation persistence. */
-  usageTotal(): TokenUsageCounters | undefined {
-    return this.#latestUsageTotal ? { ...this.#latestUsageTotal } : undefined;
+  /**
+   * Returns the exact cumulative counter the next response must subtract from:
+   * the newest total this response reported, or the boundary it started from
+   * when app-server attributed nothing to it. Both are exact app-server values,
+   * so a response that could report no usage still leaves its successor a
+   * boundary that covers the model requests it could not report. A reset keeps the
+   * newest total, which remains the correct boundary even once subtraction has
+   * been abandoned for the rest of this response.
+   */
+  usageBoundary(): TokenUsageCounters | undefined {
+    const boundary = this.#latestUsageTotal ?? this.#usageBaseline;
+    return boundary ? { ...boundary } : undefined;
   }
 
   /** Converts one authoritative dynamic request to a function tool call. */
@@ -268,11 +282,13 @@ export class EventNormalizer {
     if (method === "thread/tokenUsage/updated") {
       const tokenUsage = record(params.tokenUsage);
       const total = tokenUsageCounters(tokenUsage?.total);
-      // The cumulative total is the next response's baseline whether or not
-      // this notification also carries an attributable `last` breakdown.
-      if (total) this.#latestUsageTotal = total;
       const last = record(tokenUsage?.last);
+      // A total whose delta this response never emitted must not advance the
+      // boundary, or the tokens between the old and new totals would be
+      // reported by no response at all. `last` is required by the protocol, so
+      // this only pins the invariant against a malformed notification.
       if (!last) return [];
+      if (total) this.#latestUsageTotal = total;
       return [{ usage: this.#turnUsage(last, total) }];
     }
     if (method === "error") {

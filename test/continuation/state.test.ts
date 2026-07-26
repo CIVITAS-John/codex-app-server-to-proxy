@@ -327,6 +327,22 @@ test("pending tool_call_id values implicitly select exactly one response", async
       totalTokens: 2,
     });
     assert.equal(coordinator.store.get("response_absent"), undefined);
+    // An all-zero boundary is meaningful, not absent: a fresh thread that
+    // suspends before any attribution must still persist where it started.
+    coordinator.recordSuspendedUsage("response_1", {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      reasoningOutputTokens: 0,
+      totalTokens: 0,
+    });
+    assert.deepEqual(coordinator.store.get("response_1")?.usageTotal, {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      reasoningOutputTokens: 0,
+      totalTokens: 0,
+    });
     assert.equal(coordinator.findPendingResponse(["call_1"]), "response_1");
     assert.throws(
       () => coordinator.findPendingResponse(["foreign"]),

@@ -38,9 +38,6 @@ const MAX_INGRESS_EVENTS = 1_024;
 /** Maximum approximate JSON bytes retained in one response's ingress queue. */
 const MAX_INGRESS_BYTES = 8 * 1024 * 1024;
 
-/** Maximum wait for terminal usage when app-server has no turn-idle boundary. */
-const TERMINAL_USAGE_GRACE_MS = 100;
-
 /** One arrival-ordered app-server notification or dynamic tool request. */
 type IngressEvent =
   | { type: "notification"; method: string; params: unknown }
@@ -223,6 +220,7 @@ export interface ChatHandlerOptions {
   root: string;
   requirements: PolicyRequirements;
   implicitToolContinuation: boolean;
+  usageGraceMs: number;
 }
 
 /** One eagerly prepared execution with cleanup independent of generator startup. */
@@ -431,7 +429,11 @@ export async function execute(
             }
           }
         }
-        if (!failed) {
+        // A suspension whose batch already carried usage has nothing left to
+        // wait for: app-server attributed the model request behind this batch
+        // before the handoff, and any later update belongs to the next
+        // response's boundary rather than to this one.
+        if (!failed && !(handle.suspended && pendingUsage)) {
           // A completed turn ends at its thread's idle transition; a suspension
           // never reaches one, so it settles for the first usage it can observe.
           const late = await collectTerminalUsage(
@@ -440,15 +442,17 @@ export async function execute(
             handle,
             options.signal,
             handle.suspended ? "usage" : "idle",
+            options.usageGraceMs,
           );
           if (late) pendingUsage = late;
         }
-        // Usage is optional output. Persisting it for the next response is
-        // best-effort and must never fail a suspension that is already durable.
+        // Usage is optional output. Persisting the boundary for the next
+        // response is best-effort and must never fail a suspension that is
+        // already durable.
         if (handle.suspended && !failed)
           options.continuations.recordSuspendedUsage(
             responseId,
-            normalizer.usageTotal(),
+            normalizer.usageBoundary(),
           );
         if (
           !handle.suspended &&
@@ -458,7 +462,7 @@ export async function execute(
             responseId,
             handle.threadId,
             binding,
-            normalizer.usageTotal(),
+            normalizer.usageBoundary(),
           )
         )
           throw new Error(
@@ -488,7 +492,8 @@ export async function execute(
  * response's boundary, the bounded grace period, or abort. The turn already
  * succeeded here, so every terminal condition — including transport failure and
  * ingress overflow — merely stops collection. Usage is optional output and must
- * never retract a completed turn's frames or its continuation mapping.
+ * never retract a completed turn's frames or its continuation mapping. A
+ * `graceMs` of zero drains what has already arrived without waiting at all.
  */
 async function collectTerminalUsage(
   queue: IngressQueue,
@@ -496,10 +501,11 @@ async function collectTerminalUsage(
   handle: TurnHandle,
   signal: AbortSignal,
   boundary: "idle" | "usage",
+  graceMs: number,
 ): Promise<Usage | undefined> {
   let usage: Usage | undefined;
   let idle = false;
-  const deadline = Date.now() + TERMINAL_USAGE_GRACE_MS;
+  const deadline = Date.now() + graceMs;
   const reached = (): boolean => (boundary === "idle" ? idle : Boolean(usage));
   while (!signal.aborted && !queue.failing) {
     for (const event of queue.drainNotifications()) {

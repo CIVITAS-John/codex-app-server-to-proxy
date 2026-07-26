@@ -61,7 +61,9 @@ Complete contract and schema work offline.
 - Usage semantics:
     - whether app-server exposes cumulative or per-turn usage and how to derive per-response values without estimation;
     - the protocol reference is internally inconsistent: its overview says `turn/completed` carries token usage while its event reference streams usage separately via thread-scoped `thread/tokenUsage/updated`;
-    - `thread/resume` replays persisted usage notifications before any new turn, so the attribution rule must ignore restored pre-turn usage.
+    - `thread/resume` replays persisted usage notifications before any new turn, so the attribution rule must ignore restored pre-turn usage;
+    - whether app-server attributes a model request before the `item/tool/call` request that suspends the turn is still unverified, and the pinned reference documents the dynamic-tool lifecycle with no usage event at all. Attribution is now deliberately order-independent, so answering this is an optimization — it decides which response reports the tokens, not whether they are reported.
+    - `rawResponse/completed` exists and carries exact per-upstream-response usage, but is internal-only, undocumented, and a per-request delta; it is deliberately left diagnostic-only. See `plans/04-chat-streaming.md` for the revisit gate.
 - Exact mismatch errors for continuation model, reasoning effort, tool set, cwd, and policy.
 - Exact HTTP 409 error code/body for a concurrent request targeting a busy Codex thread. Same-thread requests are rejected immediately; v1 does not queue them.
 - Exact OpenAI-shaped status/code mapping for unknown, expired, superseded, and non-resumable `previous_response_id` values, including which failures are retryable.

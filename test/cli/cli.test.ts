@@ -93,6 +93,8 @@ test("CLI recovery uses the documented bounded retry schedule", () => {
   );
   assert.match(usage, /per-root under ~\/\.codex-openai-proxy/);
   assert.equal(usage.includes("<root>/.codex-openai-proxy"), false);
+  // Every configurable limit must be discoverable from the help output.
+  assert.match(usage, /--usage-grace <duration>/);
 });
 
 test("CLI help and unsafe configuration are handled in-process", async () => {

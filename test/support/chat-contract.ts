@@ -352,8 +352,10 @@ export function registerChatContract(
           "dynamic tool name did not match the contract fixture",
         );
         // A suspended turn reports whatever app-server had already attributed to
-        // it. Whether that record exists yet depends on app-server, but a
-        // reported one must describe the model request behind these calls.
+        // it. Whether that record exists yet depends on app-server, and omitting
+        // it loses nothing: the suspension hands its boundary to the
+        // continuation, whose usage is asserted below. A reported one must still
+        // describe the model request behind these calls.
         if (firstBody.usage) assertUsage(firstBody.usage);
         const callArguments = parseJson<Record<string, unknown>>(
           call?.function.arguments ?? "",
@@ -401,6 +403,13 @@ export function registerChatContract(
           "tool-result completion omitted usage for a completed turn",
         );
         assertUsage(secondUsage);
+        // Boundary carry-forward guarantees the continuation accounts for the
+        // suspended request too, so a response that follows a tool call can
+        // never report an empty span.
+        assert.ok(
+          (secondUsage?.total_tokens ?? 0) > 0,
+          "tool-result completion reported no tokens for a completed turn",
+        );
         assert.ok(
           backend!.modelCalls() - callsBefore <= MAX_TOOL_MODEL_CALLS,
           `tool round trip exceeded ${MAX_TOOL_MODEL_CALLS} model calls`,

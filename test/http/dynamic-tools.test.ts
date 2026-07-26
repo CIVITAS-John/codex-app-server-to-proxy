@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { test, vi } from "vitest";
 import { ContinuationCoordinator } from "../../src/continuation/state.js";
 import {
   protocolNotification,
   protocolResponse,
-  protocolServerRequest,
   protocolThread,
   protocolThreadResumeResponse,
   protocolThreadStartResponse,
@@ -18,12 +19,27 @@ import {
 import { withTempDir } from "../support/temp.js";
 import {
   createFakeTransport,
+  completeTurn,
+  sendTokenUsage,
+  suspendWithTools,
+  tokenUsageFixture,
   type FakeTransport,
+  type ToolUsageWireOrder,
 } from "../support/transport.js";
+
+/** Standard usage object as the acceptance tests observe it. */
+interface CompletionUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  prompt_tokens_details?: { cached_tokens?: number };
+  completion_tokens_details?: { reasoning_tokens?: number };
+}
 
 /** Minimal parsed Chat Completions response used by the acceptance tests. */
 interface CompletionBody {
   id: string;
+  usage?: CompletionUsage;
   choices: Array<{
     finish_reason: string;
     message: {
@@ -44,6 +60,15 @@ interface CapturedResult {
   text: string;
 }
 
+/** Token-usage reporting scripted by one fake app-server run. */
+interface ToolAppServerUsage {
+  /** Wire position of the suspending turn's usage, if it reports any. */
+  suspendOrder?: ToolUsageWireOrder;
+  /** Whether turns that run to completion report usage and an idle boundary. */
+  onCompletion?: boolean;
+  reasoningOutputTokens?: number;
+}
+
 /** Scriptable fake app-server that exercises fragmented frames and parallel tools. */
 class ToolAppServer {
   readonly transport: FakeTransport;
@@ -52,17 +77,38 @@ class ToolAppServer {
   #thread = "thr_dynamic_tools";
   #turn = 0;
   #toolRequestIds = new Set([901, 902]);
+  // Counts the model requests app-server has already attributed to the thread,
+  // so a later turn's cumulative `total` covers every earlier request.
+  #priorRequests = 0;
 
   constructor(
     private readonly toolsOnFirstTurn = true,
     private readonly failResume = false,
     private readonly resumedThreadId = "thr_dynamic_tools",
     private readonly internalBeforeTools = false,
+    private readonly usage: ToolAppServerUsage = {},
   ) {
     this.transport = createFakeTransport({
       fragmentCount: 3,
       onMessage: (message) => this.#receive(message),
     });
+  }
+
+  /**
+   * Emits usage covering every model request the thread has already run. Tests
+   * call it once the suspended response has been read, which is the only
+   * deterministic way to place usage strictly after a response ends.
+   */
+  sendUsage(turnId = "turn_1"): void {
+    sendTokenUsage(
+      this.transport.send,
+      this.#thread,
+      turnId,
+      tokenUsageFixture(
+        this.usage.reasoningOutputTokens ?? 0,
+        Math.max(this.#priorRequests - 1, 0),
+      ),
+    );
   }
 
   /** Sends one JSON-RPC value through the fragmented fake transport. */
@@ -150,34 +196,34 @@ class ToolAppServer {
             }),
           );
           // Deliberately issue call_b first; the proxy must preserve arrival order.
-          this.#send(
-            protocolServerRequest({
-              id: 902,
-              method: "item/tool/call",
-              params: {
-                threadId: this.#thread,
-                turnId,
+          const suspendOrder = this.usage.suspendOrder ?? "never";
+          suspendWithTools(
+            this.transport.send,
+            this.#thread,
+            turnId,
+            [
+              {
+                id: 902,
                 callId: "call_b",
                 tool: "second",
-                namespace: null,
                 arguments: { fragment: "b" },
               },
-            }),
-          );
-          this.#send(
-            protocolServerRequest({
-              id: 901,
-              method: "item/tool/call",
-              params: {
-                threadId: this.#thread,
-                turnId,
+              {
+                id: 901,
                 callId: "call_a",
                 tool: "first",
-                namespace: null,
                 arguments: { fragment: "a" },
               },
-            }),
+            ],
+            {
+              usageOrder: suspendOrder,
+              reasoningOutputTokens: this.usage.reasoningOutputTokens ?? 0,
+              priorRequests: this.#priorRequests,
+            },
           );
+          // The model request behind these calls ran whether or not app-server
+          // attributed it, so every later cumulative total must include it.
+          this.#priorRequests += 1;
         } else this.#complete(turnId, "continued");
       }
       return;
@@ -222,6 +268,16 @@ class ToolAppServer {
         },
       }),
     );
+    if (this.usage.onCompletion) {
+      // A completed turn reaches its idle boundary, so the shared builder emits
+      // usage, completion, and the lifecycle transition in wire order.
+      completeTurn(this.transport.send, this.#thread, turnId, {
+        reasoningOutputTokens: this.usage.reasoningOutputTokens ?? 0,
+        priorRequests: this.#priorRequests,
+      });
+      this.#priorRequests += 1;
+      return;
+    }
     this.#send(
       protocolNotification({
         method: "turn/completed",
@@ -239,11 +295,13 @@ async function startProxy(
   stateDir: string,
   fake: ToolAppServer,
   toolTimeoutMs = 5_000,
+  usageGraceMs?: number,
 ) {
   const { origin, proxy } = await startProxyWithTransport(fake.transport.rpc, {
     root: process.cwd(),
     stateDir,
     toolTimeoutMs,
+    usageGraceMs,
   });
   return { origin, proxy };
 }
@@ -763,6 +821,225 @@ test("implicit tool continuation must repeat the original x_codex policy", async
       );
     } finally {
       refreshPending.mockRestore();
+      await proxy.close();
+    }
+  }, "codex-dynamic-tools-");
+});
+
+/** Declares both scripted tools for one suspension-usage request. */
+const USAGE_TOOLS = [
+  { type: "function", function: { name: "first", parameters: {} } },
+  { type: "function", function: { name: "second", parameters: {} } },
+];
+
+/** Reads the persisted continuation records without disturbing the live store. */
+function persistedRecords(stateDir: string): Array<Record<string, unknown>> {
+  const state = JSON.parse(
+    readFileSync(join(stateDir, "continuations.json"), "utf8"),
+  ) as { records?: Array<Record<string, unknown>> };
+  return state.records ?? [];
+}
+
+/** Runs one suspension and its tool-result continuation, returning both bodies. */
+async function suspendAndContinue(
+  origin: string,
+  beforeContinuation?: () => void,
+): Promise<{ first: CompletionBody; continued: CompletionBody }> {
+  const firstResponse = await postChatCompletion(origin, {
+    model: "m",
+    tools: USAGE_TOOLS,
+    messages: [{ role: "user", content: "use tools" }],
+  });
+  assert.equal(firstResponse.status, 200);
+  const first = (await firstResponse.json()) as CompletionBody;
+  assert.equal(first.choices[0]!.finish_reason, "tool_calls");
+  beforeContinuation?.();
+  const continuedResponse = await postChatCompletion(origin, {
+    model: "m",
+    tools: USAGE_TOOLS,
+    previous_response_id: first.id,
+    messages: toolTranscript(first.choices[0]!.message.tool_calls),
+  });
+  assert.equal(continuedResponse.status, 200);
+  return {
+    first,
+    continued: (await continuedResponse.json()) as CompletionBody,
+  };
+}
+
+test("a suspension app-server never attributed carries its boundary to the continuation", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ToolAppServer(true, false, undefined, false, {
+      suspendOrder: "never",
+      onCompletion: true,
+      reasoningOutputTokens: 3,
+    });
+    // Nothing can arrive inside a zero grace, so the suspended response is
+    // guaranteed to reach the client with no usage of its own.
+    const { origin, proxy } = await startProxy(directory, fake, 5_000, 0);
+    try {
+      const { first, continued } = await suspendAndContinue(origin);
+      assert.equal(first.usage, undefined);
+      // The continuation subtracts from the boundary the suspension started
+      // from, so it reports both model requests rather than only its own.
+      assert.deepEqual(continued.usage, {
+        prompt_tokens: 8,
+        completion_tokens: 10,
+        total_tokens: 18,
+        prompt_tokens_details: { cached_tokens: 0 },
+        completion_tokens_details: { reasoning_tokens: 6 },
+      });
+    } finally {
+      await proxy.close();
+    }
+  }, "codex-dynamic-tools-");
+});
+
+test("a suspension on a fresh thread persists its exact all-zero boundary", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ToolAppServer(true, false, undefined, false, {
+      suspendOrder: "never",
+      onCompletion: true,
+    });
+    const { origin, proxy } = await startProxy(directory, fake, 5_000, 0);
+    try {
+      const response = await postChatCompletion(origin, {
+        model: "m",
+        tools: USAGE_TOOLS,
+        messages: [{ role: "user", content: "use tools" }],
+      });
+      assert.equal(response.status, 200);
+      const first = (await response.json()) as CompletionBody;
+      const record = persistedRecords(directory).find(
+        (candidate) => candidate.responseId === first.id,
+      );
+      assert.equal(record?.state, "pending_tool");
+      // Zero is a meaningful boundary, not an absent one: a fresh thread had
+      // provably consumed nothing when this response began.
+      assert.deepEqual(record?.usageTotal, {
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        reasoningOutputTokens: 0,
+        totalTokens: 0,
+      });
+    } finally {
+      await proxy.close();
+    }
+  }, "codex-dynamic-tools-");
+});
+
+test("usage captured before a tool call is reported without waiting out the grace", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ToolAppServer(true, false, undefined, false, {
+      suspendOrder: "before_tool_call",
+      onCompletion: true,
+      reasoningOutputTokens: 3,
+    });
+    // A grace this long would dominate the measurement if it were still paid.
+    const { origin, proxy } = await startProxy(directory, fake, 5_000, 5_000);
+    try {
+      const started = Date.now();
+      const response = await postChatCompletion(origin, {
+        model: "m",
+        tools: USAGE_TOOLS,
+        messages: [{ role: "user", content: "use tools" }],
+      });
+      assert.equal(response.status, 200);
+      const first = (await response.json()) as CompletionBody;
+      assert.equal(first.choices[0]!.finish_reason, "tool_calls");
+      assert.equal(first.usage?.completion_tokens_details?.reasoning_tokens, 3);
+      assert.ok(
+        Date.now() - started < 1_000,
+        "a suspension that already captured usage must not wait for more",
+      );
+    } finally {
+      await proxy.close();
+    }
+  }, "codex-dynamic-tools-");
+});
+
+test("usage arriving inside the grace is attributed to the suspended response", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ToolAppServer(true, false, undefined, false, {
+      suspendOrder: "within_grace",
+      onCompletion: true,
+      reasoningOutputTokens: 3,
+    });
+    const { origin, proxy } = await startProxy(directory, fake, 5_000, 500);
+    try {
+      const { first, continued } = await suspendAndContinue(origin);
+      assert.deepEqual(first.usage, {
+        prompt_tokens: 4,
+        completion_tokens: 5,
+        total_tokens: 9,
+        prompt_tokens_details: { cached_tokens: 0 },
+        completion_tokens_details: { reasoning_tokens: 3 },
+      });
+      // The client already counted the first round, so the continuation counts
+      // from the suspension boundary rather than repeating it.
+      assert.deepEqual(continued.usage, {
+        prompt_tokens: 4,
+        completion_tokens: 5,
+        total_tokens: 9,
+        prompt_tokens_details: { cached_tokens: 0 },
+        completion_tokens_details: { reasoning_tokens: 3 },
+      });
+    } finally {
+      await proxy.close();
+    }
+  }, "codex-dynamic-tools-");
+});
+
+test("usage observed after a suspended response ends never advances its boundary", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ToolAppServer(true, false, undefined, false, {
+      suspendOrder: "never",
+      onCompletion: true,
+      reasoningOutputTokens: 3,
+    });
+    const { origin, proxy } = await startProxy(directory, fake, 5_000, 0);
+    try {
+      const { first, continued } = await suspendAndContinue(origin, () => {
+        // Delivered once the suspended response has demonstrably ended, so no
+        // observer may fold it into a boundary no response reported.
+        fake.sendUsage();
+      });
+      assert.equal(first.usage, undefined);
+      assert.deepEqual(continued.usage, {
+        prompt_tokens: 8,
+        completion_tokens: 10,
+        total_tokens: 18,
+        prompt_tokens_details: { cached_tokens: 0 },
+        completion_tokens_details: { reasoning_tokens: 6 },
+      });
+    } finally {
+      await proxy.close();
+    }
+  }, "codex-dynamic-tools-");
+});
+
+test("a suspension that is never continued omits usage rather than estimating it", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ToolAppServer(true, false, undefined, false, {
+      suspendOrder: "never",
+      onCompletion: true,
+      reasoningOutputTokens: 3,
+    });
+    const { origin, proxy } = await startProxy(directory, fake, 5_000, 0);
+    try {
+      const response = await postChatCompletion(origin, {
+        model: "m",
+        tools: USAGE_TOOLS,
+        messages: [{ role: "user", content: "use tools" }],
+      });
+      assert.equal(response.status, 200);
+      const first = (await response.json()) as CompletionBody;
+      assert.equal(first.choices[0]!.finish_reason, "tool_calls");
+      // No channel remains for tokens app-server had not attributed, so the
+      // response reports none instead of guessing.
+      assert.equal(first.usage, undefined);
+    } finally {
       await proxy.close();
     }
   }, "codex-dynamic-tools-");

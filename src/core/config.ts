@@ -7,6 +7,12 @@ import { canonicalizeRoot, isPathWithinRoot } from "./policy.js";
 /** Default maximum accepted HTTP request-body size. */
 export const DEFAULT_BODY_LIMIT = 1024 * 1024;
 
+/** Default wait for exact usage after a turn's last frame. */
+export const DEFAULT_USAGE_GRACE_MS = 100;
+
+/** Highest accepted terminal-usage grace, well below the request deadline. */
+const MAX_USAGE_GRACE_MS = 5_000;
+
 /** User-facing description of the root-namespaced state default. */
 export const DEFAULT_STATE_DIR_DESCRIPTION =
   "per-root under ~/.codex-openai-proxy";
@@ -23,6 +29,7 @@ export interface ServeOptions {
   codexPath: string;
   toolTimeoutMs: number;
   implicitToolContinuation: boolean;
+  usageGraceMs: number;
   requestTimeoutMs: number;
   shutdownTimeoutMs: number;
   bodyLimitBytes: number;
@@ -76,20 +83,29 @@ function integer(
 /** Highest delay Node timers schedule without overflowing to immediate firing. */
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 
-/** Parses a positive duration CLI option into milliseconds. */
-function duration(name: string, value: string): number {
+/**
+ * Parses a bounded duration CLI option into milliseconds. Options that treat
+ * zero as "do not wait" opt in through `minimumMs`; every other option keeps
+ * the positive-duration requirement.
+ */
+function duration(
+  name: string,
+  value: string,
+  {
+    minimumMs = 1,
+    maximumMs = MAX_TIMER_DELAY_MS,
+  }: { minimumMs?: number; maximumMs?: number } = {},
+): number {
   const match = /^(\d+)(ms|s|m)?$/.exec(value);
   if (!match)
     throw new Error(`${name} must be a duration such as 500ms, 30s, or 5m.`);
   const amount = Number(match[1]);
   const multiplier = match[2] === "m" ? 60_000 : match[2] === "s" ? 1_000 : 1;
   const result = amount * multiplier;
-  if (
-    !Number.isSafeInteger(result) ||
-    result < 1 ||
-    result > MAX_TIMER_DELAY_MS
-  )
-    throw new Error(`${name} must be between 1ms and ${MAX_TIMER_DELAY_MS}ms.`);
+  if (!Number.isSafeInteger(result) || result < minimumMs || result > maximumMs)
+    throw new Error(
+      `${name} must be between ${minimumMs}ms and ${maximumMs}ms.`,
+    );
   return result;
 }
 
@@ -191,6 +207,7 @@ export function parseServeOptions(
     "--codex-path",
     "--tool-timeout",
     "--implicit-tool-continuation",
+    "--usage-grace",
     "--request-timeout",
     "--shutdown-timeout",
     "--body-limit",
@@ -222,6 +239,11 @@ export function parseServeOptions(
     implicitToolContinuation: boolean(
       "--implicit-tool-continuation",
       values.get("--implicit-tool-continuation") ?? "true",
+    ),
+    usageGraceMs: duration(
+      "--usage-grace",
+      values.get("--usage-grace") ?? `${DEFAULT_USAGE_GRACE_MS}ms`,
+      { minimumMs: 0, maximumMs: MAX_USAGE_GRACE_MS },
     ),
     requestTimeoutMs: duration(
       "--request-timeout",

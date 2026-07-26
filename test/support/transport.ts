@@ -1,8 +1,13 @@
 import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
 import { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
+import type { JsonValue } from "../../protocol/generated/typescript/serde_json/JsonValue.js";
 import type { ThreadTokenUsage } from "../../protocol/generated/typescript/v2/ThreadTokenUsage.js";
-import { protocolNotification, protocolTurn } from "./protocol-fixtures.js";
+import {
+  protocolNotification,
+  protocolServerRequest,
+  protocolTurn,
+} from "./protocol-fixtures.js";
 
 /** Sends one parsed JSON-RPC value from a fake app-server. */
 export type FakeTransportSend = (value: unknown) => void;
@@ -136,6 +141,76 @@ export type UsageWireOrder =
 
 /** Milliseconds by which `later_read` defers usage past the completion frame. */
 const LATER_READ_DELAY_MS = 5;
+
+/**
+ * Wire position of a suspending turn's usage relative to its dynamic tool
+ * request. Whether app-server attributes the model request before
+ * `item/tool/call` is unverified, so every position must produce exactly-once
+ * attribution across the suspended response and its continuation.
+ */
+export type ToolUsageWireOrder = "before_tool_call" | "within_grace" | "never";
+
+/** One dynamic tool request scripted by a suspending turn. */
+export interface ScriptedToolCall {
+  id: number;
+  callId: string;
+  tool: string;
+  arguments: JsonValue;
+}
+
+/** Usage ordering selected by one scripted dynamic-tool suspension. */
+export interface SuspendWithToolsOptions {
+  reasoningOutputTokens?: number;
+  priorRequests?: number;
+  usageOrder?: ToolUsageWireOrder;
+}
+
+/**
+ * Emits typed dynamic tool requests with usage in the selected wire position.
+ * There is deliberately no "after the response ends" position: a timer racing
+ * the grace window would be nondeterministic, so a test that needs late usage
+ * sends it explicitly once it has read the suspended response.
+ */
+export function suspendWithTools(
+  send: FakeTransportSend,
+  threadId: string,
+  turnId: string,
+  calls: readonly ScriptedToolCall[],
+  {
+    reasoningOutputTokens = 0,
+    priorRequests = 0,
+    usageOrder = "never",
+  }: SuspendWithToolsOptions = {},
+): void {
+  const usage = (): void =>
+    sendTokenUsage(
+      send,
+      threadId,
+      turnId,
+      tokenUsageFixture(reasoningOutputTokens, priorRequests),
+    );
+  if (usageOrder === "before_tool_call") usage();
+  for (const call of calls)
+    send(
+      protocolServerRequest({
+        id: call.id,
+        method: "item/tool/call",
+        params: {
+          threadId,
+          turnId,
+          callId: call.callId,
+          tool: call.tool,
+          namespace: null,
+          arguments: call.arguments,
+        },
+      }),
+    );
+  if (usageOrder !== "within_grace") return;
+  // A suspension has no idle boundary, so usage delivered on a later transport
+  // read must still land inside the response's terminal-usage grace.
+  const timer = setTimeout(usage, LATER_READ_DELAY_MS);
+  timer.unref();
+}
 
 /** Final usage and wire ordering selected by one scripted turn completion. */
 export interface CompleteTurnOptions {
