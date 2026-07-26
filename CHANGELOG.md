@@ -2,6 +2,16 @@
 
 All notable user-facing changes are recorded here. This project follows semantic versioning once a version is published.
 
+## 0.1.0-rc.8 — July 26, 2026
+
+### Added
+
+- A request's final message no longer must have role user. A trailing user message stays the turn input; any other trailing message is injected as history and the model continues from it — the continuation-style shape OpenAI-compatible clients such as the Vercel AI SDK send, previously rejected with `invalid_request`.
+
+### Fixed
+
+- An `item/tool/call` that app-server dispatches after its turn was interrupted at a captured batch is now answered with the same "Tool results are delivered via continuation" error as the captured calls, instead of "Dynamic tool correlation mismatch", so app-server stderr after a tool-call response no longer reports what reads as a proxy routing failure.
+
 ## 0.1.0-rc.7 — July 26, 2026
 
 ### Added

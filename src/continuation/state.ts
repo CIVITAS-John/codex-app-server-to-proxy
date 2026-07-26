@@ -172,6 +172,14 @@ export class ResponseStore {
     return updated;
   }
 
+  /** Reports whether a live pending-tool batch is recorded for one thread. */
+  hasPendingToolForThread(threadId: string): boolean {
+    for (const record of this.#records.values())
+      if (record.threadId === threadId && record.state === "pending_tool")
+        return true;
+    return false;
+  }
+
   /** Finds durable records containing every requested dynamic-tool call ID. */
   findByCallIds(callIds: readonly string[]): ResponseRecord[] {
     const requested = new Set(callIds);
@@ -382,10 +390,20 @@ export class ContinuationCoordinator {
     }
     const owner = this.#toolOwners.get(params.threadId);
     if (!owner) {
-      this.rpc.respondError(request.id, {
-        code: -32602,
-        message: "Dynamic tool correlation mismatch",
-      });
+      // App-server can dispatch a late call after its turn was interrupted at
+      // the captured batch — the interrupt cancels the call server-side. The
+      // thread's durable pending record identifies that expected case, and the
+      // continuation answer keeps app-server diagnostics consistent with the
+      // batch instead of reporting a proxy routing failure.
+      this.rpc.respondError(
+        request.id,
+        this.store.hasPendingToolForThread(params.threadId)
+          ? {
+              code: -32003,
+              message: "Tool results are delivered via continuation",
+            }
+          : { code: -32602, message: "Dynamic tool correlation mismatch" },
+      );
       return;
     }
     owner({

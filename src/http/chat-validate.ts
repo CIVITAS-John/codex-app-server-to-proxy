@@ -108,12 +108,6 @@ export function validateRequest(
       "previous_response_id",
     );
   if (
-    !body.previous_response_id &&
-    !hasToolResults &&
-    messages.at(-1)?.role !== "user"
-  )
-    invalid("The final message must have role user.", "messages");
-  if (
     body.previous_response_id &&
     !["user", "tool"].includes(messages.at(-1)!.role)
   )

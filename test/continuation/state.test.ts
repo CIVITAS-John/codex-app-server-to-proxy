@@ -710,6 +710,58 @@ test("dynamic tool callbacks route to exactly one thread owner", async () => {
   }, "codex-proxy-state-");
 });
 
+test("ownerless dynamic tool calls answer per the thread's pending batch", async () => {
+  await withTempDir(async (directory) => {
+    const output = new PassThrough();
+    const written: Buffer[] = [];
+    output.on("data", (chunk: Buffer) => written.push(chunk));
+    const rpc = new JsonRpcTransport(new PassThrough(), output);
+    const coordinator = new ContinuationCoordinator(
+      new ResponseStore(directory),
+      rpc,
+    );
+    coordinator.recordPendingTool("response_1", "thread_1", binding, [
+      { callId: "call_1", name: "lookup", arguments: "{}" },
+    ]);
+    const base = { turnId: "turn_1", tool: "lookup", arguments: {} };
+
+    // The batch's turn was interrupted and its lease released, so a late
+    // app-server dispatch finds no owner but a durable pending record.
+    rpc.emit("request", {
+      id: 1,
+      method: "item/tool/call",
+      params: { ...base, threadId: "thread_1", callId: "call_2" },
+    });
+    // A thread with no pending batch remains a genuine correlation failure.
+    rpc.emit("request", {
+      id: 2,
+      method: "item/tool/call",
+      params: { ...base, threadId: "thread_other", callId: "call_3" },
+    });
+
+    const frames = Buffer.concat(written)
+      .toString("utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((frame) => JSON.parse(frame) as Record<string, unknown>);
+    assert.deepEqual(frames, [
+      {
+        id: 1,
+        error: {
+          code: -32003,
+          message: "Tool results are delivered via continuation",
+        },
+      },
+      {
+        id: 2,
+        error: { code: -32602, message: "Dynamic tool correlation mismatch" },
+      },
+    ]);
+    coordinator.dispose();
+    rpc.close();
+  }, "codex-proxy-state-");
+});
+
 test("thread ownership is acquired and released by one atomic lease", async () => {
   await withTempDir(async (directory) => {
     const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());

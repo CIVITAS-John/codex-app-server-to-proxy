@@ -714,10 +714,6 @@ export function registerChatContract(
         for (const body of [
           {
             model: CONTRACT_MODEL,
-            messages: [{ role: "assistant", content: "not a user turn" }],
-          },
-          {
-            model: CONTRACT_MODEL,
             messages: [{ role: "tool", content: "x" }],
           },
           {

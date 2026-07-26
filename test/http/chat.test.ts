@@ -1720,6 +1720,49 @@ test("strips replayed assistant reasoning before injecting visible history", asy
   });
 });
 
+test("a fresh request may end with an assistant message to continue", async () => {
+  await withChatServer(async (origin, _proxy, useTransport) => {
+    const fake = policyCapturingAppServer();
+    useTransport(fake);
+    const response = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        messages: [
+          { role: "user", content: "classify this conversation" },
+          { role: "assistant", content: "The conversation is" },
+        ],
+      }),
+    });
+    assert.equal(response.status, 200);
+    // The trailing assistant message joins the injected history and the turn
+    // starts with no new input, so the model continues its own prior output.
+    const injected = fake.messages.find(
+      (message) => message.method === "thread/inject_items",
+    );
+    assert.deepEqual(injected?.params, {
+      threadId: "thr_policy",
+      items: [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "classify this conversation" }],
+        },
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "The conversation is" }],
+        },
+      ],
+    });
+    const turn = fake.messages.find(
+      (message) => message.method === "turn/start",
+    );
+    assert.deepEqual((turn?.params as { input: unknown[] }).input, []);
+  });
+});
+
 test("skips replayed tool-only assistant messages during history injection", async () => {
   await withChatServer(async (origin, _proxy, useTransport) => {
     const fake = policyCapturingAppServer();
@@ -2019,10 +2062,6 @@ test("names the unsupported message fields it rejects", async () => {
 test("rejects ambiguous history and unknown continuation before app-server work", async () => {
   await withChatServer(async (origin) => {
     for (const body of [
-      {
-        model: "m",
-        messages: [{ role: "assistant", content: "not a user turn" }],
-      },
       { model: "m", messages: [{ role: "tool", content: "x" }] },
       {
         model: "m",

@@ -856,8 +856,14 @@ async function startFreshThread(
   );
   handle.threadId = requiredId(started.thread, "thread/start.thread");
   acquireThread(handle, options, onToolRequest);
-  const prior = request.messages
-    .slice(0, -1)
+  // Only a trailing user message becomes new turn input. Any other trailing
+  // message joins the injected history and the empty-input turn asks the model
+  // to continue from it. Tool messages never reach this fresh-thread path:
+  // they always resolve to a continuation or fail before execution.
+  const last = request.messages.at(-1)!;
+  const history =
+    last.role === "user" ? request.messages.slice(0, -1) : request.messages;
+  const prior = history
     .map(toHistoryItem)
     .filter((item): item is Record<string, unknown> => item !== undefined);
   if (prior.length)
@@ -890,13 +896,14 @@ async function startTurn(
   handle: TurnHandle,
 ): Promise<void> {
   const last = request.messages.at(-1)!;
-  // A continuation whose final message is a tool result carries no new user
-  // input: the injected function_call_output pairs already in thread history
-  // are the model-visible input, and app-server accepts an empty input list.
+  // Only a trailing user message is new turn input. A tool result's injected
+  // function_call_output pairs, and any other trailing message injected as
+  // history, are already the model-visible input; app-server accepts an empty
+  // input list for both.
   const input =
-    last.role === "tool"
-      ? []
-      : [{ type: "text", text: last.content!, text_elements: [] }];
+    last.role === "user"
+      ? [{ type: "text", text: last.content!, text_elements: [] }]
+      : [];
   const turn = asRecord(
     await options.rpc.request(
       "turn/start",
