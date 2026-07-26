@@ -2,11 +2,10 @@
 
 All notable user-facing changes are recorded here. This project follows semantic versioning once a version is published.
 
-## 0.1.0-rc.6 — Unreleased
+## 0.1.0-rc.7 — July 26, 2026
 
 ### Added
 
-- Replayed assistant messages may carry `reasoning_content` in place of the nonstandard `reasoning` response field. OpenAI-compatible clients such as the Vercel AI SDK write reasoning back under that name, which previously failed the request with `invalid_request` on the replayed message. Both fields are response-only, accepted only as a string on an assistant message, and discarded before history injection.
 - Pending tool calls survive proxy restarts. The continuation record now persists each call's name and exact arguments, so tool results — matched explicitly by `previous_response_id` or implicitly by `tool_call_id` — continue the thread after a restart instead of failing with 410 `expired_tool_continuation`.
 
 ### Fixed
@@ -16,14 +15,27 @@ All notable user-facing changes are recorded here. This project follows semantic
 - A failed dynamic-tool interrupt no longer returns tool calls that cannot be continued. The pending batch is invalidated and the response fails instead.
 - Tool-result injection now persists a non-replayable tombstone before mutating thread history. State-write failures cannot leave an already-applied batch available for duplicate injection, and optional usage/final-state bookkeeping failures no longer retract completed work.
 - Duplicate app-server dynamic call IDs now fail before the batch is persisted or exposed.
-- Usage is no longer dropped when app-server reports `thread/tokenUsage/updated` after `turn/completed`; the proxy consumes correlated notifications through the thread's `idle` lifecycle boundary. Responses previously omitted `usage` entirely — including `completion_tokens_details.reasoning_tokens` — even though reasoning was streamed.
-- Usage now covers every model request behind one response instead of only the most recent one. A turn that ran internal tools, retried, or compacted previously reported the final request alone, which under-reported prompt and completion tokens and could report zero reasoning tokens next to streamed reasoning.
-- Recovering usage after a turn ends can no longer fail that turn. An app-server that exits, or an activity queue that overflows, while the proxy waits for trailing usage now ends the wait and still reports the completed response and records its `previous_response_id` mapping, instead of returning an app-server error for work that had already succeeded.
 
 ### Changed
 
 - **Breaking:** Dynamic tool calls end their Codex turn immediately (`turn/interrupt` at the captured batch). Tool results are delivered by injecting `function_call`/`function_call_output` pairs into the persisted thread and starting a new turn, which behaves identically with or without an intervening restart. The turn is no longer resumed in place; observable Codex-side turn boundaries differ, but the Chat Completions request/response flow is unchanged.
 - **Breaking:** `--tool-timeout` was removed. No turn is held open awaiting tool results, so no tool deadline exists; pending tool records expire with the normal continuation retention. The flag's secondary role as the app-server startup and first-run login deadline is now a fixed 5 minutes. Legacy pending-tool records written by earlier prereleases expire once on first load.
+
+## 0.1.0-rc.6 — July 25, 2026
+
+### Added
+
+- Replayed assistant messages may carry `reasoning_content` in place of the nonstandard `reasoning` response field. OpenAI-compatible clients such as the Vercel AI SDK write reasoning back under that name, which previously failed the request with `invalid_request` on the replayed message. Both fields are response-only, accepted only as a string on an assistant message, and discarded before history injection.
+
+### Fixed
+
+- Usage is no longer dropped when app-server reports `thread/tokenUsage/updated` after `turn/completed`; the proxy consumes correlated notifications through the thread's `idle` lifecycle boundary. Responses previously omitted `usage` entirely — including `completion_tokens_details.reasoning_tokens` — even though reasoning was streamed.
+- Responses that end in `finish_reason: "tool_calls"` now report the usage app-server had already attributed to the suspended turn, emitted after the terminal chunk instead of before it. (Superseded in 0.1.0-rc.7 by ending the turn at the tool-call boundary.)
+- Usage now covers every model request behind one response instead of only the most recent one. A turn that ran internal tools, retried, or compacted previously reported the final request alone, which under-reported prompt and completion tokens and could report zero reasoning tokens next to streamed reasoning.
+- Recovering usage after a turn completes can no longer fail that turn. An app-server that exits, or an activity queue that overflows, while the proxy waits for trailing usage now ends the wait and still reports the completed response and records its `previous_response_id` mapping, instead of returning an app-server error for work that had already succeeded.
+
+### Changed
+
 - Rejecting a message with unsupported fields now names them (`This message contains unsupported fields: annotations, refusal.`) instead of reporting only the message index.
 
 ## 0.1.0-rc.5 — July 24, 2026
