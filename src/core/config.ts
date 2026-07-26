@@ -8,16 +8,12 @@ import { canonicalizeRoot, isPathWithinRoot } from "./policy.js";
 export const DEFAULT_BODY_LIMIT = 1024 * 1024;
 
 /**
- * Default wait for exact usage after a turn's last frame. Live app-server
- * (codex 0.145.0) flushes a parked turn's usage about ten seconds after it
- * issues the dynamic tool call, so the default clears that flush with margin;
- * the wait ends at the first correlated usage, so responses whose usage
- * arrives promptly pay only that.
+ * Deadline for app-server spawn and, on first run, the interactive login.
+ * Previously tunable as `--tool-timeout`, which no longer exists: dynamic
+ * tool calls end their turn immediately, so no tool deadline remains and the
+ * former flag's secondary role gets this fixed default instead.
  */
-export const DEFAULT_USAGE_GRACE_MS = 12_000;
-
-/** Highest accepted terminal-usage grace, at the default request deadline. */
-const MAX_USAGE_GRACE_MS = 30_000;
+export const DEFAULT_STARTUP_TIMEOUT_MS = 5 * 60_000;
 
 /** User-facing description of the root-namespaced state default. */
 export const DEFAULT_STATE_DIR_DESCRIPTION =
@@ -33,9 +29,7 @@ export interface ServeOptions {
   port: number;
   root: string;
   codexPath: string;
-  toolTimeoutMs: number;
   implicitToolContinuation: boolean;
-  usageGraceMs: number;
   requestTimeoutMs: number;
   shutdownTimeoutMs: number;
   bodyLimitBytes: number;
@@ -211,9 +205,7 @@ export function parseServeOptions(
     "--port",
     "--root",
     "--codex-path",
-    "--tool-timeout",
     "--implicit-tool-continuation",
-    "--usage-grace",
     "--request-timeout",
     "--shutdown-timeout",
     "--body-limit",
@@ -238,18 +230,9 @@ export function parseServeOptions(
     port: integer("--port", values.get("--port") ?? "8787", 0, 65_535),
     root,
     codexPath: values.get("--codex-path") ?? "codex",
-    toolTimeoutMs: duration(
-      "--tool-timeout",
-      values.get("--tool-timeout") ?? "5m",
-    ),
     implicitToolContinuation: boolean(
       "--implicit-tool-continuation",
       values.get("--implicit-tool-continuation") ?? "true",
-    ),
-    usageGraceMs: duration(
-      "--usage-grace",
-      values.get("--usage-grace") ?? `${DEFAULT_USAGE_GRACE_MS}ms`,
-      { minimumMs: 0, maximumMs: MAX_USAGE_GRACE_MS },
     ),
     requestTimeoutMs: duration(
       "--request-timeout",

@@ -34,6 +34,22 @@
           "uniqueItems": true,
           "items": { "type": "string" }
         },
+        "pendingCalls": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "$comment": "pendingCalls.callId values must be unique and exactly match callIds; runtime validation enforces this cross-field invariant.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["callId", "name", "arguments"],
+            "properties": {
+              "callId": { "type": "string", "minLength": 1 },
+              "name": { "type": "string", "minLength": 1 },
+              "arguments": { "type": "string" }
+            }
+          }
+        },
         "usageTotal": {
           "type": "object",
           "additionalProperties": false,

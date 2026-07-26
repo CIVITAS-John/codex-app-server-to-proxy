@@ -33,6 +33,7 @@ import { withTempDir } from "../support/temp.js";
 import {
   completeTurn,
   createFakeTransport,
+  interruptTurn,
   sendTokenUsage,
   tokenUsageFixture,
   type FakeTransport,
@@ -121,15 +122,6 @@ function fakeAppServer({
               },
             }),
           );
-          if (usageAfterTool) {
-            // Deliver usage on a later transport read after suspension begins.
-            const timer = setTimeout(
-              () =>
-                sendTokenUsage(send, thread, "turn_test", tokenUsageFixture(3)),
-              5,
-            );
-            timer.unref();
-          }
           return;
         }
         // A turn that runs internal activity spans several model requests, each
@@ -156,6 +148,13 @@ function fakeAppServer({
       } else if (message.method === "turn/interrupt") {
         onInterrupt();
         send(protocolResponse("turn/interrupt", message.id, {}));
+        // A tool-call turn ends at its interrupt: live app-server flushes the
+        // turn's usage and idle boundary within milliseconds of the ack.
+        if (requestTool)
+          interruptTurn(send, thread, "turn_test", {
+            reasoningOutputTokens: 3,
+            includeUsage: usageAfterTool,
+          });
       }
     },
   });
@@ -209,6 +208,14 @@ function policyCapturingAppServer(): {
               threadId: "thr_policy",
               turn: protocolTurn("turn_policy", "completed"),
             },
+          }),
+        );
+        // The idle boundary ends the terminal-usage wait immediately, exactly
+        // as live app-server does at every turn end.
+        send(
+          protocolNotification({
+            method: "thread/status/changed",
+            params: { threadId: "thr_policy", status: { type: "idle" } },
           }),
         );
       }
@@ -440,6 +447,12 @@ function recoverableAppServer(): {
             },
           }),
         );
+        send(
+          protocolNotification({
+            method: "thread/status/changed",
+            params: { threadId: "thr_recover", status: { type: "idle" } },
+          }),
+        );
       } else if (message.method === "turn/interrupt") {
         interrupted = true;
         send(protocolResponse("turn/interrupt", message.id, {}));
@@ -497,6 +510,12 @@ function unknownEventAppServer(secret: string): FakeTransport {
             },
           }),
         );
+        send(
+          protocolNotification({
+            method: "thread/status/changed",
+            params: { threadId: "thr_unknown", status: { type: "idle" } },
+          }),
+        );
       }
     },
   });
@@ -540,6 +559,12 @@ function backpressureAppServer(): FakeTransport {
               threadId: "thr_slow",
               turn: protocolTurn("turn_slow", "completed"),
             },
+          }),
+        );
+        send(
+          protocolNotification({
+            method: "thread/status/changed",
+            params: { threadId: "thr_slow", status: { type: "idle" } },
           }),
         );
       } else if (message.method === "turn/interrupt")
@@ -618,6 +643,15 @@ function foreignFloodAppServer(): FakeTransport {
                   },
                 }),
               );
+              send(
+                protocolNotification({
+                  method: "thread/status/changed",
+                  params: {
+                    threadId: active.threadId,
+                    status: { type: "idle" },
+                  },
+                }),
+              );
             }
           });
       } else if (message.method === "turn/interrupt")
@@ -647,9 +681,6 @@ async function withChatServer(
       root: await realpath("."),
       stateDir,
       requestTimeoutMs,
-      // Offline fakes deliver usage within milliseconds or never; the product
-      // default grace would stall every usage-less suspension for its length.
-      usageGraceMs: 250,
       log: logger,
     });
     proxy = started.proxy;
@@ -1228,21 +1259,15 @@ test("allocates unique call indexes across internal, dynamic, continuation, and 
     item: { id: "internal", type: "commandExecution", command: "pwd" },
   });
   const dynamic = normalizer.dynamicToolCall({
-    request: { id: 1, method: "item/tool/call", params: {} },
     callId: "dynamic",
     name: "lookup",
-    arguments: { id: 1 },
-    threadId: "thread",
-    turnId: "turn",
+    arguments: '{"id":1}',
   });
   const result = normalizer.dynamicToolResult(
     {
-      request: { id: 2, method: "item/tool/call", params: {} },
       callId: "continued",
       name: "weather",
-      arguments: { city: "Chicago" },
-      threadId: "thread",
-      turnId: "turn",
+      arguments: '{"city":"Chicago"}',
     },
     "sunny",
   );
@@ -2356,7 +2381,7 @@ test("dynamic correlation failure rejects every captured responder", async () =>
   });
 });
 
-test("suspension persistence failure rejects every captured responder", async () => {
+test("pending-record persistence failure rejects every captured responder", async () => {
   await withTempDir(async (directory) => {
     await withChatServer(
       async (origin, _proxy, useTransport) => {
@@ -2414,9 +2439,6 @@ test("request policies map exactly, bind continuations, and honor managed denial
       const started = await startProxyWithTransport(fake.rpc, {
         root,
         stateDir: join(directory, "state"),
-        // This fake reports neither usage nor an idle boundary, so the product
-        // default grace would stall every completed turn for its full length.
-        usageGraceMs: 250,
       });
       proxy = started.proxy;
       const origin = started.origin;
@@ -2771,8 +2793,6 @@ test("refreshing managed requirements on an unchanged transport takes effect", a
       const started = await startProxyWithTransport(fake.rpc, {
         root,
         stateDir: join(directory, "state"),
-        // Same idle-less fake as above: avoid paying the full default grace.
-        usageGraceMs: 250,
         requirements: {
           ...UNRESTRICTED_POLICY_REQUIREMENTS,
           allowedSandboxModes: ["read-only"],

@@ -7,7 +7,7 @@ import {
   tokenUsageCounters,
   type TokenUsageCounters,
 } from "../core/token-usage.js";
-import type { PendingToolCall } from "../continuation/state.js";
+import type { StoredToolCall } from "../continuation/state.js";
 import { HttpError } from "./errors.js";
 
 /** Standard token usage, with details present only when app-server reports them. */
@@ -215,23 +215,22 @@ export class EventNormalizer {
     return boundary ? { ...boundary } : undefined;
   }
 
-  /** Converts one authoritative dynamic request to a function tool call. */
-  dynamicToolCall(call: PendingToolCall): NormalizedEvent {
-    const argumentsJson = JSON.stringify(call.arguments ?? {});
+  /** Converts one authoritative dynamic call to a function tool call. */
+  dynamicToolCall(call: StoredToolCall): NormalizedEvent {
     const publicCall = this.#allocateToolCall(
       call.callId,
       call.name,
-      argumentsJson,
+      call.arguments,
     );
     return { delta: { tool_calls: [publicCall] } };
   }
 
   /** Emits an accepted dynamic result together with its matching call. */
-  dynamicToolResult(call: PendingToolCall, content: string): NormalizedEvent {
+  dynamicToolResult(call: StoredToolCall, content: string): NormalizedEvent {
     const publicCall = this.#allocateToolCall(
       call.callId,
       call.name,
-      JSON.stringify(call.arguments ?? {}),
+      call.arguments,
     );
     return {
       delta: {

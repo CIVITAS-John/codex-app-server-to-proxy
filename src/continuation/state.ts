@@ -42,6 +42,14 @@ export interface ThreadBinding {
   policyHash: string;
 }
 
+/** Durable metadata for one dynamic tool call awaiting its client result. */
+export interface StoredToolCall {
+  callId: string;
+  name: string;
+  /** JSON-stringified arguments, byte-identical to what the response emitted. */
+  arguments: string;
+}
+
 /** One opaque response-to-thread record persisted by the proxy. */
 export interface ResponseRecord extends ThreadBinding {
   /** Marks records written after reasoning effort became an exact binding. */
@@ -54,6 +62,12 @@ export interface ResponseRecord extends ThreadBinding {
   createdAt: number;
   expiresAt: number;
   callIds?: string[];
+  /**
+   * Full call metadata for a `pending_tool` record. The continuation rebuilds
+   * the `function_call`/`function_call_output` pairs it injects from this, so
+   * a pending record survives proxy restarts with nothing process-local.
+   */
+  pendingCalls?: StoredToolCall[];
   /** Latest exact cumulative app-server total at this response boundary. */
   usageTotal?: TokenUsageCounters;
 }
@@ -123,8 +137,14 @@ export class ResponseStore {
       expiresAt: now + this.retentionMs,
     };
     this.#mutateAndSave(() => {
+      // Superseding pending_tool here is defense in depth behind the durable
+      // pre-injection replay guard: no completed continuation may leave an
+      // older pending record selectable for the same thread.
       for (const prior of this.#records.values()) {
-        if (prior.threadId === record.threadId && prior.state === "ready")
+        if (
+          prior.threadId === record.threadId &&
+          (prior.state === "ready" || prior.state === "pending_tool")
+        )
           prior.state = "superseded";
       }
       this.#records.set(stored.responseId, stored);
@@ -178,9 +198,12 @@ export class ResponseStore {
       for (const record of records)
         if (isResponseRecord(record))
           this.#records.set(record.responseId, { ...record });
-      // A responder cannot survive process restart; retain only its safe tombstone.
+      // Legacy pending records predate persisted call metadata and relied on a
+      // process-local responder, so only their safe tombstone can survive.
+      // Records carrying pendingCalls are fully durable and load unchanged.
       for (const record of this.#records.values())
-        if (record.state === "pending_tool") record.state = "expired";
+        if (record.state === "pending_tool" && !record.pendingCalls?.length)
+          record.state = "expired";
       this.#prune(Date.now());
       this.#save();
     } catch {
@@ -273,7 +296,7 @@ function hardenExistingStateFile(path: string): void {
   }
 }
 
-/** In-memory responder for one suspended app-server dynamic tool call. */
+/** One in-flight app-server dynamic tool call within an active turn's batch. */
 export interface PendingToolCall {
   request: ServerRequest;
   callId: string;
@@ -283,12 +306,14 @@ export interface PendingToolCall {
   turnId: string;
 }
 
-/** Coordinates durable mappings, thread ownership, and ephemeral tool responders. */
+/** Exclusive ownership of one thread and its dynamic-tool callback route. */
+export interface ThreadLease {
+  readonly threadId: string;
+  release(): void;
+}
+
+/** Coordinates durable mappings, thread ownership, and tool-call routing. */
 export class ContinuationCoordinator {
-  readonly #pending = new Map<
-    string,
-    { calls: PendingToolCall[]; timer: NodeJS.Timeout }
-  >();
   readonly #busy = new Set<string>();
   readonly #toolOwners = new Map<string, (request: PendingToolCall) => void>();
   #disposed = false;
@@ -296,7 +321,6 @@ export class ContinuationCoordinator {
   constructor(
     readonly store: ResponseStore,
     private readonly rpc: JsonRpcTransport,
-    private readonly toolTimeoutMs: number,
   ) {
     this.rpc.on("request", this.#routeToolRequest);
     this.rpc.once("close", this.#detachRouter);
@@ -319,12 +343,18 @@ export class ContinuationCoordinator {
     }
   }
 
-  /** Expires a suspension without letting lifecycle cleanup fail on disk errors. */
-  #expireBestEffort(responseId: string): void {
+  /** Applies nonessential record bookkeeping without failing completed work. */
+  #updateBestEffort(
+    responseId: string,
+    expectedState: ResponseRecord["state"],
+    patch: Partial<ResponseRecord>,
+  ): void {
     try {
-      this.store.update(responseId, { state: "expired" });
+      const record = this.store.get(responseId);
+      if (!record || record.state !== expectedState) return;
+      this.store.update(responseId, patch);
     } catch {
-      // Restart turns a stale pending-tool record into the same expired tombstone.
+      // The caller has already completed the operation this bookkeeping describes.
     }
   }
 
@@ -368,129 +398,119 @@ export class ContinuationCoordinator {
     });
   };
 
-  /** Installs the sole dynamic-tool callback owner for a claimed thread. */
-  setToolOwner(
+  /**
+   * Atomically claims a thread and installs its sole dynamic-tool callback
+   * owner. The returned lease is the only authority that can release both.
+   */
+  acquireThread(
     threadId: string,
     owner: (request: PendingToolCall) => void,
-  ): boolean {
+  ): ThreadLease | undefined {
     if (this.#disposed)
       throw new Error("Continuation coordinator is disposed.");
-    if (this.#toolOwners.has(threadId)) return false;
-    this.#toolOwners.set(threadId, owner);
-    return true;
-  }
-
-  /** Removes a dynamic-tool callback owner if it is still the expected owner. */
-  clearToolOwner(
-    threadId: string,
-    owner: (request: PendingToolCall) => void,
-  ): void {
-    if (this.#toolOwners.get(threadId) === owner)
-      this.#toolOwners.delete(threadId);
-  }
-
-  /** Claims exclusive use of a thread, returning false rather than queueing. */
-  claim(threadId: string): boolean {
-    if (this.#busy.has(threadId)) return false;
+    if (this.#busy.has(threadId) || this.#toolOwners.has(threadId))
+      return undefined;
     this.#busy.add(threadId);
-    return true;
+    this.#toolOwners.set(threadId, owner);
+    let released = false;
+    return {
+      threadId,
+      release: (): void => {
+        if (released) return;
+        released = true;
+        // Disposal may have already cleared both structures. Otherwise only
+        // the lease's exact callback can release this ownership generation.
+        if (this.#toolOwners.get(threadId) !== owner) return;
+        this.#toolOwners.delete(threadId);
+        this.#busy.delete(threadId);
+      },
+    };
   }
 
-  /** Releases exclusive use unless a suspended tool call still owns the thread. */
-  release(threadId: string): void {
-    if (
-      ![...this.#pending.values()].some(
-        (entry) => entry.calls[0]?.threadId === threadId,
-      )
-    )
-      this.#busy.delete(threadId);
-  }
-
-  /** Persists and keeps the responder for a dynamic-tool suspension. */
-  suspend(
+  /** Durably records an interrupted turn's tool batch awaiting client results. */
+  recordPendingTool(
     responseId: string,
+    threadId: string,
     binding: ThreadBinding,
-    calls: PendingToolCall[],
+    calls: StoredToolCall[],
   ): void {
     if (this.#disposed)
       throw new Error("Continuation coordinator is disposed.");
-    const threadId = calls[0]!.threadId;
-    this.#toolOwners.delete(threadId);
+    const callIds = calls.map((call) => call.callId);
+    if (calls.length === 0 || new Set(callIds).size !== callIds.length)
+      throw new Error(
+        "Pending dynamic tool call IDs must be nonempty and unique.",
+      );
     this.store.put({
       responseId,
       threadId,
       state: "pending_tool",
       ...binding,
-      callIds: calls.map((call) => call.callId),
+      callIds,
+      pendingCalls: calls,
     });
-    const timer = setTimeout(() => {
-      for (const call of calls) {
-        try {
-          this.rpc.respondError(call.request.id, {
-            code: -32002,
-            message: "Dynamic tool result timed out",
-          });
-        } catch {
-          // Transport failure must not escape a timer callback.
-        }
-      }
-      this.#pending.delete(responseId);
-      this.#busy.delete(threadId);
-      this.#expireBestEffort(responseId);
-    }, this.toolTimeoutMs);
-    timer.unref();
-    this.#pending.set(responseId, { calls, timer });
   }
 
   /**
    * Persists the exact cumulative boundary the continuation must subtract from.
-   * A suspension that observed no usage persists the boundary it started from,
-   * so the model requests behind the suspended tool calls are attributed by the
-   * continuation instead of being lost. The suspension mapping itself is
+   * A tool-call response that observed no usage persists the boundary it
+   * started from, so the model requests behind the tool calls are attributed
+   * by the continuation instead of being lost. The pending mapping itself is
    * already durable, so this best-effort update never reports failure: a
    * disposed generation or a mapping that already left `pending_tool` simply
    * forgoes the boundary.
    */
-  recordSuspendedUsage(
+  recordPendingUsage(
     responseId: string,
     usageTotal: TokenUsageCounters | undefined,
   ): void {
     // An all-zero boundary is a legal, meaningful value — a fresh thread that
-    // suspended before app-server attributed anything. Only the absent object
+    // parked before app-server attributed anything. Only the absent object
     // may be skipped; never test a counter's value for truthiness here.
     if (this.#disposed || !usageTotal) return;
+    this.#updateBestEffort(responseId, "pending_tool", { usageTotal });
+  }
+
+  /**
+   * Durably makes a pending batch non-replayable before injection. Losing the
+   * result to a crash between this write and injection is safer than allowing
+   * an unknowable or completed injection to be repeated.
+   */
+  protectPendingFromReplay(responseId: string): void {
     const record = this.store.get(responseId);
-    if (!record || record.state !== "pending_tool") return;
-    this.store.update(responseId, { usageTotal });
+    if (!record || record.state !== "pending_tool")
+      throw new Error(
+        "Pending dynamic tool continuation is no longer available.",
+      );
+    if (!this.store.update(responseId, { state: "expired" }))
+      throw new Error(
+        "Pending dynamic tool continuation could not be protected.",
+      );
   }
 
-  /** Returns the live suspension, distinguishing restart tombstones from unknown IDs. */
-  pending(responseId: string): PendingToolCall[] | undefined {
-    return this.#pending.get(responseId)?.calls;
+  /** Records successful injection without weakening the durable replay guard. */
+  recordPendingConsumed(responseId: string): void {
+    this.#updateBestEffort(responseId, "expired", { state: "superseded" });
   }
 
-  /** Restarts the deadline for one live suspension selected by a request. */
-  refreshPending(responseId: string): boolean {
-    const entry = this.#pending.get(responseId);
-    if (!entry) return false;
-    entry.timer.refresh();
-    return true;
-  }
-
-  /** Resolves live pending tool IDs to exactly one suspended response. */
+  /** Resolves stored pending tool IDs to exactly one unexpired response. */
   findPendingResponse(callIds: readonly string[]): string {
     const requested = new Set(callIds);
     if (requested.size !== callIds.length)
       throw toolLookupFailure(400, "duplicate_tool_call_id");
-    const matches = [...this.#pending.entries()].filter(([, entry]) =>
-      [...requested].every((id) =>
-        entry.calls.some((call) => call.callId === id),
-      ),
+    // findByCallIds does not apply expiry; check expiresAt explicitly so a
+    // stale record surfaces as the 410 tombstone rather than a live match.
+    const now = Date.now();
+    const candidates = this.store.findByCallIds(callIds);
+    const matches = candidates.filter(
+      (record) => record.state === "pending_tool" && record.expiresAt > now,
     );
     if (matches.length === 0) {
-      const tombstones = this.store
-        .findByCallIds(callIds)
-        .filter((record) => record.state === "expired");
+      const tombstones = candidates.filter(
+        (record) =>
+          record.state === "expired" ||
+          (record.state === "pending_tool" && record.expiresAt <= now),
+      );
       if (tombstones.length === 1)
         throw toolLookupFailure(410, "expired_tool_continuation");
       if (tombstones.length > 1)
@@ -499,39 +519,7 @@ export class ContinuationCoordinator {
     }
     if (matches.length > 1)
       throw toolLookupFailure(409, "ambiguous_tool_call_id");
-    return matches[0]![0];
-  }
-
-  /** Answers pending calls in deterministic call order and consumes the suspension. */
-  resolve(
-    responseId: string,
-    results: Map<string, string>,
-  ): PendingToolCall[] | undefined {
-    const entry = this.#pending.get(responseId);
-    if (!entry) return undefined;
-    const threadId = entry.calls[0]!.threadId;
-    // Consume before writing any response so a partial transport failure cannot
-    // leave a timerless suspension that may replay already-written results.
-    this.#pending.delete(responseId);
-    clearTimeout(entry.timer);
-    try {
-      for (const call of entry.calls) {
-        this.rpc.respond(call.request.id, {
-          contentItems: [
-            { type: "inputText", text: results.get(call.callId)! },
-          ],
-          success: true,
-        });
-      }
-    } catch (error) {
-      // Some earlier responses may already be on the wire. Expire the whole
-      // batch and release ownership; retrying it could duplicate those results.
-      this.#busy.delete(threadId);
-      this.store.update(responseId, { state: "expired" });
-      throw error;
-    }
-    this.store.update(responseId, { state: "superseded" });
-    return entry.calls;
+    return matches[0]!.responseId;
   }
 
   /** Records a completed response only while this transport generation is current. */
@@ -554,20 +542,14 @@ export class ContinuationCoordinator {
     return true;
   }
 
-  /** Cancels ephemeral responders and detaches routing before transport replacement. */
+  /** Detaches routing and ownership before transport replacement. */
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
     // Keep the router installed in fail-closed mode until the transport closes.
+    // Pending tool records are durable and need no per-responder cleanup.
     this.#toolOwners.clear();
     this.#busy.clear();
-    for (const [responseId, entry] of this.#pending) {
-      clearTimeout(entry.timer);
-      for (const call of entry.calls)
-        this.#failRequestReplaced(call.request.id);
-      this.#expireBestEffort(responseId);
-    }
-    this.#pending.clear();
   }
 }
 
@@ -588,6 +570,7 @@ function isResponseRecord(value: unknown): value is ResponseRecord {
     "createdAt",
     "expiresAt",
     "callIds",
+    "pendingCalls",
     "usageTotal",
   ]);
   const validStates = new Set([
@@ -600,7 +583,37 @@ function isResponseRecord(value: unknown): value is ResponseRecord {
   const validHash = (hash: unknown): hash is string =>
     typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash);
   const callIds = record.callIds;
+  const pendingCalls = record.pendingCalls;
+  const isStoredToolCall = (value: unknown): value is StoredToolCall => {
+    const call = asRecord(value);
+    return (
+      call !== undefined &&
+      Object.keys(call).every((key) =>
+        ["callId", "name", "arguments"].includes(key),
+      ) &&
+      typeof call.callId === "string" &&
+      call.callId.length > 0 &&
+      typeof call.name === "string" &&
+      call.name.length > 0 &&
+      typeof call.arguments === "string"
+    );
+  };
+  // pendingCalls must agree with callIds so the implicit call-ID lookup and
+  // the injected pairs can never disagree about which calls are pending.
+  const pendingCallsValid =
+    pendingCalls === undefined ||
+    (Array.isArray(pendingCalls) &&
+      pendingCalls.length > 0 &&
+      pendingCalls.every((call) => isStoredToolCall(call)) &&
+      Array.isArray(callIds) &&
+      pendingCalls.length === callIds.length &&
+      new Set(pendingCalls.map((call) => (call as StoredToolCall).callId))
+        .size === pendingCalls.length &&
+      pendingCalls.every((call) =>
+        (callIds as string[]).includes((call as StoredToolCall).callId),
+      ));
   return (
+    pendingCallsValid &&
     Object.keys(record).every((key) => allowedKeys.has(key)) &&
     typeof record.responseId === "string" &&
     record.responseId.length > 0 &&

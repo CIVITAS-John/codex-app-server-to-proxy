@@ -15,7 +15,7 @@ This directory is the source of truth for product decisions, implementation stat
     - The current unversioned proxy home is a reviewed `0.145.0` compatibility decision. A future Codex pin must prove its cache files are compatible or adopt an explicit versioned-home or migration decision before release.
 - Use persisted Codex threads behind the additive `previous_response_id` continuation field.
 - Support text, exposed reasoning, tool calls, tool results, and token usage streaming.
-- Support client-defined dynamic tools across multiple HTTP requests. Keep the app-server tool request pending for the short client round trip, as with a locally executed tool.
+- Support client-defined dynamic tools across multiple HTTP requests. Interrupt the turn at the tool batch and deliver later results by injecting call/output pairs into the persisted thread (decision reversed 2026-07-26; see plans/05).
 - Restrict request working directories to the configured root or its descendants. The root defaults to the proxy's launch directory.
 - Default to a no-environment `disabled` sandbox, and support explicit `read-only`, `workspace-write`, and `danger-full-access` selections.
 - Expose each web-search mode the pinned app-server can enforce per request and reject the others.
@@ -74,15 +74,15 @@ No remote CI, live, npm publication, provenance, or stable-promotion check is cl
 - Supplying `previous_response_id` requires continuation.
     - The proxy must validate the local mapping and confirm that app-server can resume the mapped thread.
     - It rejects any non-resumable reference and never falls back to a new thread.
-- Tool-result messages may omit `previous_response_id` when the default implicit-tool-continuation mode can correlate all `tool_call_id` values to exactly one live suspension. Operators may disable this mode and require the extension explicitly.
+- Tool-result messages may omit `previous_response_id` when the default implicit-tool-continuation mode can correlate all `tool_call_id` values to exactly one unexpired pending mapping. Operators may disable this mode and require the extension explicitly.
 - A `previous_response_id` must reference its thread's newest completed response.
     - Continuing from an older response is a branch; v1 rejects it with a distinct error rather than resuming a thread whose later turns would be silently included.
     - `thread/fork` with `lastTurnId` is the documented mechanism if branching is ever supported.
-- One HTTP completion corresponds to one externally visible response, though a Codex turn may remain suspended while a dynamic tool result is pending.
+- One HTTP completion corresponds to one externally visible response; a dynamic-tool turn ends with its response and later results continue on the persisted thread.
 - A Codex thread runs at most one active turn.
-    - A concurrent request targeting a thread with an active turn or suspended dynamic tool call is rejected immediately with an OpenAI-shaped HTTP 409 conflict.
+    - A concurrent request targeting a thread another request owns is rejected immediately with an OpenAI-shaped HTTP 409 conflict.
     - Requests never queue or interleave.
-- A registered `item/tool/call` request may remain pending for the client tool round trip. The deadline is configurable and defaults to five minutes.
+- An `item/tool/call` batch ends its turn immediately; pending tool mappings are durable and expire with normal continuation retention (decision reversed 2026-07-26; see plans/05).
     - Every other server-initiated app-server request must be answered or rejected within the owning HTTP request lifecycle.
 - Elicitation is disabled.
     - The proxy does not advertise form-elicitation capability or expose user-input elicitation.

@@ -204,6 +204,21 @@ test("continuation schema examples agree with the production store reader", asyn
     "high",
   );
 
+  // A pending record's injectable call metadata round-trips with its state.
+  const pendingAccepted = {
+    ...accepted,
+    responseId: "response_schema_pending",
+    state: "pending_tool",
+    pendingCalls: [
+      { callId: "call_1", name: "lookup", arguments: '{"key":"value"}' },
+      { callId: "call_2", name: "second", arguments: "{}" },
+    ],
+  };
+  assert.deepEqual(
+    (await loadContinuationFixture(pendingAccepted))?.pendingCalls,
+    pendingAccepted.pendingCalls,
+  );
+
   const rejected = [
     { ...accepted, responseId: "" },
     { ...accepted, toolsHash: "A".repeat(64) },
@@ -212,6 +227,12 @@ test("continuation schema examples agree with the production store reader", asyn
     { ...accepted, reasoningEffort: "" },
     { ...accepted, reasoningEffortBound: false },
     { ...accepted, unexpected: true },
+    // Call metadata must be complete and agree with callIds.
+    { ...pendingAccepted, pendingCalls: [] },
+    {
+      ...pendingAccepted,
+      pendingCalls: [{ callId: "foreign", name: "lookup", arguments: "{}" }],
+    },
   ];
   for (const record of rejected)
     assert.equal(

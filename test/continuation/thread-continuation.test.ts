@@ -46,6 +46,8 @@ class ContinuationAppServer {
   readonly #toServer = new PassThrough();
   readonly #threadId = "thr_continuation";
   #turn = 0;
+  /** The tool-call turn currently awaiting its interrupt, if any. */
+  #toolTurnId: string | undefined;
 
   constructor(
     private readonly status: unknown = { type: "idle" },
@@ -102,6 +104,7 @@ class ContinuationAppServer {
         }),
       );
       if (this.requestTool) {
+        this.#toolTurnId = turnId;
         this.#send(
           protocolServerRequest({
             id: 901,
@@ -128,10 +131,36 @@ class ContinuationAppServer {
             },
           }),
         );
+        this.#send(
+          protocolNotification({
+            method: "thread/status/changed",
+            params: { threadId: this.#threadId, status: { type: "idle" } },
+          }),
+        );
       };
       if (this.completionDelayMs)
         setTimeout(complete, this.completionDelayMs).unref();
       else complete();
+    } else if (message.method === "turn/interrupt") {
+      this.#send(protocolResponse("turn/interrupt", id, {}));
+      const turnId = this.#toolTurnId;
+      if (!turnId) return;
+      this.#toolTurnId = undefined;
+      this.#send(
+        protocolNotification({
+          method: "turn/completed",
+          params: {
+            threadId: this.#threadId,
+            turn: protocolTurn(turnId, "interrupted"),
+          },
+        }),
+      );
+      this.#send(
+        protocolNotification({
+          method: "thread/status/changed",
+          params: { threadId: this.#threadId, status: { type: "idle" } },
+        }),
+      );
     }
   }
 }
@@ -159,9 +188,6 @@ async function startProxy(
   const running = await startProxyWithTransport(fake.transport, {
     root,
     stateDir: directory,
-    // This fake never reports usage for a suspension, so the product default
-    // grace would stall every tool-call response for its full length.
-    usageGraceMs: 250,
   });
   return {
     origin: running.origin,
@@ -453,7 +479,7 @@ test("concurrent ordinary requests for one active thread return an immediate 409
   }, "codex-thread-busy-");
 });
 
-test("streaming dynamic tools use standard argument deltas and survive through explicit disposal", async () => {
+test("streaming dynamic tools use standard argument deltas and interrupt at the batch", async () => {
   await withTempDir(async (directory) => {
     const fake = new ContinuationAppServer({ type: "idle" }, 0, true);
     const running = await startProxy(directory, fake);
@@ -507,16 +533,17 @@ test("streaming dynamic tools use standard argument deltas and survive through e
       });
       assert.equal(choices.at(-1)?.finish_reason, "tool_calls");
 
-      // Ending the originating HTTP stream does not cancel a suspended tool call;
-      // replacing its transport is the explicit lifecycle cancellation boundary.
-      assert.deepEqual(fake.responderErrors, []);
-      running.proxy.setTransport(undefined);
+      // The turn was interrupted at the batch and its captured request was
+      // answered immediately; nothing stays pending, so replacing the
+      // transport later has no responders left to cancel.
       assert.deepEqual(fake.responderErrors, [
         {
-          code: -32000,
-          message: "App-server transport is being replaced",
+          code: -32003,
+          message: "Tool results are delivered via continuation",
         },
       ]);
+      running.proxy.setTransport(undefined);
+      assert.equal(fake.responderErrors.length, 1);
     } finally {
       await running.proxy.close();
     }

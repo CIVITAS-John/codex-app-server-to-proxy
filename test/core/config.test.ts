@@ -51,12 +51,12 @@ test("durations cap at the maximum Node timer delay", () => {
   // Larger values overflow Node timers and fire immediately instead of later.
   const maximum = 2 ** 31 - 1;
   assert.equal(
-    parseServeOptions(["--tool-timeout", `${maximum}ms`]).toolTimeoutMs,
+    parseServeOptions(["--request-timeout", `${maximum}ms`]).requestTimeoutMs,
     maximum,
   );
   assert.throws(
-    () => parseServeOptions(["--tool-timeout", `${maximum + 1}ms`]),
-    /--tool-timeout must be between 1ms and 2147483647ms\./,
+    () => parseServeOptions(["--request-timeout", `${maximum + 1}ms`]),
+    /--request-timeout must be between 1ms and 2147483647ms\./,
   );
   assert.throws(
     () => parseServeOptions(["--request-timeout", "40000m"]),
@@ -64,26 +64,16 @@ test("durations cap at the maximum Node timer delay", () => {
   );
 });
 
-test("the terminal-usage grace accepts zero and stays within the request deadline", () => {
-  // Zero disables the wait entirely for deployments whose app-server reports
-  // usage only after a tool result returns.
-  assert.equal(parseServeOptions(["--usage-grace", "0"]).usageGraceMs, 0);
-  assert.equal(parseServeOptions(["--usage-grace", "250ms"]).usageGraceMs, 250);
-  assert.equal(
-    parseServeOptions(["--usage-grace", "10s"]).usageGraceMs,
-    10_000,
+test("the removed tool-timeout and usage-grace options are rejected as unknown", () => {
+  // Dynamic tool calls end their turn immediately, so neither deadline exists;
+  // rejecting the flags loudly beats silently accepting a no-op.
+  assert.throws(
+    () => parseServeOptions(["--tool-timeout", "5m"]),
+    /Unknown option: --tool-timeout\./,
   );
   assert.throws(
-    () => parseServeOptions(["--usage-grace", "31s"]),
-    /--usage-grace must be between 0ms and 30000ms\./,
-  );
-  assert.throws(
-    () => parseServeOptions(["--usage-grace", "abc"]),
-    /--usage-grace must be a duration such as 500ms, 30s, or 5m\./,
-  );
-  assert.throws(
-    () => parseServeOptions(["--usage-grace", "1s", "--usage-grace", "2s"]),
-    /Duplicate option: --usage-grace\./,
+    () => parseServeOptions(["--usage-grace", "12s"]),
+    /Unknown option: --usage-grace\./,
   );
 });
 
@@ -101,9 +91,7 @@ test("serve options have safe documented defaults and reject ambiguity", async (
     assert.equal(parsed.host, "127.0.0.1");
     assert.equal(parsed.port, 8787);
     assert.equal(parsed.root, project);
-    assert.equal(parsed.toolTimeoutMs, 300_000);
     assert.equal(parsed.implicitToolContinuation, true);
-    assert.equal(parsed.usageGraceMs, 12_000);
     assert.equal(parsed.stateDir, undefined);
     assert.equal(parsed.codexHome, undefined);
     const finalized = await resolveServeOptions(parsed);

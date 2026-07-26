@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, vi } from "vitest";
-import { ContinuationCoordinator } from "../../src/continuation/state.js";
+import { ResponseStore } from "../../src/continuation/state.js";
 import {
   protocolNotification,
   protocolResponse,
@@ -20,6 +20,7 @@ import { withTempDir } from "../support/temp.js";
 import {
   createFakeTransport,
   completeTurn,
+  interruptTurn,
   sendTokenUsage,
   suspendWithTools,
   tokenUsageFixture,
@@ -54,28 +55,42 @@ interface CompletionBody {
   }>;
 }
 
-/** Result captured from a fake app-server dynamic-tool response. */
-interface CapturedResult {
+/** One JSON-RPC error rejection observed on an issued dynamic tool request. */
+interface CapturedRejection {
   id: number;
-  text: string;
+  code: number;
 }
 
 /** Token-usage reporting scripted by one fake app-server run. */
 interface ToolAppServerUsage {
-  /** Wire position of the suspending turn's usage, if it reports any. */
+  /** Wire position of the tool-call turn's usage, if it reports any. */
   suspendOrder?: ToolUsageWireOrder;
   /** Whether turns that run to completion report usage and an idle boundary. */
   onCompletion?: boolean;
   reasoningOutputTokens?: number;
 }
 
+/** Scripted failure injection for the interrupt and injection RPCs. */
+interface ToolAppServerFailures {
+  interruptError?: boolean;
+  injectError?: boolean;
+  duplicateToolCallId?: boolean;
+}
+
 /** Scriptable fake app-server that exercises fragmented frames and parallel tools. */
 class ToolAppServer {
   readonly transport: FakeTransport;
-  readonly results: CapturedResult[] = [];
+  /** Rejections the proxy sent to the issued `item/tool/call` requests. */
+  readonly rejections: CapturedRejection[] = [];
+  /** Raw Responses items received via thread/inject_items, in wire order. */
+  readonly injected: Array<Record<string, unknown>> = [];
+  /** The `input` array of every turn/start, in call order. */
+  readonly turnInputs: unknown[][] = [];
   readonly methods: string[] = [];
   #thread = "thr_dynamic_tools";
   #turn = 0;
+  /** The tool-call turn currently awaiting its interrupt, if any. */
+  #toolTurnId: string | undefined;
   #toolRequestIds = new Set([901, 902]);
   // Counts the model requests app-server has already attributed to the thread,
   // so a later turn's cumulative `total` covers every earlier request.
@@ -87,6 +102,7 @@ class ToolAppServer {
     private readonly resumedThreadId = "thr_dynamic_tools",
     private readonly internalBeforeTools = false,
     private readonly usage: ToolAppServerUsage = {},
+    private readonly failures: ToolAppServerFailures = {},
   ) {
     this.transport = createFakeTransport({
       fragmentCount: 3,
@@ -153,9 +169,45 @@ class ToolAppServer {
             ),
           );
         }
+      } else if (message.method === "thread/inject_items") {
+        if (this.failures.injectError) {
+          this.#send({
+            id,
+            error: { code: -32000, message: "injection rejected" },
+          });
+          return;
+        }
+        const params = message.params as {
+          items?: Array<Record<string, unknown>>;
+        };
+        this.injected.push(...(params.items ?? []));
+        this.#send(protocolResponse("thread/inject_items", id, {}));
+      } else if (message.method === "turn/interrupt") {
+        if (this.failures.interruptError) {
+          this.#send({
+            id,
+            error: { code: -32000, message: "interrupt rejected" },
+          });
+          return;
+        }
+        this.#send(protocolResponse("turn/interrupt", id, {}));
+        const turnId = this.#toolTurnId;
+        if (!turnId) return;
+        this.#toolTurnId = undefined;
+        // Live app-server flushes the interrupted turn's usage within
+        // milliseconds of the interrupt, before completion and idle.
+        interruptTurn(this.transport.send, this.#thread, turnId, {
+          reasoningOutputTokens: this.usage.reasoningOutputTokens ?? 0,
+          priorRequests: this.#priorRequests - 1,
+          includeUsage: (this.usage.suspendOrder ?? "never") === "on_interrupt",
+        });
       } else if (message.method === "turn/start") {
         this.#turn += 1;
         const turnId = `turn_${this.#turn}`;
+        const input =
+          ((message.params as { input?: unknown[] } | undefined)?.input as
+            unknown[] | undefined) ?? [];
+        this.turnInputs.push(input);
         this.#send(
           protocolResponse("turn/start", id, {
             turn: protocolTurn(turnId, "inProgress"),
@@ -210,7 +262,7 @@ class ToolAppServer {
               },
               {
                 id: 901,
-                callId: "call_a",
+                callId: this.failures.duplicateToolCallId ? "call_b" : "call_a",
                 tool: "first",
                 arguments: { fragment: "a" },
               },
@@ -224,35 +276,40 @@ class ToolAppServer {
           // The model request behind these calls ran whether or not app-server
           // attributed it, so every later cumulative total must include it.
           this.#priorRequests += 1;
+          this.#toolTurnId = turnId;
+        } else if (input.length === 0) {
+          // A tool-result continuation starts its turn with no user input; the
+          // injected function_call_output pairs are the model-visible input.
+          this.#send(
+            protocolNotification({
+              method: "item/started",
+              params: {
+                threadId: this.#thread,
+                turnId,
+                startedAtMs: 0,
+                item: {
+                  type: "webSearch",
+                  id: "internal_after_results",
+                  query: "forecast",
+                  action: { type: "search", query: "forecast", queries: null },
+                  results: null,
+                },
+              },
+            }),
+          );
+          this.#complete(turnId, "after tools");
         } else this.#complete(turnId, "continued");
       }
       return;
     }
+    // Response frames from the proxy: the only ones a maintained run produces
+    // are the post-interrupt rejections of the issued tool requests.
     const id = message.id as number;
     if (!this.#toolRequestIds.has(id)) return;
-    const result = message.result as { contentItems: Array<{ text: string }> };
-    this.results.push({ id, text: result.contentItems[0]!.text });
+    const error = message.error as { code: number } | undefined;
+    if (!error) return;
+    this.rejections.push({ id, code: error.code });
     this.#toolRequestIds.delete(id);
-    if (this.#toolRequestIds.size === 0) {
-      this.#send(
-        protocolNotification({
-          method: "item/started",
-          params: {
-            threadId: this.#thread,
-            turnId: "turn_1",
-            startedAtMs: 0,
-            item: {
-              type: "webSearch",
-              id: "internal_after_results",
-              query: "forecast",
-              action: { type: "search", query: "forecast", queries: null },
-              results: null,
-            },
-          },
-        }),
-      );
-      this.#complete("turn_1", "after tools");
-    }
   }
 
   /** Emits a typed assistant delta and successful turn completion. */
@@ -291,19 +348,10 @@ class ToolAppServer {
 }
 
 /** Starts an ephemeral ready proxy backed by the fake app-server transport. */
-async function startProxy(
-  stateDir: string,
-  fake: ToolAppServer,
-  toolTimeoutMs = 5_000,
-  // The fake either delivers usage within milliseconds or never; the product
-  // default grace would stall every usage-less suspension for its full length.
-  usageGraceMs = 250,
-) {
+async function startProxy(stateDir: string, fake: ToolAppServer) {
   const { origin, proxy } = await startProxyWithTransport(fake.transport.rpc, {
     root: process.cwd(),
     stateDir,
-    toolTimeoutMs,
-    usageGraceMs,
   });
   return { origin, proxy };
 }
@@ -334,7 +382,7 @@ function toolTranscript(
   ];
 }
 
-test("parallel fragmented tool calls accept out-of-order large results and answer responders deterministically", async () => {
+test("parallel fragmented tool calls interrupt the turn and continue by injecting result pairs", async () => {
   await withTempDir(async (directory) => {
     const fake = new ToolAppServer();
     const { origin, proxy } = await startProxy(directory, fake);
@@ -393,12 +441,32 @@ test("parallel fragmented tool calls accept out-of-order large results and answe
         continued.choices[0]!.message.tool_calls?.map((call) => call.id),
         ["call_b", "call_a", "internal_after_results"],
       );
-      assert.deepEqual(
-        fake.results.map((result) => result.id),
-        [902, 901],
+      // The turn was interrupted at the batch and each captured request was
+      // answered with the continuation-delivery rejection.
+      assert.equal(
+        fake.methods.filter((method) => method === "turn/interrupt").length,
+        1,
       );
-      assert.equal(fake.results[0]!.text, "ok");
-      assert.equal(fake.results[1]!.text.length, 256 * 1024);
+      assert.deepEqual(fake.rejections, [
+        { id: 902, code: -32003 },
+        { id: 901, code: -32003 },
+      ]);
+      // Results reach the model as complete call/output pairs in batch order.
+      assert.deepEqual(
+        fake.injected.map((item) => [item.type, item.call_id]),
+        [
+          ["function_call", "call_b"],
+          ["function_call_output", "call_b"],
+          ["function_call", "call_a"],
+          ["function_call_output", "call_a"],
+        ],
+      );
+      assert.equal(fake.injected[0]!.arguments, '{"fragment":"b"}');
+      assert.equal(fake.injected[1]!.output, "ok");
+      assert.equal((fake.injected[3]!.output as string).length, 256 * 1024);
+      // The continuation turn started with no user input: the injected pairs
+      // are the model-visible input.
+      assert.deepEqual(fake.turnInputs.at(-1), []);
 
       const resumedResponse = await postChatCompletion(origin, {
         model: "m",
@@ -414,9 +482,11 @@ test("parallel fragmented tool calls accept out-of-order large results and answe
       assert.equal(resumedResponse.status, 200);
       const resumed = (await resumedResponse.json()) as CompletionBody;
       assert.equal(resumed.choices[0]!.message.content, "continued");
+      // Both the tool-result continuation and the later ready continuation
+      // resume the idle thread.
       assert.equal(
         fake.methods.filter((method) => method === "thread/resume").length,
-        1,
+        2,
       );
 
       const replay = await postChatCompletion(origin, {
@@ -480,9 +550,16 @@ test("verbatim mixed internal and dynamic calls resolve only the pending batch",
         ],
       });
       assert.equal(continued.status, 200, await continued.clone().text());
+      // Only the pending dynamic batch is injected; the observational internal
+      // call in the replayed assistant message never reaches thread history.
       assert.deepEqual(
-        fake.results.map((result) => result.id),
-        [902, 901],
+        fake.injected.map((item) => [item.type, item.call_id]),
+        [
+          ["function_call", "call_b"],
+          ["function_call_output", "call_b"],
+          ["function_call", "call_a"],
+          ["function_call_output", "call_a"],
+        ],
       );
     } finally {
       await proxy.close();
@@ -490,7 +567,7 @@ test("verbatim mixed internal and dynamic calls resolve only the pending batch",
   }, "codex-mixed-tool-replay-");
 });
 
-test("missing, foreign, and duplicate tool result IDs fail without consuming the suspension", async () => {
+test("missing, foreign, and duplicate tool result IDs fail without consuming the pending batch", async () => {
   await withTempDir(async (directory) => {
     const fake = new ToolAppServer();
     const { origin, proxy } = await startProxy(directory, fake);
@@ -561,7 +638,7 @@ test("missing, foreign, and duplicate tool result IDs fail without consuming the
   }, "codex-tool-results-invalid-");
 });
 
-test("a pending tool tombstone returns an HTTP expiry after proxy restart", async () => {
+test("a pending tool continuation survives proxy restart", async () => {
   await withTempDir(async (directory) => {
     const firstFake = new ToolAppServer();
     const firstServer = await startProxy(directory, firstFake);
@@ -583,10 +660,12 @@ test("a pending tool tombstone returns an HTTP expiry after proxy restart", asyn
     } finally {
       await firstServer.proxy.close();
     }
+    // Nothing about the pending batch is process-local: the persisted call
+    // metadata rebuilds the injected pairs against a fresh app-server.
     const secondFake = new ToolAppServer(false);
     const secondServer = await startProxy(directory, secondFake);
     try {
-      const expired = await postChatCompletion(secondServer.origin, {
+      const continuedResponse = await postChatCompletion(secondServer.origin, {
         model: "m",
         tools: [
           { type: "function", function: { name: "first", parameters: {} } },
@@ -595,12 +674,25 @@ test("a pending tool tombstone returns an HTTP expiry after proxy restart", asyn
         previous_response_id: responseId,
         messages: toolTranscript(calls),
       });
-      assert.equal(expired.status, 410);
-      assert.equal(
-        await responseErrorCode(expired),
-        "expired_tool_continuation",
+      assert.equal(continuedResponse.status, 200);
+      const continued = (await continuedResponse.json()) as CompletionBody;
+      assert.equal(continued.choices[0]!.message.content, "after tools");
+      assert.deepEqual(secondFake.methods, [
+        "thread/read",
+        "thread/resume",
+        "thread/inject_items",
+        "turn/start",
+      ]);
+      assert.deepEqual(
+        secondFake.injected.map((item) => [item.type, item.call_id]),
+        [
+          ["function_call", "call_b"],
+          ["function_call_output", "call_b"],
+          ["function_call", "call_a"],
+          ["function_call_output", "call_a"],
+        ],
       );
-      assert.equal(secondFake.methods.length, 0);
+      assert.deepEqual(secondFake.turnInputs, [[]]);
     } finally {
       await secondServer.proxy.close();
     }
@@ -714,10 +806,19 @@ test("a mismatched resumed thread is rejected without starting a turn or leaking
   }, "codex-resume-id-");
 });
 
-test("a suspension timeout expires the HTTP continuation without sending tool results", async () => {
+test("a failed injection expires the pending continuation instead of risking replay", async () => {
   await withTempDir(async (directory) => {
-    const fake = new ToolAppServer();
-    const { origin, proxy } = await startProxy(directory, fake, 20);
+    const fake = new ToolAppServer(
+      true,
+      false,
+      undefined,
+      false,
+      {},
+      {
+        injectError: true,
+      },
+    );
+    const { origin, proxy } = await startProxy(directory, fake);
     try {
       const initial = (await (
         await postChatCompletion(origin, {
@@ -729,8 +830,212 @@ test("a suspension timeout expires the HTTP continuation without sending tool re
           messages: [{ role: "user", content: "tools" }],
         })
       ).json()) as CompletionBody;
-      await new Promise((resolve) => setTimeout(resolve, 40));
-      const expired = await postChatCompletion(origin, {
+      const transcript = toolTranscript(initial.choices[0]!.message.tool_calls);
+      const failed = await postChatCompletion(origin, {
+        model: "m",
+        tools: [
+          { type: "function", function: { name: "first", parameters: {} } },
+          { type: "function", function: { name: "second", parameters: {} } },
+        ],
+        previous_response_id: initial.id,
+        messages: transcript,
+      });
+      assert.equal(failed.status, 502);
+      assert.equal(
+        await responseErrorCode(failed),
+        "tool_result_injection_failed",
+      );
+      // The injection reached an unknowable state, so the record fails closed:
+      // a retry cannot risk duplicating results already in thread history.
+      const retried = await postChatCompletion(origin, {
+        model: "m",
+        tools: [
+          { type: "function", function: { name: "first", parameters: {} } },
+          { type: "function", function: { name: "second", parameters: {} } },
+        ],
+        previous_response_id: initial.id,
+        messages: transcript,
+      });
+      assert.equal(retried.status, 410);
+      assert.equal(
+        await responseErrorCode(retried),
+        "expired_tool_continuation",
+      );
+    } finally {
+      await proxy.close();
+    }
+  }, "codex-tool-inject-fail-");
+});
+
+test("a failed interrupt rejects the response and makes its batch non-replayable", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ToolAppServer(
+      true,
+      false,
+      undefined,
+      false,
+      { suspendOrder: "on_interrupt" },
+      { interruptError: true },
+    );
+    const { origin, proxy } = await startProxy(directory, fake);
+    try {
+      const response = await postChatCompletion(origin, {
+        model: "m",
+        tools: [
+          { type: "function", function: { name: "first", parameters: {} } },
+          { type: "function", function: { name: "second", parameters: {} } },
+        ],
+        messages: [{ role: "user", content: "tools" }],
+      });
+      assert.equal(response.status, 502);
+      assert.equal(
+        await responseErrorCode(response),
+        "tool_turn_interrupt_failed",
+      );
+      // No actionable tool_calls response was exposed, and the original
+      // app-server requests remain unanswered rather than resuming an
+      // ownerless turn.
+      assert.deepEqual(fake.rejections, []);
+      assert.equal(
+        persistedRecords(directory).some(
+          (candidate) => candidate.state === "pending_tool",
+        ),
+        false,
+      );
+    } finally {
+      await proxy.close();
+    }
+  }, "codex-tool-interrupt-fail-");
+});
+
+test("duplicate app-server tool call IDs fail before persistence or exposure", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ToolAppServer(
+      true,
+      false,
+      undefined,
+      false,
+      {},
+      { duplicateToolCallId: true },
+    );
+    const { origin, proxy } = await startProxy(directory, fake);
+    try {
+      const response = await postChatCompletion(origin, {
+        model: "m",
+        tools: [
+          { type: "function", function: { name: "first", parameters: {} } },
+          { type: "function", function: { name: "second", parameters: {} } },
+        ],
+        messages: [{ role: "user", content: "tools" }],
+      });
+      assert.equal(response.status, 502);
+      assert.equal(
+        await responseErrorCode(response),
+        "invalid_dynamic_tool_batch",
+      );
+      assert.deepEqual(fake.rejections, [
+        { id: 902, code: -32602 },
+        { id: 901, code: -32602 },
+      ]);
+      assert.equal(existsSync(join(directory, "continuations.json")), false);
+    } finally {
+      await proxy.close();
+    }
+  }, "codex-tool-duplicate-id-");
+});
+
+test("a failed replay-guard write prevents injection and leaves a safe retry", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ToolAppServer();
+    const { origin, proxy } = await startProxy(directory, fake);
+    let restoreUpdate: (() => void) | undefined;
+    try {
+      const initial = (await (
+        await postChatCompletion(origin, {
+          model: "m",
+          tools: [
+            { type: "function", function: { name: "first", parameters: {} } },
+            { type: "function", function: { name: "second", parameters: {} } },
+          ],
+          messages: [{ role: "user", content: "tools" }],
+        })
+      ).json()) as CompletionBody;
+      const transcript = toolTranscript(initial.choices[0]!.message.tool_calls);
+      const original = ResponseStore.prototype.update;
+      const update = vi
+        .spyOn(ResponseStore.prototype, "update")
+        .mockImplementation(function (this: ResponseStore, responseId, patch) {
+          if (patch.state === "expired")
+            throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+          return original.call(this, responseId, patch);
+        });
+      restoreUpdate = () => update.mockRestore();
+
+      const failed = await postChatCompletion(origin, {
+        model: "m",
+        tools: [
+          { type: "function", function: { name: "first", parameters: {} } },
+          { type: "function", function: { name: "second", parameters: {} } },
+        ],
+        previous_response_id: initial.id,
+        messages: transcript,
+      });
+      assert.equal(failed.status, 500);
+      assert.equal(await responseErrorCode(failed), "internal_error");
+      assert.equal(fake.injected.length, 0);
+      assert.equal(
+        persistedRecords(directory).find(
+          (candidate) => candidate.responseId === initial.id,
+        )?.state,
+        "pending_tool",
+      );
+
+      update.mockRestore();
+      restoreUpdate = undefined;
+      const retried = await postChatCompletion(origin, {
+        model: "m",
+        tools: [
+          { type: "function", function: { name: "first", parameters: {} } },
+          { type: "function", function: { name: "second", parameters: {} } },
+        ],
+        previous_response_id: initial.id,
+        messages: transcript,
+      });
+      assert.equal(retried.status, 200);
+      assert.equal(fake.injected.length, 4);
+    } finally {
+      restoreUpdate?.();
+      await proxy.close();
+    }
+  }, "codex-tool-replay-guard-write-");
+});
+
+test("post-handoff bookkeeping failures do not retract the response or permit replay", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ToolAppServer();
+    const original = ResponseStore.prototype.update;
+    const update = vi
+      .spyOn(ResponseStore.prototype, "update")
+      .mockImplementation(function (this: ResponseStore, responseId, patch) {
+        if ("usageTotal" in patch || patch.state === "superseded")
+          throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+        return original.call(this, responseId, patch);
+      });
+    const { origin, proxy } = await startProxy(directory, fake);
+    try {
+      const initialResponse = await postChatCompletion(origin, {
+        model: "m",
+        tools: [
+          { type: "function", function: { name: "first", parameters: {} } },
+          { type: "function", function: { name: "second", parameters: {} } },
+        ],
+        messages: [{ role: "user", content: "tools" }],
+      });
+      assert.equal(initialResponse.status, 200);
+      const initial = (await initialResponse.json()) as CompletionBody;
+      assert.equal(initial.choices[0]!.finish_reason, "tool_calls");
+
+      const continued = await postChatCompletion(origin, {
         model: "m",
         tools: [
           { type: "function", function: { name: "first", parameters: {} } },
@@ -739,16 +1044,29 @@ test("a suspension timeout expires the HTTP continuation without sending tool re
         previous_response_id: initial.id,
         messages: toolTranscript(initial.choices[0]!.message.tool_calls),
       });
-      assert.equal(expired.status, 410);
+      assert.equal(continued.status, 200);
+      assert.equal(fake.injected.length, 4);
+
+      const replay = await postChatCompletion(origin, {
+        model: "m",
+        tools: [
+          { type: "function", function: { name: "first", parameters: {} } },
+          { type: "function", function: { name: "second", parameters: {} } },
+        ],
+        previous_response_id: initial.id,
+        messages: toolTranscript(initial.choices[0]!.message.tool_calls),
+      });
+      assert.equal(replay.status, 410);
       assert.equal(
-        await responseErrorCode(expired),
+        await responseErrorCode(replay),
         "expired_tool_continuation",
       );
-      assert.deepEqual(fake.results, []);
+      assert.equal(fake.injected.length, 4);
     } finally {
+      update.mockRestore();
       await proxy.close();
     }
-  }, "codex-tool-timeout-");
+  }, "codex-tool-best-effort-state-");
 });
 
 test("implicit tool continuation must repeat the original x_codex policy", async () => {
@@ -759,10 +1077,6 @@ test("implicit tool continuation must repeat the original x_codex policy", async
       { type: "function", function: { name: "first", parameters: {} } },
       { type: "function", function: { name: "second", parameters: {} } },
     ];
-    const refreshPending = vi.spyOn(
-      ContinuationCoordinator.prototype,
-      "refreshPending",
-    );
     try {
       const first = (await (
         await postChatCompletion(origin, {
@@ -789,8 +1103,7 @@ test("implicit tool continuation must repeat the original x_codex policy", async
         await responseErrorCode(dropped),
         "continuation_policy_mismatch",
       );
-      assert.equal(fake.results.length, 0);
-      assert.deepEqual(refreshPending.mock.calls, [[first.id]]);
+      assert.equal(fake.injected.length, 0);
 
       const changedEffort = await postChatCompletion(origin, {
         model: "m",
@@ -804,11 +1117,10 @@ test("implicit tool continuation must repeat the original x_codex policy", async
         await responseErrorCode(changedEffort),
         "continuation_reasoning_effort_mismatch",
       );
-      assert.equal(fake.results.length, 0);
-      assert.deepEqual(refreshPending.mock.calls, [[first.id], [first.id]]);
+      assert.equal(fake.injected.length, 0);
 
       // Repeating the original x_codex on the implicit continuation matches the
-      // suspension and delivers the results.
+      // pending record and delivers the results.
       const repeated = await postChatCompletion(origin, {
         model: "m",
         reasoning_effort: "high",
@@ -818,11 +1130,15 @@ test("implicit tool continuation must repeat the original x_codex policy", async
       });
       assert.equal(repeated.status, 200);
       assert.deepEqual(
-        fake.results.map((result) => result.id),
-        [902, 901],
+        fake.injected.map((item) => [item.type, item.call_id]),
+        [
+          ["function_call", "call_b"],
+          ["function_call_output", "call_b"],
+          ["function_call", "call_a"],
+          ["function_call_output", "call_a"],
+        ],
       );
     } finally {
-      refreshPending.mockRestore();
       await proxy.close();
     }
   }, "codex-dynamic-tools-");
@@ -869,21 +1185,21 @@ async function suspendAndContinue(
   };
 }
 
-test("a suspension app-server never attributed carries its boundary to the continuation", async () => {
+test("a tool batch app-server never attributed carries its boundary to the continuation", async () => {
   await withTempDir(async (directory) => {
     const fake = new ToolAppServer(true, false, undefined, false, {
+      // A defective server that flushes nothing even at the interrupt: the
+      // tool-call response reaches the client with no usage of its own.
       suspendOrder: "never",
       onCompletion: true,
       reasoningOutputTokens: 3,
     });
-    // Nothing can arrive inside a zero grace, so the suspended response is
-    // guaranteed to reach the client with no usage of its own.
-    const { origin, proxy } = await startProxy(directory, fake, 5_000, 0);
+    const { origin, proxy } = await startProxy(directory, fake);
     try {
       const { first, continued } = await suspendAndContinue(origin);
       assert.equal(first.usage, undefined);
-      // The continuation subtracts from the boundary the suspension started
-      // from, so it reports both model requests rather than only its own.
+      // The continuation subtracts from the boundary the tool-call response
+      // started from, so it reports both model requests rather than only its own.
       assert.deepEqual(continued.usage, {
         prompt_tokens: 8,
         completion_tokens: 10,
@@ -897,13 +1213,13 @@ test("a suspension app-server never attributed carries its boundary to the conti
   }, "codex-dynamic-tools-");
 });
 
-test("a suspension on a fresh thread persists its exact all-zero boundary", async () => {
+test("a tool batch on a fresh thread persists its exact all-zero boundary and call metadata", async () => {
   await withTempDir(async (directory) => {
     const fake = new ToolAppServer(true, false, undefined, false, {
       suspendOrder: "never",
       onCompletion: true,
     });
-    const { origin, proxy } = await startProxy(directory, fake, 5_000, 0);
+    const { origin, proxy } = await startProxy(directory, fake);
     try {
       const response = await postChatCompletion(origin, {
         model: "m",
@@ -925,21 +1241,26 @@ test("a suspension on a fresh thread persists its exact all-zero boundary", asyn
         reasoningOutputTokens: 0,
         totalTokens: 0,
       });
+      // The record carries everything a continuation must inject, so nothing
+      // about the pending batch is process-local.
+      assert.deepEqual(record?.pendingCalls, [
+        { callId: "call_b", name: "second", arguments: '{"fragment":"b"}' },
+        { callId: "call_a", name: "first", arguments: '{"fragment":"a"}' },
+      ]);
     } finally {
       await proxy.close();
     }
   }, "codex-dynamic-tools-");
 });
 
-test("usage captured before a tool call is reported without waiting out the grace", async () => {
+test("usage captured before a tool call is reported without waiting", async () => {
   await withTempDir(async (directory) => {
     const fake = new ToolAppServer(true, false, undefined, false, {
       suspendOrder: "before_tool_call",
       onCompletion: true,
       reasoningOutputTokens: 3,
     });
-    // A grace this long would dominate the measurement if it were still paid.
-    const { origin, proxy } = await startProxy(directory, fake, 5_000, 5_000);
+    const { origin, proxy } = await startProxy(directory, fake);
     try {
       const started = Date.now();
       const response = await postChatCompletion(origin, {
@@ -953,7 +1274,7 @@ test("usage captured before a tool call is reported without waiting out the grac
       assert.equal(first.usage?.completion_tokens_details?.reasoning_tokens, 3);
       assert.ok(
         Date.now() - started < 1_000,
-        "a suspension that already captured usage must not wait for more",
+        "the interrupted turn's idle boundary must end the wait immediately",
       );
     } finally {
       await proxy.close();
@@ -961,14 +1282,14 @@ test("usage captured before a tool call is reported without waiting out the grac
   }, "codex-dynamic-tools-");
 });
 
-test("usage arriving inside the grace is attributed to the suspended response", async () => {
+test("usage flushed by the interrupt is attributed to the tool-call response", async () => {
   await withTempDir(async (directory) => {
     const fake = new ToolAppServer(true, false, undefined, false, {
-      suspendOrder: "within_grace",
+      suspendOrder: "on_interrupt",
       onCompletion: true,
       reasoningOutputTokens: 3,
     });
-    const { origin, proxy } = await startProxy(directory, fake, 5_000, 500);
+    const { origin, proxy } = await startProxy(directory, fake);
     try {
       const { first, continued } = await suspendAndContinue(origin);
       assert.deepEqual(first.usage, {
@@ -979,7 +1300,7 @@ test("usage arriving inside the grace is attributed to the suspended response", 
         completion_tokens_details: { reasoning_tokens: 3 },
       });
       // The client already counted the first round, so the continuation counts
-      // from the suspension boundary rather than repeating it.
+      // from the tool-call boundary rather than repeating it.
       assert.deepEqual(continued.usage, {
         prompt_tokens: 4,
         completion_tokens: 5,
@@ -993,14 +1314,14 @@ test("usage arriving inside the grace is attributed to the suspended response", 
   }, "codex-dynamic-tools-");
 });
 
-test("usage observed after a suspended response ends never advances its boundary", async () => {
+test("usage observed after a tool-call response ends never advances its boundary", async () => {
   await withTempDir(async (directory) => {
     const fake = new ToolAppServer(true, false, undefined, false, {
       suspendOrder: "never",
       onCompletion: true,
       reasoningOutputTokens: 3,
     });
-    const { origin, proxy } = await startProxy(directory, fake, 5_000, 0);
+    const { origin, proxy } = await startProxy(directory, fake);
     try {
       const { first, continued } = await suspendAndContinue(origin, () => {
         // Delivered once the suspended response has demonstrably ended, so no
@@ -1021,14 +1342,14 @@ test("usage observed after a suspended response ends never advances its boundary
   }, "codex-dynamic-tools-");
 });
 
-test("a suspension that is never continued omits usage rather than estimating it", async () => {
+test("a server that never flushes usage leaves it omitted rather than estimated", async () => {
   await withTempDir(async (directory) => {
     const fake = new ToolAppServer(true, false, undefined, false, {
       suspendOrder: "never",
       onCompletion: true,
       reasoningOutputTokens: 3,
     });
-    const { origin, proxy } = await startProxy(directory, fake, 5_000, 0);
+    const { origin, proxy } = await startProxy(directory, fake);
     try {
       const response = await postChatCompletion(origin, {
         model: "m",
@@ -1038,8 +1359,8 @@ test("a suspension that is never continued omits usage rather than estimating it
       assert.equal(response.status, 200);
       const first = (await response.json()) as CompletionBody;
       assert.equal(first.choices[0]!.finish_reason, "tool_calls");
-      // No channel remains for tokens app-server had not attributed, so the
-      // response reports none instead of guessing.
+      // Live app-server flushes usage at the interrupt; against a server that
+      // does not, the response reports none instead of guessing.
       assert.equal(first.usage, undefined);
     } finally {
       await proxy.close();

@@ -102,13 +102,12 @@ test("property: fragmented dynamic-tool arguments remain valid correlated JSON",
         const [request] = (await pending) as [
           { id: number; method: string; params: Record<string, unknown> },
         ];
+        // Stringified exactly the way the execution handoff persists and
+        // emits arguments, so fragmentation cannot change the encoded JSON.
         const normalized = new EventNormalizer().dynamicToolCall({
-          request,
           callId: String(request.params.callId),
           name: String(request.params.tool),
-          arguments: request.params.arguments,
-          threadId: String(request.params.threadId),
-          turnId: String(request.params.turnId),
+          arguments: JSON.stringify(request.params.arguments ?? {}),
         });
         const encoded = normalized.delta?.tool_calls?.[0]?.function.arguments;
         assert.deepEqual(JSON.parse(encoded ?? ""), argumentsValue);

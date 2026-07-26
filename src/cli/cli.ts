@@ -1,5 +1,6 @@
 import {
   DEFAULT_CODEX_HOME_DESCRIPTION,
+  DEFAULT_STARTUP_TIMEOUT_MS,
   DEFAULT_STATE_DIR_DESCRIPTION,
   parseServeOptions,
   resolveServeOptions,
@@ -40,11 +41,8 @@ Options:
   --codex-path <path>           Override the package-owned Codex executable
   --codex-home <directory>      Codex home for the spawned app-server
                                 (default: ${DEFAULT_CODEX_HOME_DESCRIPTION})
-  --tool-timeout <duration>     Dynamic tool deadline (default: 5m)
   --implicit-tool-continuation <true|false>
                                 Resolve tool results by tool_call_id (default: true)
-  --usage-grace <duration>      Wait for Codex usage after a turn's last frame,
-                                0 to disable (default: 12s)
   --request-timeout <duration>  HTTP request deadline (default: 30s)
   --shutdown-timeout <duration> Graceful shutdown deadline (default: 10s)
   --body-limit <bytes>          Maximum request body (default: 1048576)
@@ -189,7 +187,7 @@ class AppServerSupervisor {
       // Seed the isolated home from the login Codex itself would have used.
       seedAuthFrom: process.env.CODEX_HOME ?? join(homedir(), ".codex"),
       root: this.#options.root,
-      startupTimeoutMs: this.#options.toolTimeoutMs,
+      startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS,
       shutdownTimeoutMs: this.#options.shutdownTimeoutMs,
       log: this.#log,
       diagnosticLogging: this.#options.logLevel === "debug",
@@ -210,7 +208,7 @@ class AppServerSupervisor {
       await ensureAuthenticated({
         rpc: next.rpc,
         log: this.#log,
-        timeoutMs: this.#options.toolTimeoutMs,
+        timeoutMs: DEFAULT_STARTUP_TIMEOUT_MS,
         interactive: Boolean(process.stderr.isTTY),
         terminal: (message) => process.stderr.write(message),
         signal: this.#lifecycle.signal,

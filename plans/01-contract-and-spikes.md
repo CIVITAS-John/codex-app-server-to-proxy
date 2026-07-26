@@ -20,7 +20,7 @@ Complete contract and schema work offline.
     - timestamps, cwd/policy fingerprint, and pending-tool metadata.
 7. Specify the expected `account/read` plus `account/login/start` browser flow and fallback behavior for Stage 03 verification.
 8. Specify the Stage 03 dynamic-tool spike:
-    - verify that an `item/tool/call` request can remain pending for a short client round trip;
+    - verify that an `item/tool/call` request can remain pending for a short client round trip (superseded 2026-07-26: the shipped design interrupts the turn at the batch instead);
     - verify multiple-call correlation and timeout/cleanup behavior;
     - require the canonical tool set to match on continuation because `dynamicTools` is thread-scoped.
 9. Define the Stage 03 spike for all app-server web-search settings:

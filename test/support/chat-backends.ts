@@ -55,10 +55,6 @@ export async function startFakeChatBackend(
       environment,
       UNRESTRICTED_POLICY_REQUIREMENTS,
       log,
-      // The scripted backend reports a suspension's usage only after the tool
-      // result returns, so the product default grace would stall the offline
-      // contract; the live backend keeps the default to measure real timing.
-      250,
     );
   });
 }
@@ -244,6 +240,8 @@ function createScriptedTransport(
   >();
   const injected = new Map<string, unknown[]>();
   const pendingTools = new Map<number, { threadId: string; turnId: string }>();
+  /** Tool-call turns awaiting their interrupt, by turn id. */
+  const toolTurns = new Map<string, string>();
   const modelRequests = new Map<string, number>();
   const successfulBuiltInThreads = new Set<string>();
   const environmentDisabledThreads = new Set<string>();
@@ -285,21 +283,10 @@ function createScriptedTransport(
         result?: unknown;
       };
       if (message.method === undefined) {
-        const pending = pendingTools.get(message.id);
-        if (!pending || message.result === undefined) return;
-        pendingTools.delete(message.id);
-        send(
-          protocolNotification({
-            method: "item/agentMessage/delta",
-            params: {
-              threadId: pending.threadId,
-              turnId: pending.turnId,
-              itemId: "tool-result-message",
-              delta: "contract-tool-ok",
-            },
-          }),
-        );
-        complete(pending.threadId, pending.turnId);
+        // The only responses the proxy writes are the post-interrupt
+        // rejections of issued tool requests; they need no reply.
+        if (pendingTools.has(message.id) && message.result === undefined)
+          pendingTools.delete(message.id);
         return;
       }
       const params = message.params ?? {};
@@ -419,6 +406,7 @@ function createScriptedTransport(
         if (prompt.includes("contract_lookup")) {
           const requestId = ++nextServerRequest;
           pendingTools.set(requestId, { threadId, turnId });
+          toolTurns.set(turnId, threadId);
           send(
             protocolServerRequest({
               id: requestId,
@@ -433,6 +421,35 @@ function createScriptedTransport(
               },
             }),
           );
+          return;
+        }
+        if (input.length === 0) {
+          // A tool-result continuation starts with no user input; the injected
+          // function_call/function_call_output pairs are the model input.
+          const pairs = injected.get(threadId) as
+            Array<Record<string, unknown>> | undefined;
+          if (
+            pairs?.length !== 2 ||
+            pairs[0]?.type !== "function_call" ||
+            pairs[0]?.call_id !== "call_contract_lookup" ||
+            pairs[1]?.type !== "function_call_output" ||
+            pairs[1]?.call_id !== "call_contract_lookup"
+          )
+            throw new Error(
+              "tool results were not injected as a complete call/output pair",
+            );
+          send(
+            protocolNotification({
+              method: "item/agentMessage/delta",
+              params: {
+                threadId,
+                turnId,
+                itemId: "tool-result-message",
+                delta: "contract-tool-ok",
+              },
+            }),
+          );
+          complete(threadId, turnId);
           return;
         }
         if (prompt.includes("built-in shell command")) {
@@ -547,6 +564,13 @@ function createScriptedTransport(
         const pending = active.get(turnId);
         if (pending?.timer) clearTimeout(pending.timer);
         send(protocolResponse("turn/interrupt", message.id, {}));
+        const toolThread = toolTurns.get(turnId);
+        if (toolThread) {
+          // Live app-server flushes the parked turn's usage within
+          // milliseconds of the interrupt; mirror that wire order exactly.
+          toolTurns.delete(turnId);
+          sendUsage(toolThread, turnId, 3);
+        }
         if (pending) {
           send(
             protocolNotification({
@@ -554,6 +578,15 @@ function createScriptedTransport(
               params: {
                 threadId: pending.threadId,
                 turn: protocolTurn(turnId, "interrupted"),
+              },
+            }),
+          );
+          send(
+            protocolNotification({
+              method: "thread/status/changed",
+              params: {
+                threadId: pending.threadId,
+                status: { type: "idle" },
               },
             }),
           );
@@ -579,7 +612,6 @@ async function startProxy(
   environment: ContractEnvironment,
   requirements: PolicyRequirements,
   log: Logger,
-  usageGraceMs?: number,
 ): Promise<ChatContractBackend> {
   let proxy: ProxyServer | undefined;
   let modelCalls = 0;
@@ -605,7 +637,6 @@ async function startProxy(
       stateDir: environment.stateDir,
       requestTimeoutMs: 120_000,
       shutdownTimeoutMs: 10_000,
-      usageGraceMs,
       log,
       requirements,
     });

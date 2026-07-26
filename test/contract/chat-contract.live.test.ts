@@ -14,7 +14,7 @@ registerChatContract("real Codex app-server", startLiveChatBackend, {
       : (["safe-policy-built-in-continuation"] as const)),
   ],
   maxModelCalls: MAX_LIVE_MODEL_CALLS,
-  // The suspended tool-call response must carry usage with reasoning detail
-  // within the default --usage-grace, and the run reports how long it took.
-  requireSuspendedUsage: true,
+  // The interrupted tool-call response must return quickly with exact usage;
+  // the run reports how long it and its continuation took. Numbers only.
+  reportToolTimings: true,
 });

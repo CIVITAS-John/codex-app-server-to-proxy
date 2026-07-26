@@ -18,8 +18,6 @@ export interface StartProxyWithTransportOptions {
   stateDir: string;
   requestTimeoutMs?: number | undefined;
   shutdownTimeoutMs?: number | undefined;
-  toolTimeoutMs?: number | undefined;
-  usageGraceMs?: number | undefined;
   log?: Logger | undefined;
   requirements?: PolicyRequirements | undefined;
 }
@@ -55,8 +53,6 @@ export async function startProxyWithTransport(
   ];
   addDurationArgument(args, "--request-timeout", settings.requestTimeoutMs);
   addDurationArgument(args, "--shutdown-timeout", settings.shutdownTimeoutMs);
-  addDurationArgument(args, "--tool-timeout", settings.toolTimeoutMs);
-  addDurationArgument(args, "--usage-grace", settings.usageGraceMs);
   const options = await resolveServeOptions(parseServeOptions(args));
   const proxy = createProxyServer(options, settings.log ?? silentLogger);
   proxy.setTransport(

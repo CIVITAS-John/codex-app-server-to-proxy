@@ -143,14 +143,15 @@ export type UsageWireOrder =
 const LATER_READ_DELAY_MS = 5;
 
 /**
- * Wire position of a suspending turn's usage relative to its dynamic tool
- * request. Whether app-server attributes the model request before
- * `item/tool/call` is unverified, so every position must produce exactly-once
- * attribution across the suspended response and its continuation.
+ * Wire position of a tool-call turn's usage. Live app-server (codex 0.145.0)
+ * flushes usage within milliseconds of `turn/interrupt`, but may also have
+ * attributed the model request before `item/tool/call`; a broken server may
+ * never flush at all. Every position must produce exactly-once attribution
+ * across the tool-call response and its continuation.
  */
-export type ToolUsageWireOrder = "before_tool_call" | "within_grace" | "never";
+export type ToolUsageWireOrder = "before_tool_call" | "on_interrupt" | "never";
 
-/** One dynamic tool request scripted by a suspending turn. */
+/** One dynamic tool request scripted by a tool-call turn. */
 export interface ScriptedToolCall {
   id: number;
   callId: string;
@@ -158,7 +159,7 @@ export interface ScriptedToolCall {
   arguments: JsonValue;
 }
 
-/** Usage ordering selected by one scripted dynamic-tool suspension. */
+/** Usage ordering selected by one scripted dynamic-tool batch. */
 export interface SuspendWithToolsOptions {
   reasoningOutputTokens?: number;
   priorRequests?: number;
@@ -166,10 +167,10 @@ export interface SuspendWithToolsOptions {
 }
 
 /**
- * Emits typed dynamic tool requests with usage in the selected wire position.
- * There is deliberately no "after the response ends" position: a timer racing
- * the grace window would be nondeterministic, so a test that needs late usage
- * sends it explicitly once it has read the suspended response.
+ * Emits typed dynamic tool requests, with usage first when the scripted order
+ * attributes the model request before the tool call. The `on_interrupt` order
+ * is realized by the fake's `turn/interrupt` handler via `interruptTurn`, not
+ * here, matching the live flush-at-interrupt wire behavior.
  */
 export function suspendWithTools(
   send: FakeTransportSend,
@@ -182,14 +183,13 @@ export function suspendWithTools(
     usageOrder = "never",
   }: SuspendWithToolsOptions = {},
 ): void {
-  const usage = (): void =>
+  if (usageOrder === "before_tool_call")
     sendTokenUsage(
       send,
       threadId,
       turnId,
       tokenUsageFixture(reasoningOutputTokens, priorRequests),
     );
-  if (usageOrder === "before_tool_call") usage();
   for (const call of calls)
     send(
       protocolServerRequest({
@@ -205,11 +205,49 @@ export function suspendWithTools(
         },
       }),
     );
-  if (usageOrder !== "within_grace") return;
-  // A suspension has no idle boundary, so usage delivered on a later transport
-  // read must still land inside the response's terminal-usage grace.
-  const timer = setTimeout(usage, LATER_READ_DELAY_MS);
-  timer.unref();
+}
+
+/** Usage emission selected by one scripted turn interruption. */
+export interface InterruptTurnOptions {
+  reasoningOutputTokens?: number;
+  priorRequests?: number;
+  includeUsage?: boolean;
+}
+
+/**
+ * Emits the wire sequence live app-server produces when a turn is interrupted:
+ * the terminal usage flush, `turn/completed` with status `interrupted`, and
+ * the thread's idle boundary.
+ */
+export function interruptTurn(
+  send: FakeTransportSend,
+  threadId: string,
+  turnId: string,
+  {
+    reasoningOutputTokens = 0,
+    priorRequests = 0,
+    includeUsage = true,
+  }: InterruptTurnOptions = {},
+): void {
+  if (includeUsage)
+    sendTokenUsage(
+      send,
+      threadId,
+      turnId,
+      tokenUsageFixture(reasoningOutputTokens, priorRequests),
+    );
+  send(
+    protocolNotification({
+      method: "turn/completed",
+      params: { threadId, turn: protocolTurn(turnId, "interrupted") },
+    }),
+  );
+  send(
+    protocolNotification({
+      method: "thread/status/changed",
+      params: { threadId, status: { type: "idle" } },
+    }),
+  );
 }
 
 /** Final usage and wire ordering selected by one scripted turn completion. */

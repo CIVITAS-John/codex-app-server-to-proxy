@@ -20,6 +20,7 @@ import { waitForFile, waitForText } from "../support/poll.js";
 import { repoRootPath } from "../support/repo-root.js";
 import {
   protocolAuthenticatedAccountResponse,
+  protocolNotification,
   protocolResponse,
   protocolServerRequest,
   protocolThread,
@@ -66,6 +67,21 @@ const embeddedProtocolResults = {
       },
     }),
   ),
+  turnInterrupted: JSON.stringify(
+    protocolNotification({
+      method: "turn/completed",
+      params: {
+        threadId: "thr_shutdown",
+        turn: protocolTurn("turn_shutdown", "interrupted"),
+      },
+    }),
+  ),
+  threadIdle: JSON.stringify(
+    protocolNotification({
+      method: "thread/status/changed",
+      params: { threadId: "thr_shutdown", status: { type: "idle" } },
+    }),
+  ),
 };
 
 /** Allocates a loopback port and keeps it reserved until close is called. */
@@ -94,7 +110,11 @@ test("CLI recovery uses the documented bounded retry schedule", () => {
   assert.match(usage, /per-root under ~\/\.codex-openai-proxy/);
   assert.equal(usage.includes("<root>/.codex-openai-proxy"), false);
   // Every configurable limit must be discoverable from the help output.
-  assert.match(usage, /--usage-grace <duration>/);
+  assert.match(usage, /--request-timeout <duration>/);
+  // Removed deadlines must not resurface in help: dynamic tool calls end
+  // their turn immediately, so no tool or usage wait remains to configure.
+  assert.equal(usage.includes("--tool-timeout"), false);
+  assert.equal(usage.includes("--usage-grace"), false);
 });
 
 test("CLI help and unsafe configuration are handled in-process", async () => {
@@ -239,8 +259,6 @@ if(process.argv.includes('--version')) {
             join(directory, "state"),
             "--codex-path",
             fake,
-            "--tool-timeout",
-            "30s",
             "--shutdown-timeout",
             "1s",
           ],
@@ -440,8 +458,6 @@ if (count === 1) {
           join(directory, "state"),
           "--codex-path",
           fake,
-          "--tool-timeout",
-          "30s",
           "--shutdown-timeout",
           "2s",
         ],
@@ -536,7 +552,7 @@ process.on("SIGTERM", () => {
 );
 
 testWithPosixExecutable(
-  "signal shutdown rejects a suspended dynamic tool request",
+  "a dynamic tool call is interrupted, answered, and survives signal shutdown",
   async () => {
     await withTempDir(async (directory) => {
       const fake = join(directory, "codex");
@@ -568,6 +584,12 @@ process.on("SIGTERM", () => setTimeout(() => process.exit(0), 200));`,
     console.log(JSON.stringify(${embeddedProtocolResults.toolCall}));
     return;
   }
+  if (${message}.method === "turn/interrupt") {
+    console.log(JSON.stringify({ id: ${message}.id, result: {} }));
+    console.log(JSON.stringify(${embeddedProtocolResults.turnInterrupted}));
+    console.log(JSON.stringify(${embeddedProtocolResults.threadIdle}));
+    return;
+  }
 `,
         }),
         "utf8",
@@ -586,10 +608,6 @@ process.on("SIGTERM", () => setTimeout(() => process.exit(0), 200));`,
           fake,
           "--shutdown-timeout",
           "2s",
-          // The fake never reports usage, so the default grace would hold the
-          // suspended response past this test's own deadline.
-          "--usage-grace",
-          "250ms",
         ],
         { cwd: repoRootPath, stdio: ["ignore", "pipe", "pipe"] },
       );
@@ -621,13 +639,15 @@ process.on("SIGTERM", () => setTimeout(() => process.exit(0), 200));`,
           .choices[0].finish_reason,
         "tool_calls",
       );
-      child.kill("SIGTERM");
-      const [code] = await once(child, "exit");
-      assert.equal(code, 0);
+      // The captured request was already answered at the interrupt, so
+      // shutdown has nothing pending to reject and exits cleanly.
       const error = JSON.parse(await readFile(rejected, "utf8")) as {
         code: number;
       };
-      assert.equal(error.code, -32000);
+      assert.equal(error.code, -32003);
+      child.kill("SIGTERM");
+      const [code] = await once(child, "exit");
+      assert.equal(code, 0);
       assert.match(stderr, /shutdown_complete/);
     }, "codex-proxy-tool-stop-");
   },

@@ -25,7 +25,7 @@ Reliably own one initialized app-server child process and complete ChatGPT login
     - If local browser login cannot complete, offer `chatgptDeviceCode` login for headless or remote environments.
 7. Mark readiness only after initialization and usable authentication.
 8. Define restart policy for unexpected app-server exit: bounded exponential backoff, failure threshold, readiness changes, and failure of in-flight requests.
-9. On proxy shutdown, interrupt active turns, reject pending tool continuations, close stdio, then terminate the child after a grace period.
+9. On proxy shutdown, interrupt active turns, close stdio, then terminate the child after a grace period; durable pending tool mappings need no shutdown handling.
 10. Fail closed on elicitation.
     - Immediately answer unexpected user-input or elicitation requests with a documented unsupported/declined response so they cannot block a turn.
     - This covers `item/tool/requestUserInput`, `mcpServer/elicitation/request` in both form and URL modes, and equivalent server-initiated requests.

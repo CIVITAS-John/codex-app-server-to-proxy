@@ -9,10 +9,10 @@ Create an installable TypeScript CLI with strict loopback enforcement and no dep
 1. Initialize the npm package, strict application and test TypeScript configurations, formatter, linter, Vitest, build output, and executable `bin` entry.
     - Keep `npm test` non-interactive and offline by default.
     - Use a separate Vitest project or explicit opt-in script for live tests so the default include patterns cannot discover them.
-2. Implement `codex-openai-proxy serve` with `--host`, `--port`, `--root`, `--codex-path`, `--codex-home`, `--tool-timeout`, log level, state-directory, and shutdown options.
+2. Implement `codex-openai-proxy serve` with `--host`, `--port`, `--root`, `--codex-path`, `--codex-home`, log level, state-directory, and shutdown options.
     - `--root` defaults to the launch directory.
     - `--codex-home` defaults to the proxy-owned `~/.codex-openai-proxy/codex-home`; relative overrides resolve from the canonical root.
-    - `--tool-timeout` defaults to five minutes.
+    - The former `--tool-timeout` was removed with the interrupt-based tool design (2026-07-26); the app-server startup/login deadline is a fixed five minutes.
 3. Default to `127.0.0.1`; normalize and allow only `127.0.0.1`, `::1`, and `localhost`. Resolve `localhost` defensively or bind explicit loopback sockets.
 4. Refuse wildcard, LAN, DNS, mapped, or ambiguous addresses before opening a socket.
 5. Add `GET /health` and `GET /ready`; readiness remains false until app-server initialization and authentication are ready.

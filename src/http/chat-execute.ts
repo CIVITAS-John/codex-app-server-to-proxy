@@ -14,7 +14,9 @@ import {
   bindingHash,
   type ContinuationCoordinator,
   type PendingToolCall,
+  type StoredToolCall,
   type ThreadBinding,
+  type ThreadLease,
 } from "../continuation/state.js";
 import {
   diagnoseUnexposedNotification,
@@ -26,6 +28,8 @@ import {
   type Usage,
 } from "./chat-normalize.js";
 import {
+  toFunctionCallItem,
+  toFunctionCallOutputItem,
   toHistoryItem,
   validateToolResults,
   type ChatRequest,
@@ -220,7 +224,6 @@ export interface ChatHandlerOptions {
   root: string;
   requirements: PolicyRequirements;
   implicitToolContinuation: boolean;
-  usageGraceMs: number;
 }
 
 /** One eagerly prepared execution with cleanup independent of generator startup. */
@@ -234,14 +237,22 @@ interface TurnHandle {
   threadId?: string;
   turnId?: string;
   terminal: boolean;
-  suspended: boolean;
+  lease?: ThreadLease;
 }
 
 /** Setup output shared by ready and pending-tool continuation paths. */
 interface ContinuationSetup {
-  results: Array<{ call: PendingToolCall; content: string }>;
+  results: Array<{ call: StoredToolCall; content: string }>;
   usageBaseline: TokenUsageCounters | undefined;
 }
+
+/**
+ * Upper bound on waiting for the terminal usage flush after a turn's last
+ * frame. Every turn now ends — completed naturally or interrupted at its tool
+ * calls — and app-server flushes usage at turn end within milliseconds, so
+ * this cap exists only as a hang backstop, not as an expected wait.
+ */
+const TERMINAL_USAGE_WAIT_MS = 2_000;
 
 /** Runs or resumes a Codex thread and yields its normalized event stream. */
 export async function execute(
@@ -250,7 +261,7 @@ export async function execute(
   responseId: string,
 ): Promise<ExecutionSession> {
   const queue = new IngressQueue((call) => rejectDynamicCall(options, call));
-  const handle: TurnHandle = { terminal: false, suspended: false };
+  const handle: TurnHandle = { terminal: false };
   const onNotification = (method: string, params: unknown): void => {
     const behavior = notificationBehavior(method);
     if (behavior === "diagnose") {
@@ -293,7 +304,7 @@ export async function execute(
   options.rpc.on("notification", onNotification);
   options.rpc.once("close", onClose);
   let disposed = false;
-  let continuationResults: Array<{ call: PendingToolCall; content: string }> =
+  let continuationResults: Array<{ call: StoredToolCall; content: string }> =
     [];
   const binding: ThreadBinding = {
     model: request.model,
@@ -326,11 +337,12 @@ export async function execute(
     options.signal.removeEventListener("abort", onAbort);
     options.rpc.off("notification", onNotification);
     options.rpc.off("close", onClose);
-    if (handle.threadId)
-      options.continuations.clearToolOwner(handle.threadId, onToolRequest);
-    if (handle.threadId && !handle.suspended)
-      options.continuations.release(handle.threadId);
-    if (!handle.suspended) queue.rejectQueuedDynamicCalls();
+    if (handle.threadId) {
+      // The thread is never held across responses: a tool-call turn was
+      // interrupted at its batch, so nothing app-server-side stays pending.
+      handle.lease?.release();
+    }
+    queue.rejectQueuedDynamicCalls();
   };
   options.signal.addEventListener("abort", onAbort, { once: true });
   let usageBaseline: TokenUsageCounters | undefined;
@@ -365,6 +377,9 @@ export async function execute(
       let failed = false;
       let pendingFinishReason: NormalizedEvent["finishReason"];
       let pendingUsage: Usage | undefined;
+      // Set once this response hands off a dynamic-tool batch; selects the
+      // pending-tool persistence path over the ready mapping after the loop.
+      let toolBatch: StoredToolCall[] | undefined;
       try {
         for (const result of continuationResults)
           yield normalizer.dynamicToolResult(result.call, result.content);
@@ -383,24 +398,59 @@ export async function execute(
           queue.assertHealthy();
           if (queue.peek()?.type === "dynamic_tool") {
             // Let parallel app-server requests arriving in this event-loop turn
-            // join the batch before the synchronous suspension handoff.
+            // join the batch before the synchronous persistence handoff.
             await new Promise<void>((resolve) => setImmediate(resolve));
-            const captured = suspendCapturedBatch(
+            const { captured, calls, stored } = captureToolBatch(
               queue,
               options,
               responseId,
               binding,
               handle,
             );
-            handle.suspended = true;
+            toolBatch = stored;
+            // Interrupt deliberately ignores the request signal: ending the
+            // turn is protocol hygiene owed even to a disconnecting client,
+            // and it is what flushes this turn's exact token usage.
+            try {
+              await options.rpc.request("turn/interrupt", {
+                threadId: handle.threadId,
+                turnId: handle.turnId,
+              });
+            } catch {
+              // A tool_calls response promises a usable continuation. Make the
+              // durable batch non-replayable before failing instead of exposing
+              // calls whose original turn may still be active.
+              options.continuations.protectPendingFromReplay(responseId);
+              throw new HttpError(
+                502,
+                "The app-server could not end the dynamic tool turn.",
+                "server_error",
+                "tool_turn_interrupt_failed",
+              );
+            }
+            // The acknowledged interrupt already cancelled these requests, so
+            // answering them is local JSON-RPC hygiene.
+            for (const call of calls)
+              try {
+                options.rpc.respondError(call.request.id, {
+                  code: -32003,
+                  message: "Tool results are delivered via continuation",
+                });
+              } catch {
+                // A closed transport has already made the request unanswerable.
+              }
             for (const event of emitCapturedBatch(
               captured,
               normalizer,
               handle,
             )) {
               // Usage for the model request that produced this batch belongs
-              // after the terminal frame, exactly as a completed turn reports it.
+              // after the terminal frame, exactly as a completed turn reports
+              // it. A finish reason captured with the batch — a client abort
+              // racing the widening window — must not precede the
+              // authoritative tool_calls frame.
               if (event.usage) pendingUsage = event.usage;
+              else if (event.finishReason) continue;
               else yield event;
             }
             pendingFinishReason = "tool_calls";
@@ -429,33 +479,28 @@ export async function execute(
             }
           }
         }
-        // A suspension whose batch already carried usage has nothing left to
-        // wait for: app-server attributed the model request behind this batch
-        // before the handoff, and any later update belongs to the next
-        // response's boundary rather than to this one.
-        if (!failed && !(handle.suspended && pendingUsage)) {
-          // A completed turn ends at its thread's idle transition; a suspension
-          // never reaches one, so it settles for the first usage it can observe.
+        // Every turn ends at its thread's idle transition — completed turns
+        // naturally, tool-call turns through the interrupt above — and the
+        // terminal usage flush precedes or accompanies it.
+        if (!failed) {
           const late = await collectTerminalUsage(
             queue,
             normalizer,
             handle,
             options.signal,
-            handle.suspended ? "usage" : "idle",
-            options.usageGraceMs,
           );
           if (late) pendingUsage = late;
         }
         // Usage is optional output. Persisting the boundary for the next
-        // response is best-effort and must never fail a suspension that is
+        // response is best-effort and must never fail a tool handoff that is
         // already durable.
-        if (handle.suspended && !failed)
-          options.continuations.recordSuspendedUsage(
+        if (toolBatch && !failed)
+          options.continuations.recordPendingUsage(
             responseId,
             normalizer.usageBoundary(),
           );
         if (
-          !handle.suspended &&
+          !toolBatch &&
           !failed &&
           handle.threadId &&
           !options.continuations.recordReady(
@@ -488,25 +533,22 @@ export async function execute(
 }
 
 /**
- * Consumes notifications that follow the turn's terminal event until the
- * response's boundary, the bounded grace period, or abort. The turn already
+ * Consumes notifications that follow the turn's terminal event through the
+ * thread's idle boundary, a fixed hang backstop, or abort. The turn already
  * succeeded here, so every terminal condition — including transport failure and
  * ingress overflow — merely stops collection. Usage is optional output and must
- * never retract a completed turn's frames or its continuation mapping. A
- * `graceMs` of zero drains what has already arrived without waiting at all.
+ * never retract a completed turn's frames or its continuation mapping.
  */
 async function collectTerminalUsage(
   queue: IngressQueue,
   normalizer: EventNormalizer,
   handle: TurnHandle,
   signal: AbortSignal,
-  boundary: "idle" | "usage",
-  graceMs: number,
 ): Promise<Usage | undefined> {
   let usage: Usage | undefined;
   let idle = false;
-  const deadline = Date.now() + graceMs;
-  const reached = (): boolean => (boundary === "idle" ? idle : Boolean(usage));
+  const deadline = Date.now() + TERMINAL_USAGE_WAIT_MS;
+  const reached = (): boolean => idle;
   while (!signal.aborted && !queue.failing) {
     for (const event of queue.drainNotifications()) {
       if (
@@ -545,14 +587,30 @@ function isIdleThreadStatus(
   );
 }
 
-/** Captures and durably suspends the current dynamic-tool batch synchronously. */
-function suspendCapturedBatch(
+/** Converts one in-flight call to its durable, injectable representation. */
+function toStoredToolCall(call: PendingToolCall): StoredToolCall {
+  return {
+    callId: call.callId,
+    name: call.name,
+    // Stringified exactly once here, so the persisted arguments are
+    // byte-identical to what the response emits and what a continuation's
+    // replayed assistant message must repeat.
+    arguments: JSON.stringify(call.arguments ?? {}),
+  };
+}
+
+/** Captures and durably records the current dynamic-tool batch synchronously. */
+function captureToolBatch(
   queue: IngressQueue,
   options: ChatHandlerOptions,
   responseId: string,
   binding: ThreadBinding,
   handle: TurnHandle,
-): IngressEvent[] {
+): {
+  captured: IngressEvent[];
+  calls: PendingToolCall[];
+  stored: StoredToolCall[];
+} {
   queue.assertQueueHealthy();
   const captured = queue.drainAll();
   const calls = captured
@@ -574,15 +632,38 @@ function suspendCapturedBatch(
       });
     throw new Error("Dynamic tool request did not match the active turn.");
   }
+  const stored = calls.map(toStoredToolCall);
+  if (new Set(stored.map((call) => call.callId)).size !== stored.length) {
+    for (const call of calls)
+      try {
+        options.rpc.respondError(call.request.id, {
+          code: -32602,
+          message: "Dynamic tool call IDs must be unique",
+        });
+      } catch {
+        // A closed transport has already made the request unanswerable.
+      }
+    throw new HttpError(
+      502,
+      "The app-server returned duplicate dynamic tool call IDs.",
+      "server_error",
+      "invalid_dynamic_tool_batch",
+    );
+  }
   try {
-    options.continuations.suspend(responseId, binding, calls);
+    options.continuations.recordPendingTool(
+      responseId,
+      handle.threadId!,
+      binding,
+      stored,
+    );
   } catch (error) {
     // Captured calls are no longer in ingress, so this handoff owns rejecting
-    // every responder if durable suspension fails.
+    // every responder if durable persistence fails.
     for (const call of calls) rejectDynamicCall(options, call);
     throw error;
   }
-  return captured;
+  return { captured, calls, stored };
 }
 
 /** Normalizes one captured batch synchronously with the shared normalizer. */
@@ -597,7 +678,7 @@ function* emitCapturedBatch(
       yield* normalizer.normalize(event.method, event.params);
       continue;
     }
-    yield normalizer.dynamicToolCall(event.call);
+    yield normalizer.dynamicToolCall(toStoredToolCall(event.call));
   }
 }
 
@@ -611,11 +692,6 @@ async function resumeContinuation(
 ): Promise<ContinuationSetup> {
   const stored = options.continuations.store.get(request.previousResponseId!);
   if (!stored) continuationFailure(404, "unknown_previous_response_id");
-  // Selecting a live suspension proves that this request is a continuation attempt.
-  // Refresh before validation so a correctable mismatch cannot consume the
-  // remaining client tool-result window.
-  if (stored.state === "pending_tool")
-    options.continuations.refreshPending(request.previousResponseId!);
   if (stored.model !== binding.model)
     continuationFailure(409, "continuation_model_mismatch");
   // Schema-version-0 records written before reasoning effort became binding
@@ -644,23 +720,53 @@ async function resumeContinuation(
   )
     continuationFailure(410, "expired_tool_continuation");
   if (stored.state === "pending_tool") {
-    // A pending response already owns the thread, so this path deliberately
-    // installs only the responder and must never claim ownership again.
     if (!request.messages.some((message) => message.role === "tool"))
       continuationFailure(409, "tool_results_required");
-    const pending = options.continuations.pending(request.previousResponseId!);
-    if (!pending) continuationFailure(410, "expired_tool_continuation");
+    const pending = stored.pendingCalls;
+    // Belt and braces: the loader tombstones metadata-less pending records,
+    // so a live one without calls can only mean on-disk tampering.
+    if (!pending?.length) continuationFailure(410, "expired_tool_continuation");
     const results = validateToolResults(request.messages, pending);
-    handle.turnId = pending[0]!.turnId;
-    if (!options.continuations.setToolOwner(handle.threadId, onToolRequest))
-      continuationFailure(409, "thread_busy");
-    const continuationResults = pending.map((call) => ({
-      call,
-      content: results.get(call.callId)!,
-    }));
-    options.continuations.resolve(request.previousResponseId!, results);
+    // Nothing awaited since the record was read, so selection plus claim is
+    // atomic within this event-loop task: of two concurrent continuations,
+    // the loser observes thread_busy before any thread-mutating RPC.
+    acquireThread(handle, options, onToolRequest);
+    await resumeIdleThread(request, options, handle);
+    const items = pending.flatMap((call) => [
+      // Always the complete pair: the interrupted turn never persisted its
+      // own function_call item, and an unpaired output is silently ignored.
+      toFunctionCallItem(call),
+      toFunctionCallOutputItem(call.callId, results.get(call.callId)!),
+    ]);
+    // Establish the durable fail-closed boundary before the injection RPC. A
+    // failed state write leaves the still-unmodified thread safe to retry.
+    options.continuations.protectPendingFromReplay(request.previousResponseId!);
+    try {
+      await options.rpc.request(
+        "thread/inject_items",
+        { threadId: handle.threadId, items },
+        options.signal,
+      );
+    } catch (error) {
+      // The durable tombstone already prevents a retry if the injection
+      // reached an unknowable state.
+      if (error instanceof HttpError) throw error;
+      throw new HttpError(
+        502,
+        "The app-server could not accept the tool results.",
+        "server_error",
+        "tool_result_injection_failed",
+      );
+    }
+    // Superseded is more descriptive after success, but this bookkeeping is
+    // best-effort because the durable expired state already prevents replay.
+    options.continuations.recordPendingConsumed(request.previousResponseId!);
+    await startTurn(request, options, handle);
     return {
-      results: continuationResults,
+      results: pending.map((call) => ({
+        call,
+        content: results.get(call.callId)!,
+      })),
       usageBaseline: stored.usageTotal,
     };
   }
@@ -674,7 +780,17 @@ async function resumeContinuation(
   if (request.messages.at(-1)?.role === "tool")
     continuationFailure(409, "tool_results_without_pending_call");
   acquireThread(handle, options, onToolRequest);
+  await resumeIdleThread(request, options, handle);
+  await startTurn(request, options, handle);
+  return { results: [], usageBaseline: stored.usageTotal };
+}
 
+/** Gates on a resumable thread status and resumes it under this request's policy. */
+async function resumeIdleThread(
+  request: ChatRequest,
+  options: ChatHandlerOptions,
+  handle: TurnHandle,
+): Promise<void> {
   let resumed: Record<string, unknown>;
   try {
     const read = asRecord(
@@ -713,8 +829,6 @@ async function resumeContinuation(
   // never transfer ownership to, or start work on, an unexpected thread.
   if (resumedThreadId !== handle.threadId)
     continuationFailure(409, "thread_not_resumable");
-  await startTurn(request, options, handle);
-  return { results: [], usageBaseline: stored.usageTotal };
 }
 
 /** Starts one fresh durable thread and its initial turn. */
@@ -761,10 +875,12 @@ function acquireThread(
   options: ChatHandlerOptions,
   onToolRequest: (toolRequest: PendingToolCall) => void,
 ): void {
-  if (!options.continuations.claim(handle.threadId!))
-    continuationFailure(409, "thread_busy");
-  if (!options.continuations.setToolOwner(handle.threadId!, onToolRequest))
-    continuationFailure(409, "thread_busy");
+  const lease = options.continuations.acquireThread(
+    handle.threadId!,
+    onToolRequest,
+  );
+  if (!lease) continuationFailure(409, "thread_busy");
+  handle.lease = lease;
 }
 
 /** Starts the next turn and records its validated identifier in place. */
@@ -774,6 +890,13 @@ async function startTurn(
   handle: TurnHandle,
 ): Promise<void> {
   const last = request.messages.at(-1)!;
+  // A continuation whose final message is a tool result carries no new user
+  // input: the injected function_call_output pairs already in thread history
+  // are the model-visible input, and app-server accepts an empty input list.
+  const input =
+    last.role === "tool"
+      ? []
+      : [{ type: "text", text: last.content!, text_elements: [] }];
   const turn = asRecord(
     await options.rpc.request(
       "turn/start",
@@ -785,7 +908,7 @@ async function startTurn(
         // Expose detailed summaries by default, but honor an explicit request
         // for no reasoning by disabling its summary as well.
         summary: request.reasoningEffort === "none" ? "none" : "detailed",
-        input: [{ type: "text", text: last.content!, text_elements: [] }],
+        input,
         ...turnPolicyParams(request.policy),
       },
       options.signal,
@@ -803,7 +926,7 @@ function rejectDynamicCall(
   try {
     options.rpc.respondError(call.request.id, {
       code: -32000,
-      message: "Active turn ended before dynamic tool suspension",
+      message: "Active turn ended before the dynamic tool batch was captured",
     });
   } catch {
     // A closed transport has already made the request unanswerable.

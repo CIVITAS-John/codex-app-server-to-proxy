@@ -6,7 +6,7 @@ import {
   type PolicyError,
   type RequestPolicy,
 } from "../core/policy.js";
-import type { PendingToolCall } from "../continuation/state.js";
+import type { StoredToolCall } from "../continuation/state.js";
 import { HttpError } from "./errors.js";
 
 /** Chat Completions reasoning-effort values supported by the public API. */
@@ -358,10 +358,34 @@ export function toHistoryItem(
   };
 }
 
-/** Validates a complete, single-use result set for a suspended tool batch. */
+/** Builds the Responses API function_call item for one recorded dynamic call. */
+export function toFunctionCallItem(
+  call: StoredToolCall,
+): Record<string, unknown> {
+  return {
+    type: "function_call",
+    name: call.name,
+    arguments: call.arguments,
+    call_id: call.callId,
+  };
+}
+
+/** Builds the Responses API function_call_output item pairing one result. */
+export function toFunctionCallOutputItem(
+  callId: string,
+  output: string,
+): Record<string, unknown> {
+  return {
+    type: "function_call_output",
+    call_id: callId,
+    output,
+  };
+}
+
+/** Validates a complete, single-use result set for a pending tool batch. */
 export function validateToolResults(
   messages: ChatMessage[],
-  pending: PendingToolCall[],
+  pending: StoredToolCall[],
 ): Map<string, string> {
   const assistant = [...messages]
     .reverse()
@@ -382,8 +406,9 @@ export function validateToolResults(
     pendingCalls.some(
       (call) =>
         expected.get(call.id)?.name !== call.name ||
-        call.arguments !==
-          JSON.stringify(expected.get(call.id)?.arguments ?? {}),
+        // The persisted arguments string is byte-identical to what the
+        // tool-call response emitted, so replay comparison is exact.
+        call.arguments !== expected.get(call.id)?.arguments,
     )
   )
     invalid(

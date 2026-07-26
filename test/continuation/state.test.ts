@@ -74,19 +74,30 @@ test("atomic mappings survive reload and supersede older thread responses", asyn
   }, "codex-proxy-state-");
 });
 
-test("restart converts pending-tool responder records to expired tombstones", async () => {
+test("restart tombstones only pending records that lack call metadata", async () => {
   await withTempDir(async (directory) => {
     const store = new ResponseStore(directory);
     store.put({
-      responseId: "response_pending",
+      responseId: "response_legacy",
       threadId: "thread_1",
       state: "pending_tool",
       callIds: ["call_1"],
       ...binding,
     });
-    const tombstone = new ResponseStore(directory).get("response_pending");
+    store.put({
+      responseId: "response_durable",
+      threadId: "thread_2",
+      state: "pending_tool",
+      callIds: ["call_2"],
+      pendingCalls: [{ callId: "call_2", name: "lookup", arguments: "{}" }],
+      ...binding,
+    });
+    const reloaded = new ResponseStore(directory);
+    const tombstone = reloaded.get("response_legacy");
     assert.equal(tombstone?.state, "expired");
     assert.deepEqual(tombstone?.callIds, ["call_1"]);
+    // A record carrying its call metadata is fully durable and stays pending.
+    assert.equal(reloaded.get("response_durable")?.state, "pending_tool");
   }, "codex-proxy-state-");
 });
 
@@ -147,6 +158,30 @@ test("state loading rejects schema-invalid record details", async () => {
       },
     },
     { ...valid, responseId: "" },
+    // pendingCalls must be non-empty, complete, unique, and agree with callIds.
+    { ...valid, callIds: ["call_1"], pendingCalls: [] },
+    {
+      ...valid,
+      callIds: ["call_1"],
+      pendingCalls: [{ callId: "other", name: "lookup", arguments: "{}" }],
+    },
+    {
+      ...valid,
+      callIds: ["call_1"],
+      pendingCalls: [{ callId: "call_1", name: "lookup" }],
+    },
+    {
+      ...valid,
+      callIds: ["call_1", "call_2"],
+      pendingCalls: [
+        { callId: "call_1", name: "lookup", arguments: "{}" },
+        { callId: "call_1", name: "other", arguments: "{}" },
+      ],
+    },
+    {
+      ...valid,
+      pendingCalls: [{ callId: "call_1", name: "lookup", arguments: "{}" }],
+    },
   ];
   for (const [index, invalid] of invalidRecords.entries()) {
     await withTempDir(async (directory) => {
@@ -288,25 +323,24 @@ test("state directories must be directories", async () => {
   }, "codex-proxy-state-path-");
 });
 
+/** Durable metadata for the single scripted pending call used below. */
+const storedCall = {
+  callId: "call_1",
+  name: "lookup",
+  arguments: '{"id":1}',
+};
+
 test("pending tool_call_id values implicitly select exactly one response", async () => {
   await withTempDir(async (directory) => {
     const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
     const coordinator = new ContinuationCoordinator(
       new ResponseStore(directory),
       rpc,
-      60_000,
     );
-    coordinator.suspend("response_1", binding, [
-      {
-        request: { id: 1, method: "item/tool/call", params: {} },
-        callId: "call_1",
-        name: "lookup",
-        arguments: { id: 1 },
-        threadId: "thread_1",
-        turnId: "turn_1",
-      },
+    coordinator.recordPendingTool("response_1", "thread_1", binding, [
+      storedCall,
     ]);
-    coordinator.recordSuspendedUsage("response_1", {
+    coordinator.recordPendingUsage("response_1", {
       inputTokens: 4,
       cachedInputTokens: 0,
       outputTokens: 2,
@@ -318,8 +352,8 @@ test("pending tool_call_id values implicitly select exactly one response", async
       6,
     );
     // Best-effort persistence: an unknown or no-longer-pending mapping is a
-    // silent no-op rather than a failure that would retract the suspension.
-    coordinator.recordSuspendedUsage("response_absent", {
+    // silent no-op rather than a failure that would retract the pending record.
+    coordinator.recordPendingUsage("response_absent", {
       inputTokens: 1,
       cachedInputTokens: 0,
       outputTokens: 1,
@@ -328,8 +362,8 @@ test("pending tool_call_id values implicitly select exactly one response", async
     });
     assert.equal(coordinator.store.get("response_absent"), undefined);
     // An all-zero boundary is meaningful, not absent: a fresh thread that
-    // suspends before any attribution must still persist where it started.
-    coordinator.recordSuspendedUsage("response_1", {
+    // parks before any attribution must still persist where it started.
+    coordinator.recordPendingUsage("response_1", {
       inputTokens: 0,
       cachedInputTokens: 0,
       outputTokens: 0,
@@ -358,96 +392,164 @@ test("pending tool_call_id values implicitly select exactly one response", async
   }, "codex-proxy-state-");
 });
 
-test("matching a pending response refreshes its tool-result deadline", async () => {
-  vi.useFakeTimers();
-  try {
-    await withTempDir(async (directory) => {
-      const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
-      const coordinator = new ContinuationCoordinator(
-        new ResponseStore(directory),
-        rpc,
-        100,
-      );
-      coordinator.suspend("response_1", binding, [
-        {
-          request: { id: 1, method: "item/tool/call", params: {} },
-          callId: "call_1",
-          name: "lookup",
-          arguments: {},
-          threadId: "thread_1",
-          turnId: "turn_1",
-        },
-      ]);
+test("a pending record whose retention has lapsed is a tombstone, not a match", async () => {
+  await withTempDir(async (directory) => {
+    const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
+    // Zero retention makes every record born expired, which pins the explicit
+    // expiresAt check in findPendingResponse: findByCallIds itself never
+    // applies expiry.
+    const coordinator = new ContinuationCoordinator(
+      new ResponseStore(directory, 0),
+      rpc,
+    );
+    coordinator.recordPendingTool("response_1", "thread_1", binding, [
+      storedCall,
+    ]);
 
-      await vi.advanceTimersByTimeAsync(80);
-      assert.equal(coordinator.refreshPending("response_1"), true);
-      assert.equal(coordinator.refreshPending("unknown"), false);
-      await vi.advanceTimersByTimeAsync(80);
-      assert.equal(coordinator.pending("response_1")?.length, 1);
-      assert.equal(coordinator.store.get("response_1")?.state, "pending_tool");
-
-      await vi.advanceTimersByTimeAsync(20);
-      assert.equal(coordinator.pending("response_1"), undefined);
-      assert.equal(coordinator.store.get("response_1")?.state, "expired");
-      rpc.close();
-    }, "codex-proxy-state-");
-  } finally {
-    vi.useRealTimers();
-  }
+    assert.throws(
+      () => coordinator.findPendingResponse(["call_1"]),
+      (error: unknown) =>
+        error instanceof HttpError &&
+        error.status === 410 &&
+        error.code === "expired_tool_continuation",
+    );
+    rpc.close();
+  }, "codex-proxy-state-");
 });
 
-test("tool timeout survives a failed expiration write and releases memory", async () => {
-  vi.useFakeTimers();
-  try {
-    await withTempDir(async (directory) => {
-      const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
-      const store = new ResponseStore(directory);
-      const coordinator = new ContinuationCoordinator(store, rpc, 100);
-      coordinator.suspend("response_1", binding, [
-        {
-          request: { id: 1, method: "item/tool/call", params: {} },
-          callId: "call_1",
-          name: "lookup",
-          arguments: {},
-          threadId: "thread_1",
-          turnId: "turn_1",
-        },
-      ]);
-      const update = vi.spyOn(store, "update").mockImplementation(() => {
-        throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
-      });
+test("pending consumption is protected before injection and then superseded", async () => {
+  await withTempDir(async (directory) => {
+    const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
+    const store = new ResponseStore(directory);
+    const coordinator = new ContinuationCoordinator(store, rpc);
+    coordinator.recordPendingTool("response_1", "thread_1", binding, [
+      storedCall,
+    ]);
 
-      await vi.advanceTimersByTimeAsync(100);
+    coordinator.protectPendingFromReplay("response_1");
 
-      assert.equal(update.mock.calls.length, 1);
-      assert.equal(coordinator.pending("response_1"), undefined);
-      assert.equal(coordinator.claim("thread_1"), true);
-      assert.equal(store.get("response_1")?.state, "pending_tool");
-      rpc.close();
-    }, "codex-proxy-state-");
-  } finally {
-    vi.useRealTimers();
-  }
+    assert.equal(store.get("response_1")?.state, "expired");
+    // The durable pre-injection tombstone makes every retry fail closed.
+    assert.throws(
+      () => coordinator.findPendingResponse(["call_1"]),
+      (error: unknown) =>
+        error instanceof HttpError &&
+        error.status === 410 &&
+        error.code === "expired_tool_continuation",
+    );
+    coordinator.recordPendingConsumed("response_1");
+    assert.equal(store.get("response_1")?.state, "superseded");
+    rpc.close();
+  }, "codex-proxy-state-");
 });
 
-test("implicit tool continuation preserves an expired restart tombstone", async () => {
+test("replay protection must persist before injection can proceed", async () => {
+  await withTempDir(async (directory) => {
+    const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
+    const store = new ResponseStore(directory);
+    const coordinator = new ContinuationCoordinator(store, rpc);
+    coordinator.recordPendingTool("response_1", "thread_1", binding, [
+      storedCall,
+    ]);
+    const update = vi.spyOn(store, "update").mockImplementation(() => {
+      throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+    });
+
+    assert.throws(
+      () => coordinator.protectPendingFromReplay("response_1"),
+      /disk full/,
+    );
+
+    assert.equal(update.mock.calls.length, 1);
+    assert.equal(store.get("response_1")?.state, "pending_tool");
+    rpc.close();
+  }, "codex-proxy-state-");
+});
+
+test("pending usage and consumed bookkeeping are best-effort after durable work", async () => {
+  await withTempDir(async (directory) => {
+    const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
+    const store = new ResponseStore(directory);
+    const coordinator = new ContinuationCoordinator(store, rpc);
+    coordinator.recordPendingTool("response_1", "thread_1", binding, [
+      storedCall,
+    ]);
+    const update = vi.spyOn(store, "update").mockImplementation(() => {
+      throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+    });
+
+    assert.doesNotThrow(() =>
+      coordinator.recordPendingUsage("response_1", {
+        inputTokens: 1,
+        cachedInputTokens: 0,
+        outputTokens: 1,
+        reasoningOutputTokens: 0,
+        totalTokens: 2,
+      }),
+    );
+    assert.equal(store.get("response_1")?.usageTotal, undefined);
+
+    update.mockRestore();
+    coordinator.protectPendingFromReplay("response_1");
+    const consumedUpdate = vi.spyOn(store, "update").mockImplementation(() => {
+      throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+    });
+    assert.doesNotThrow(() => coordinator.recordPendingConsumed("response_1"));
+    assert.equal(store.get("response_1")?.state, "expired");
+    consumedUpdate.mockRestore();
+    rpc.close();
+  }, "codex-proxy-state-");
+});
+
+test("recording a pending batch rejects duplicate call IDs", async () => {
+  await withTempDir(async (directory) => {
+    const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
+    const store = new ResponseStore(directory);
+    const coordinator = new ContinuationCoordinator(store, rpc);
+
+    assert.throws(
+      () =>
+        coordinator.recordPendingTool("response_1", "thread_1", binding, [
+          storedCall,
+          { ...storedCall, name: "other" },
+        ]),
+      /must be nonempty and unique/,
+    );
+    assert.equal(store.get("response_1"), undefined);
+    rpc.close();
+  }, "codex-proxy-state-");
+});
+
+test("a completed continuation's ready record supersedes its thread's pending record", async () => {
+  await withTempDir(async (directory) => {
+    const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
+    const store = new ResponseStore(directory);
+    const coordinator = new ContinuationCoordinator(store, rpc);
+    coordinator.recordPendingTool("response_1", "thread_1", binding, [
+      storedCall,
+    ]);
+
+    // Defense in depth behind the pre-injection guard: a continuation that
+    // completes must never leave a replayable pending record.
+    assert.equal(
+      coordinator.recordReady("response_2", "thread_1", binding),
+      true,
+    );
+
+    assert.equal(store.get("response_1")?.state, "superseded");
+    assert.equal(store.get("response_2")?.state, "ready");
+    rpc.close();
+  }, "codex-proxy-state-");
+});
+
+test("pending records with call metadata survive restart for implicit selection", async () => {
   await withTempDir(async (directory) => {
     const firstRpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
     const first = new ContinuationCoordinator(
       new ResponseStore(directory),
       firstRpc,
-      60_000,
     );
-    first.suspend("response_1", binding, [
-      {
-        request: { id: 1, method: "item/tool/call", params: {} },
-        callId: "call_1",
-        name: "lookup",
-        arguments: {},
-        threadId: "thread_1",
-        turnId: "turn_1",
-      },
-    ]);
+    first.recordPendingTool("response_1", "thread_1", binding, [storedCall]);
     firstRpc.close();
     const secondRpc = new JsonRpcTransport(
       new PassThrough(),
@@ -456,9 +558,36 @@ test("implicit tool continuation preserves an expired restart tombstone", async 
     const restarted = new ContinuationCoordinator(
       new ResponseStore(directory),
       secondRpc,
-      60_000,
     );
 
+    // Nothing about the pending batch is process-local, so a restart changes
+    // nothing about selection.
+    assert.equal(restarted.findPendingResponse(["call_1"]), "response_1");
+    assert.deepEqual(restarted.store.get("response_1")?.pendingCalls, [
+      storedCall,
+    ]);
+    secondRpc.close();
+  }, "codex-proxy-state-");
+});
+
+test("legacy pending records without call metadata expire on load", async () => {
+  await withTempDir(async (directory) => {
+    const store = new ResponseStore(directory);
+    // Written the way pre-metadata releases wrote suspensions: call IDs only.
+    store.put({
+      responseId: "response_legacy",
+      threadId: "thread_1",
+      state: "pending_tool",
+      callIds: ["call_1"],
+      ...binding,
+    });
+    const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
+    const restarted = new ContinuationCoordinator(
+      new ResponseStore(directory),
+      rpc,
+    );
+
+    assert.equal(restarted.store.get("response_legacy")?.state, "expired");
     assert.throws(
       () => restarted.findPendingResponse(["call_1"]),
       (error: unknown) =>
@@ -466,7 +595,7 @@ test("implicit tool continuation preserves an expired restart tombstone", async 
         error.status === 410 &&
         error.code === "expired_tool_continuation",
     );
-    secondRpc.close();
+    rpc.close();
   }, "codex-proxy-state-");
 });
 
@@ -485,7 +614,7 @@ test("implicit tool continuation rejects ambiguous expired tombstones", async ()
         callIds: ["call_shared"],
       });
     const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
-    const coordinator = new ContinuationCoordinator(store, rpc, 60_000);
+    const coordinator = new ContinuationCoordinator(store, rpc);
 
     assert.throws(
       () => coordinator.findPendingResponse(["call_shared"]),
@@ -507,10 +636,12 @@ test("dynamic tool callbacks accept omitted namespace but reject non-null values
     const coordinator = new ContinuationCoordinator(
       new ResponseStore(directory),
       rpc,
-      60_000,
     );
     const calls: string[] = [];
-    coordinator.setToolOwner("thread_1", (call) => calls.push(call.callId));
+    const lease = coordinator.acquireThread("thread_1", (call) =>
+      calls.push(call.callId),
+    );
+    assert.ok(lease);
     const base = {
       threadId: "thread_1",
       turnId: "turn_1",
@@ -534,81 +665,7 @@ test("dynamic tool callbacks accept omitted namespace but reject non-null values
       id: 2,
       error: { code: -32602, message: "Invalid dynamic tool request" },
     });
-    rpc.close();
-  }, "codex-proxy-state-");
-});
-
-test("resolving a suspension is consumed and cannot replay tool results", async () => {
-  await withTempDir(async (directory) => {
-    const output = new PassThrough();
-    const rpc = new JsonRpcTransport(new PassThrough(), output);
-    const coordinator = new ContinuationCoordinator(
-      new ResponseStore(directory),
-      rpc,
-      60_000,
-    );
-    coordinator.suspend("response_1", binding, [
-      {
-        request: { id: 1, method: "item/tool/call", params: {} },
-        callId: "call_1",
-        name: "lookup",
-        arguments: {},
-        threadId: "thread_1",
-        turnId: "turn_1",
-      },
-    ]);
-
-    assert.equal(
-      coordinator.resolve("response_1", new Map([["call_1", "done"]]))?.length,
-      1,
-    );
-    assert.equal(
-      coordinator.resolve("response_1", new Map([["call_1", "replay"]])),
-      undefined,
-    );
-    assert.equal(coordinator.store.get("response_1")?.state, "superseded");
-    rpc.close();
-  }, "codex-proxy-state-");
-});
-
-test("a response failure expires and consumes the entire suspended batch", async () => {
-  await withTempDir(async (directory) => {
-    const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
-    const store = new ResponseStore(directory);
-    const coordinator = new ContinuationCoordinator(store, rpc, 60_000);
-    const calls = ["call_1", "call_2"].map((callId, index) => ({
-      request: { id: index + 1, method: "item/tool/call", params: {} },
-      callId,
-      name: "lookup",
-      arguments: {},
-      threadId: "thread_1",
-      turnId: "turn_1",
-    }));
-    coordinator.suspend("response_1", binding, calls);
-    const originalRespond = rpc.respond.bind(rpc);
-    let responses = 0;
-    rpc.respond = (id, result): void => {
-      responses += 1;
-      if (responses === 2) throw new Error("transport write failed");
-      originalRespond(id, result);
-    };
-
-    assert.throws(
-      () =>
-        coordinator.resolve(
-          "response_1",
-          new Map([
-            ["call_1", "one"],
-            ["call_2", "two"],
-          ]),
-        ),
-      /transport write failed/,
-    );
-    assert.equal(coordinator.pending("response_1"), undefined);
-    assert.equal(store.get("response_1")?.state, "expired");
-    assert.equal(coordinator.resolve("response_1", new Map()), undefined);
-    assert.equal(responses, 2);
-    assert.equal(coordinator.claim("thread_1"), true);
+    lease.release();
     rpc.close();
   }, "codex-proxy-state-");
 });
@@ -619,12 +676,17 @@ test("dynamic tool callbacks route to exactly one thread owner", async () => {
     const coordinator = new ContinuationCoordinator(
       new ResponseStore(directory),
       rpc,
-      60_000,
     );
     const first: string[] = [];
     const second: string[] = [];
-    coordinator.setToolOwner("thread_1", (call) => first.push(call.callId));
-    coordinator.setToolOwner("thread_2", (call) => second.push(call.callId));
+    const firstLease = coordinator.acquireThread("thread_1", (call) =>
+      first.push(call.callId),
+    );
+    const secondLease = coordinator.acquireThread("thread_2", (call) =>
+      second.push(call.callId),
+    );
+    assert.ok(firstLease);
+    assert.ok(secondLease);
 
     rpc.emit("request", {
       id: 1,
@@ -641,71 +703,51 @@ test("dynamic tool callbacks route to exactly one thread owner", async () => {
 
     assert.deepEqual(first, []);
     assert.deepEqual(second, ["call_2"]);
+    firstLease.release();
+    secondLease.release();
     coordinator.dispose();
     rpc.close();
   }, "codex-proxy-state-");
 });
 
-test("disposing a coordinator cancels pending responders and expires their mapping", async () => {
+test("thread ownership is acquired and released by one atomic lease", async () => {
   await withTempDir(async (directory) => {
-    const output = new PassThrough();
-    const written: Buffer[] = [];
-    output.on("data", (chunk: Buffer) => written.push(chunk));
-    const rpc = new JsonRpcTransport(new PassThrough(), output);
-    const store = new ResponseStore(directory);
-    const coordinator = new ContinuationCoordinator(store, rpc, 1);
-    coordinator.suspend("response_1", binding, [
-      {
-        request: { id: 1, method: "item/tool/call", params: {} },
-        callId: "call_1",
-        name: "lookup",
-        arguments: {},
-        threadId: "thread_1",
-        turnId: "turn_1",
-      },
-    ]);
+    const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
+    const coordinator = new ContinuationCoordinator(
+      new ResponseStore(directory),
+      rpc,
+    );
+    const first = coordinator.acquireThread("thread_1", () => undefined);
+    assert.ok(first);
+    assert.equal(
+      coordinator.acquireThread("thread_1", () => undefined),
+      undefined,
+    );
 
-    coordinator.dispose();
+    first.release();
+    first.release();
+    const replacement = coordinator.acquireThread("thread_1", () => undefined);
+    assert.ok(replacement);
+    replacement.release();
     rpc.close();
-    await new Promise((resolve) => setTimeout(resolve, 10));
-
-    assert.equal(store.get("response_1")?.state, "expired");
-    assert.equal(coordinator.pending("response_1"), undefined);
-    assert.deepEqual(JSON.parse(Buffer.concat(written).toString("utf8")), {
-      id: 1,
-      error: {
-        code: -32000,
-        message: "App-server transport is being replaced",
-      },
-    });
   }, "codex-proxy-state-");
 });
 
-test("disposing survives a failed expiration write and releases memory", async () => {
+test("disposal leaves durable pending records untouched", async () => {
   await withTempDir(async (directory) => {
     const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
     const store = new ResponseStore(directory);
-    const coordinator = new ContinuationCoordinator(store, rpc, 60_000);
-    coordinator.suspend("response_1", binding, [
-      {
-        request: { id: 1, method: "item/tool/call", params: {} },
-        callId: "call_1",
-        name: "lookup",
-        arguments: {},
-        threadId: "thread_1",
-        turnId: "turn_1",
-      },
+    const coordinator = new ContinuationCoordinator(store, rpc);
+    coordinator.recordPendingTool("response_1", "thread_1", binding, [
+      storedCall,
     ]);
-    const update = vi.spyOn(store, "update").mockImplementation(() => {
-      throw Object.assign(new Error("permission denied"), { code: "EACCES" });
-    });
 
-    assert.doesNotThrow(() => coordinator.dispose());
+    coordinator.dispose();
 
-    assert.equal(update.mock.calls.length, 1);
-    assert.equal(coordinator.pending("response_1"), undefined);
-    assert.equal(coordinator.claim("thread_1"), true);
+    // The pending batch has no process-local responder to cancel; the record
+    // stays continuable by the next transport generation.
     assert.equal(store.get("response_1")?.state, "pending_tool");
+    assert.throws(() => coordinator.acquireThread("thread_1", () => undefined));
     rpc.close();
   }, "codex-proxy-state-");
 });
@@ -714,13 +756,18 @@ test("a disposed coordinator cannot persist a stale completed response", async (
   await withTempDir(async (directory) => {
     const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
     const store = new ResponseStore(directory);
-    const coordinator = new ContinuationCoordinator(store, rpc, 60_000);
+    const coordinator = new ContinuationCoordinator(store, rpc);
 
     coordinator.dispose();
 
     assert.equal(
       coordinator.recordReady("response_stale", "thread_1", binding),
       false,
+    );
+    assert.throws(() =>
+      coordinator.recordPendingTool("response_stale", "thread_1", binding, [
+        storedCall,
+      ]),
     );
     assert.equal(store.get("response_stale"), undefined);
     rpc.close();
@@ -736,7 +783,6 @@ test("a disposed coordinator rejects tool callbacks until transport close", asyn
     const coordinator = new ContinuationCoordinator(
       new ResponseStore(directory),
       rpc,
-      60_000,
     );
     coordinator.dispose();
 

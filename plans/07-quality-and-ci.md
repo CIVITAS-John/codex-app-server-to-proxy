@@ -34,7 +34,7 @@ All implementation items below are now represented in the source tree and determ
     - Add a real slow-client/SSE backpressure test that proves bounded buffering and ordered drain behavior.
     - Assert the HTTP 429 `overloaded` rejection when `maxRequests` is reached; the existing `maxRequests: 1` test proves only that a disconnect releases capacity.
     - Drive a real unexpected child exit through CLI recovery; the current test pins only the retry-delay schedule constant.
-    - Assert bind-time port-conflict failure, shutdown during an in-flight login, and signal-driven shutdown during a suspended dynamic tool call. Existing suspension coverage disposes the coordinator directly rather than exercising process shutdown.
+    - Assert bind-time port-conflict failure, shutdown during an in-flight login, and signal-driven shutdown after an interrupted dynamic tool call whose captured requests were already answered.
     - Preserve existing coverage for request-body, ingress-queue, per-thread concurrency, request, tool, login, startup, and shutdown bounds.
 3. Add bounded property tests for JSON-RPC framing, SSE serialization, fragmented dynamic-tool arguments, response aggregation, ignored Chat Completions fields, and canonical binding material. Use deterministic seeds in required CI and retain minimal failing cases as regression fixtures.
 4. Expand the opt-in live contract without duplicating the offline matrix.

@@ -130,7 +130,6 @@ export function createProxyServer(
       options.root,
       requirements,
       options.implicitToolContinuation,
-      options.usageGraceMs,
       log,
       requestId,
       url,
@@ -182,11 +181,7 @@ export function createProxyServer(
         transport.close(new Error("app-server transport replaced"));
       transport = value;
       continuations = value
-        ? new ContinuationCoordinator(
-            continuationStore,
-            value,
-            options.toolTimeoutMs,
-          )
+        ? new ContinuationCoordinator(continuationStore, value)
         : undefined;
     },
     listen: () =>
@@ -238,7 +233,6 @@ async function route(
   root: string,
   requirements: PolicyRequirements,
   implicitToolContinuation: boolean,
-  usageGraceMs: number,
   log: Logger,
   requestId: string,
   url: URL | undefined,
@@ -289,7 +283,6 @@ async function route(
       root,
       requirements,
       implicitToolContinuation,
-      usageGraceMs,
     });
     return;
   }
