@@ -586,6 +586,10 @@ process.on("SIGTERM", () => setTimeout(() => process.exit(0), 200));`,
           fake,
           "--shutdown-timeout",
           "2s",
+          // The fake never reports usage, so the default grace would hold the
+          // suspended response past this test's own deadline.
+          "--usage-grace",
+          "250ms",
         ],
         { cwd: repoRootPath, stdio: ["ignore", "pipe", "pipe"] },
       );

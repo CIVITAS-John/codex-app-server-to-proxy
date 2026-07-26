@@ -647,6 +647,9 @@ async function withChatServer(
       root: await realpath("."),
       stateDir,
       requestTimeoutMs,
+      // Offline fakes deliver usage within milliseconds or never; the product
+      // default grace would stall every usage-less suspension for its length.
+      usageGraceMs: 250,
       log: logger,
     });
     proxy = started.proxy;
@@ -2411,6 +2414,9 @@ test("request policies map exactly, bind continuations, and honor managed denial
       const started = await startProxyWithTransport(fake.rpc, {
         root,
         stateDir: join(directory, "state"),
+        // This fake reports neither usage nor an idle boundary, so the product
+        // default grace would stall every completed turn for its full length.
+        usageGraceMs: 250,
       });
       proxy = started.proxy;
       const origin = started.origin;
@@ -2765,6 +2771,8 @@ test("refreshing managed requirements on an unchanged transport takes effect", a
       const started = await startProxyWithTransport(fake.rpc, {
         root,
         stateDir: join(directory, "state"),
+        // Same idle-less fake as above: avoid paying the full default grace.
+        usageGraceMs: 250,
         requirements: {
           ...UNRESTRICTED_POLICY_REQUIREMENTS,
           allowedSandboxModes: ["read-only"],

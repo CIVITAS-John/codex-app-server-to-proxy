@@ -105,6 +105,12 @@ export type ChatContractScenario =
 export interface ChatContractOptions {
   scenarios?: readonly ChatContractScenario[];
   maxModelCalls?: number;
+  /**
+   * Requires the suspended tool-call response to carry usage with reasoning
+   * detail and reports how long that response took. Live-only: the scripted
+   * backend deliberately reports no usage before the tool handoff.
+   */
+  requireSuspendedUsage?: boolean;
 }
 
 /** Complete deterministic contract exercised by the fake app-server. */
@@ -319,6 +325,7 @@ export function registerChatContract(
             },
           },
         ];
+        const firstStarted = Date.now();
         const first = await chat({
           model: CONTRACT_MODEL,
           messages: [
@@ -331,6 +338,7 @@ export function registerChatContract(
           tools,
         });
         const firstRaw = await first.text();
+        const firstElapsedMs = Date.now() - firstStarted;
         assert.equal(first.status, 200, diagnostic(firstRaw));
         const firstBody = parseJson<ToolCompletion>(
           firstRaw,
@@ -351,11 +359,15 @@ export function registerChatContract(
           call?.function.name === "contract_lookup",
           "dynamic tool name did not match the contract fixture",
         );
-        // A suspended turn reports whatever app-server had already attributed to
-        // it. Whether that record exists yet depends on app-server, and omitting
-        // it loses nothing: the suspension hands its boundary to the
-        // continuation, whose usage is asserted below. A reported one must still
-        // describe the model request behind these calls.
+        // A suspended turn reports whatever app-server attributed within the
+        // usage grace. Live evidence (codex 0.145.0, 2026-07-26): app-server
+        // never emits `thread/tokenUsage/updated` while a turn is parked on a
+        // dynamic tool call — usage arrives only after the tool result closes
+        // the turn — so presence here is reported, not required. Numbers only.
+        if (options.requireSuspendedUsage)
+          console.info(
+            `[live] suspended tool_calls response took ${firstElapsedMs} ms; usage_present=${String(Boolean(firstBody.usage))}; reasoning_tokens=${String(firstBody.usage?.completion_tokens_details?.reasoning_tokens)}`,
+          );
         if (firstBody.usage) assertUsage(firstBody.usage);
         const callArguments = parseJson<Record<string, unknown>>(
           call?.function.arguments ?? "",
@@ -367,6 +379,7 @@ export function registerChatContract(
           "dynamic-tool arguments did not match the contract fixture",
         );
 
+        const secondStarted = Date.now();
         const second = await chat({
           model: CONTRACT_MODEL,
           messages: [
@@ -385,6 +398,11 @@ export function registerChatContract(
           tools,
         });
         const secondRaw = await second.text();
+        // Numbers only: pairs with the suspended-response timing line above.
+        if (options.requireSuspendedUsage)
+          console.info(
+            `[live] tool-result response took ${Date.now() - secondStarted} ms`,
+          );
         assert.equal(second.status, 200, diagnostic(secondRaw));
         const secondBody = parseJson<ToolCompletion>(
           secondRaw,

@@ -159,6 +159,9 @@ async function startProxy(
   const running = await startProxyWithTransport(fake.transport, {
     root,
     stateDir: directory,
+    // This fake never reports usage for a suspension, so the product default
+    // grace would stall every tool-call response for its full length.
+    usageGraceMs: 250,
   });
   return {
     origin: running.origin,

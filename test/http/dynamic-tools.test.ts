@@ -295,7 +295,9 @@ async function startProxy(
   stateDir: string,
   fake: ToolAppServer,
   toolTimeoutMs = 5_000,
-  usageGraceMs?: number,
+  // The fake either delivers usage within milliseconds or never; the product
+  // default grace would stall every usage-less suspension for its full length.
+  usageGraceMs = 250,
 ) {
   const { origin, proxy } = await startProxyWithTransport(fake.transport.rpc, {
     root: process.cwd(),

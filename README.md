@@ -185,7 +185,7 @@ When Codex reports exact usage for the turn, responses include standard `prompt_
 
 One response can span several Codex model requests, for example when internal tools run before the answer. Usage covers every request the response reported, not only the last one, so reasoning tokens still account for reasoning summaries streamed earlier in the same response. The continuation mapping retains the exact cumulative total at each response boundary; a prerelease mapping that lacks that snapshot safely reports only app-server's exact last-request usage once. A response that ends in `finish_reason: "tool_calls"` reports usage when Codex has already attributed those requests by the time the response ends; otherwise the continuation reports them, because each response persists the exact boundary its successor counts from. Those tokens are never dropped and never estimated, and never counted twice — the tool-call response covers the work up to the call, and the continuation counts from there.
 
-One case cannot be reported: a tool call that is the final desired result and is never continued. If Codex had not attributed that model request before the response ended, no channel remains to report it, so `usage` is omitted rather than estimated. Returning a tool result — even a trivial one — closes the turn and recovers the tokens on the continuation. `--usage-grace` controls how long a response waits for that attribution (default 100 ms, `0` disables the wait); it does not affect whether the tokens are eventually reported.
+One case cannot be reported: a tool call that is the final desired result and is never continued. If Codex had not attributed that model request before the response ended, no channel remains to report it, so `usage` is omitted rather than estimated. Returning a tool result — even a trivial one — closes the turn and recovers the tokens on the continuation. `--usage-grace` controls how long a response waits for that attribution (default 12 s, `0` disables the wait); the wait ends at the first reported usage, so responses whose usage arrives promptly pay only that latency. It does not affect whether the tokens are eventually reported.
 
 ## Safety and limits
 
@@ -195,14 +195,14 @@ One case cannot be reported: a tool call that is the final desired result and is
 
 Default limits (all configurable via CLI flags):
 
-| Limit                                       | Default                                     |
-| ------------------------------------------- | ------------------------------------------- |
-| JSON body size                              | 1 MiB                                       |
-| Concurrent HTTP requests                    | 100 (excess rejected with 429 `overloaded`) |
-| Request deadline                            | 30 s                                        |
-| Suspended tool-call deadline                | 5 min                                       |
-| Usage wait after a turn's last frame        | 100 ms (`--usage-grace`, `0` disables)      |
-| Login / startup deadline (`--tool-timeout`) | 5 min                                       |
+| Limit                                       | Default                                                                |
+| ------------------------------------------- | ---------------------------------------------------------------------- |
+| JSON body size                              | 1 MiB                                                                  |
+| Concurrent HTTP requests                    | 100 (excess rejected with 429 `overloaded`)                            |
+| Request deadline                            | 30 s                                                                   |
+| Suspended tool-call deadline                | 5 min                                                                  |
+| Usage wait after a turn's last frame        | 12 s (`--usage-grace`, `0` disables; ends at the first reported usage) |
+| Login / startup deadline (`--tool-timeout`) | 5 min                                                                  |
 
 A second request for an active Codex thread returns 409 `thread_busy`. If app-server crashes, the proxy retries with bounded backoff while `/ready` returns 503.
 The request deadline aborts downstream work and closes any response that is still open, including a stream blocked by a client that stopped reading; its concurrency slot is then released.

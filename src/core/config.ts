@@ -7,11 +7,17 @@ import { canonicalizeRoot, isPathWithinRoot } from "./policy.js";
 /** Default maximum accepted HTTP request-body size. */
 export const DEFAULT_BODY_LIMIT = 1024 * 1024;
 
-/** Default wait for exact usage after a turn's last frame. */
-export const DEFAULT_USAGE_GRACE_MS = 100;
+/**
+ * Default wait for exact usage after a turn's last frame. Live app-server
+ * (codex 0.145.0) flushes a parked turn's usage about ten seconds after it
+ * issues the dynamic tool call, so the default clears that flush with margin;
+ * the wait ends at the first correlated usage, so responses whose usage
+ * arrives promptly pay only that.
+ */
+export const DEFAULT_USAGE_GRACE_MS = 12_000;
 
-/** Highest accepted terminal-usage grace, well below the request deadline. */
-const MAX_USAGE_GRACE_MS = 5_000;
+/** Highest accepted terminal-usage grace, at the default request deadline. */
+const MAX_USAGE_GRACE_MS = 30_000;
 
 /** User-facing description of the root-namespaced state default. */
 export const DEFAULT_STATE_DIR_DESCRIPTION =

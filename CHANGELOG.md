@@ -7,12 +7,12 @@ All notable user-facing changes are recorded here. This project follows semantic
 ### Added
 
 - Replayed assistant messages may carry `reasoning_content` in place of the nonstandard `reasoning` response field. OpenAI-compatible clients such as the Vercel AI SDK write reasoning back under that name, which previously failed the request with `invalid_request` on the replayed message. Both fields are response-only, accepted only as a string on an assistant message, and discarded before history injection.
-- `--usage-grace <duration>` bounds how long a response waits for exact usage after its last frame (default `100ms`; `0` disables the wait). It changes which response reports a suspended turn's tokens, never whether they are reported.
+- `--usage-grace <duration>` bounds how long a response waits for exact usage after its last frame (default `12s`; `0` disables the wait; the wait ends at the first reported usage — live app-server flushes a parked turn’s usage about ten seconds after the tool call). It changes which response reports a suspended turn's tokens, never whether they are reported.
 
 ### Fixed
 
 - Token usage is no longer lost across a dynamic-tool suspension. When Codex had not attributed the model request behind the tool call before the response ended, both that response and its continuation previously omitted those tokens — clients saw no `completion_tokens_details.reasoning_tokens` for reasoning the model had demonstrably done. Each response now persists the exact boundary its successor counts from, so the tool-call response reports the work up to the call and the continuation counts from there: every token is reported exactly once, never estimated and never double counted. A tool call that is never continued still omits usage it could not observe.
-- A suspended response that already captured its usage no longer waits out the grace period before returning, removing up to 100 ms of latency from every tool round trip in that ordering.
+- A suspended response that already captured its usage no longer waits out the grace period before returning, removing the full grace of latency from every tool round trip in that ordering.
 
 - Usage is no longer dropped when app-server reports `thread/tokenUsage/updated` after `turn/completed`; the proxy consumes correlated notifications through the thread's `idle` lifecycle boundary. Responses previously omitted `usage` entirely — including `completion_tokens_details.reasoning_tokens` — even though reasoning was streamed.
 - Responses that end in `finish_reason: "tool_calls"` now report the usage app-server had already attributed to the suspended turn, emitted after the terminal chunk instead of before it.

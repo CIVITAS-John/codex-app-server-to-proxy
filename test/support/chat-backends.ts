@@ -55,6 +55,10 @@ export async function startFakeChatBackend(
       environment,
       UNRESTRICTED_POLICY_REQUIREMENTS,
       log,
+      // The scripted backend reports a suspension's usage only after the tool
+      // result returns, so the product default grace would stall the offline
+      // contract; the live backend keeps the default to measure real timing.
+      250,
     );
   });
 }
@@ -81,6 +85,27 @@ async function startLiveChatBackendOnce(
       log: silentLogger,
     });
     assertLivePolicyPrerequisites(appServer.requirements);
+    // Wire-level timeline for the open usage-ordering question: offsets of the
+    // dynamic tool request and every usage notification from the turn start
+    // that produced them. Numbers only; no payload content is logged.
+    let turnStartedAt = 0;
+    const baseRequest = appServer.rpc.request.bind(appServer.rpc);
+    appServer.rpc.request = (method, params, signal) => {
+      if (method === "turn/start") turnStartedAt = Date.now();
+      return baseRequest(method, params, signal);
+    };
+    appServer.rpc.on("request", ({ method }) => {
+      if (method === "item/tool/call")
+        console.info(
+          `[live] item/tool/call at +${Date.now() - turnStartedAt} ms after turn/start`,
+        );
+    });
+    appServer.rpc.on("notification", (method: string) => {
+      if (method === "thread/tokenUsage/updated")
+        console.info(
+          `[live] thread/tokenUsage/updated at +${Date.now() - turnStartedAt} ms after turn/start`,
+        );
+    });
     const interactive = !process.env.CI && Boolean(process.stderr.isTTY);
     await ensureAuthenticated({
       rpc: appServer.rpc,
@@ -554,6 +579,7 @@ async function startProxy(
   environment: ContractEnvironment,
   requirements: PolicyRequirements,
   log: Logger,
+  usageGraceMs?: number,
 ): Promise<ChatContractBackend> {
   let proxy: ProxyServer | undefined;
   let modelCalls = 0;
@@ -579,6 +605,7 @@ async function startProxy(
       stateDir: environment.stateDir,
       requestTimeoutMs: 120_000,
       shutdownTimeoutMs: 10_000,
+      usageGraceMs,
       log,
       requirements,
     });
