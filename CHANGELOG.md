@@ -2,6 +2,20 @@
 
 All notable user-facing changes are recorded here. This project follows semantic versioning once a version is published.
 
+## Unreleased
+
+### Added
+
+- `--sync-auth <always|if-missing|never>` controls whether startup tracks credentials from `$CODEX_HOME` or `~/.codex`; the default `always` adopts the source when the target is missing or the source is strictly newer, `if-missing` retains the earlier seed-once behavior, and `never` leaves the proxy's Codex home untouched.
+
+### Changed
+
+- **Breaking:** Seeded ChatGPT credentials now track the main Codex home by default instead of being copied only once. A proxy login newer than the source remains authoritative, protecting a refresh token the proxy rotated more recently.
+
+### Fixed
+
+- An `account/read` RPC error such as "refresh token was already used" now triggers one best-effort logout and the existing browser or device-code login pathway instead of ending startup with exit code 1. `/ready` remains 503 until recovery completes.
+
 ## 0.1.0-rc.8 — July 26, 2026
 
 ### Added

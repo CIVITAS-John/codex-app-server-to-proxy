@@ -5,6 +5,7 @@ import type { ServerRequest } from "../../protocol/generated/typescript/ServerRe
 import type { InitializeResponse } from "../../protocol/generated/typescript/InitializeResponse.js";
 import type { GetAccountResponse } from "../../protocol/generated/typescript/v2/GetAccountResponse.js";
 import type { LoginAccountResponse } from "../../protocol/generated/typescript/v2/LoginAccountResponse.js";
+import type { LogoutAccountResponse } from "../../protocol/generated/typescript/v2/LogoutAccountResponse.js";
 import type { ConfigRequirementsReadResponse } from "../../protocol/generated/typescript/v2/ConfigRequirementsReadResponse.js";
 import type { Thread } from "../../protocol/generated/typescript/v2/Thread.js";
 import type { ThreadInjectItemsResponse } from "../../protocol/generated/typescript/v2/ThreadInjectItemsResponse.js";
@@ -20,6 +21,7 @@ interface ProtocolResponseByMethod {
   initialize: InitializeResponse;
   "account/read": GetAccountResponse;
   "account/login/start": LoginAccountResponse;
+  "account/logout": LogoutAccountResponse;
   "configRequirements/read": ConfigRequirementsReadResponse;
   "thread/read": ThreadReadResponse;
   "thread/start": ThreadStartResponse;

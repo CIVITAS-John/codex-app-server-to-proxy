@@ -5,7 +5,16 @@ import {
 } from "node:child_process";
 import { once } from "node:events";
 import { constants } from "node:fs";
-import { chmod, copyFile, mkdir } from "node:fs/promises";
+import {
+  chmod,
+  copyFile,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { JsonRpcTransport, RpcError, type ServerRequest } from "./json-rpc.js";
 import type { Logger } from "../core/logger.js";
@@ -97,8 +106,10 @@ export interface StartAppServerOptions {
   codexPath: string;
   /** Codex home for the child; isolates its caches and auth from ~/.codex. */
   codexHome?: string | undefined;
-  /** Existing Codex home whose login seeds a codexHome that has none. */
+  /** Existing Codex home whose login may seed or refresh codexHome. */
   seedAuthFrom?: string | undefined;
+  /** Selects conservative seed-once or newest-wins auth credential seeding. */
+  seedAuthMode?: "always" | "if-missing" | undefined;
   root: string;
   startupTimeoutMs: number;
   shutdownTimeoutMs: number;
@@ -122,6 +133,7 @@ export async function startAppServer(
       await seedAuthCredentials(
         options.seedAuthFrom,
         options.codexHome,
+        options.seedAuthMode ?? "if-missing",
         options.log,
       );
     env = { ...process.env, CODEX_HOME: options.codexHome };
@@ -235,21 +247,45 @@ async function readConfigRequirements(
   return requirements;
 }
 
-/** Copies an existing login into a Codex home that has none, so first startup
- * skips re-authentication. Never overwrites, and never fails startup: without a
- * seed the normal login flow still runs. */
+/** Best-effort seeds a child Codex home with credentials from another home. */
 async function seedAuthCredentials(
   sourceHome: string,
   targetHome: string,
+  mode: "always" | "if-missing",
   log: Logger,
 ): Promise<void> {
   const source = join(sourceHome, "auth.json");
   const target = join(targetHome, "auth.json");
   if (source === target) return;
   try {
-    // EXCL keeps a concurrently-written login from being clobbered.
-    await copyFile(source, target, constants.COPYFILE_EXCL);
-    await chmod(target, 0o600);
+    if (mode === "if-missing") {
+      // EXCL keeps a concurrently-written login from being clobbered.
+      await copyFile(source, target, constants.COPYFILE_EXCL);
+      await chmod(target, 0o600);
+    } else {
+      const sourceStat = await stat(source);
+      let targetMtimeMs = -Infinity;
+      try {
+        targetMtimeMs = (await stat(target)).mtimeMs;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      if (sourceStat.mtimeMs <= targetMtimeMs) return;
+
+      const temporary = `${target}.${process.pid}.tmp`;
+      try {
+        // Write and secure a private sibling before atomically replacing auth.
+        await writeFile(temporary, await readFile(source), {
+          mode: 0o600,
+          flag: "wx",
+        });
+        await chmod(temporary, 0o600);
+        await rename(temporary, target);
+      } catch (error) {
+        await rm(temporary, { force: true }).catch(() => undefined);
+        throw error;
+      }
+    }
     log("info", "codex_auth_seeded");
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;

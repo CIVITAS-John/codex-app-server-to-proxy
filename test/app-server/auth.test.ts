@@ -23,14 +23,21 @@ type LoginKind =
   | "timeout"
   | "stall-read"
   | "stall-start"
-  | "close";
+  | "close"
+  | "refresh-error"
+  | "refresh-error-logout-fails"
+  | "refresh-error-still-unauthenticated";
 
 /** Creates an in-memory app-server authentication transport. */
-function fakeRpc(kind: LoginKind): JsonRpcTransport {
+function fakeRpc(
+  kind: LoginKind,
+  observeRequest?: (method: string) => void,
+): JsonRpcTransport {
   const input = new PassThrough();
   const output = new PassThrough();
   const rpc = new JsonRpcTransport(input, output);
   let buffered = "";
+  let readCount = 0;
   output.setEncoding("utf8").on("data", (chunk: string) => {
     buffered += chunk;
     for (;;) {
@@ -42,10 +49,33 @@ function fakeRpc(kind: LoginKind): JsonRpcTransport {
         params: { type?: string };
       };
       buffered = buffered.slice(newline + 1);
+      observeRequest?.(message.method);
       if (message.method === "account/read") {
         // A probe the app-server never answers must be deadline-bounded.
         if (kind === "stall-read") continue;
-        if (kind === "missing-requirement") {
+        readCount += 1;
+        if (
+          (kind === "refresh-error" ||
+            kind === "refresh-error-logout-fails" ||
+            kind === "refresh-error-still-unauthenticated") &&
+          readCount === 1
+        ) {
+          // Use an unwrapped JSON-RPC error frame, as the app-server does.
+          input.write(
+            `${JSON.stringify({ id: message.id, error: { code: -32000, message: "ROTATED_REFRESH_TOKEN_SECRET" } })}\n`,
+          );
+        } else if (kind === "refresh-error-still-unauthenticated") {
+          input.write(
+            `${JSON.stringify(protocolResponse("account/read", message.id, { account: null, requiresOpenaiAuth: true }))}\n`,
+          );
+        } else if (
+          kind === "refresh-error" ||
+          kind === "refresh-error-logout-fails"
+        ) {
+          input.write(
+            `${JSON.stringify(protocolResponse("account/read", message.id, protocolAuthenticatedAccountResponse()))}\n`,
+          );
+        } else if (kind === "missing-requirement") {
           // Deliberately incomplete response proves authentication fails closed.
           input.write(
             `${JSON.stringify({ id: message.id, result: { account: null } })}\n`,
@@ -68,6 +98,15 @@ function fakeRpc(kind: LoginKind): JsonRpcTransport {
             )}\n`,
           );
         }
+      } else if (message.method === "account/logout") {
+        if (kind === "refresh-error-logout-fails")
+          input.write(
+            `${JSON.stringify({ id: message.id, error: { code: -32001, message: "logout is unavailable" } })}\n`,
+          );
+        else
+          input.write(
+            `${JSON.stringify(protocolResponse("account/logout", message.id, {}))}\n`,
+          );
       } else if (message.method === "account/login/start") {
         // A login start the app-server never answers must also be bounded.
         if (kind === "stall-start") continue;
@@ -272,6 +311,76 @@ test("authentication bounds an account/read the app-server never answers", async
       terminal: () => {},
     }),
     /account\/read timed out/,
+  );
+});
+
+test("refresh errors log out before re-running the device-code login", async () => {
+  const methods: string[] = [];
+  const logs: Record<string, unknown>[] = [];
+  await ensureAuthenticated({
+    rpc: fakeRpc("refresh-error", (method) => methods.push(method)),
+    log: createLogger("debug", (entry) => logs.push(entry)),
+    timeoutMs: 100,
+    interactive: false,
+    terminal: () => {},
+  });
+
+  assert.deepEqual(methods, [
+    "account/read",
+    "account/logout",
+    "account/login/start",
+    "account/read",
+  ]);
+  const unusableWarning = logs.find(
+    (entry) => entry.event === "codex_auth_unusable",
+  );
+  assert.deepEqual(unusableWarning?.rpc_code, -32000);
+  assert.doesNotMatch(
+    JSON.stringify(unusableWarning),
+    /ROTATED_REFRESH_TOKEN_SECRET/,
+  );
+  assert.deepEqual(
+    logs.find((entry) => entry.event === "codex_auth_unusable_detail")?.error,
+    "ROTATED_REFRESH_TOKEN_SECRET",
+  );
+});
+
+test("refresh recovery continues after a failed logout", async () => {
+  const methods: string[] = [];
+  const logs: Record<string, unknown>[] = [];
+  await ensureAuthenticated({
+    rpc: fakeRpc("refresh-error-logout-fails", (method) =>
+      methods.push(method),
+    ),
+    log: createLogger("debug", (entry) => logs.push(entry)),
+    timeoutMs: 100,
+    interactive: false,
+    terminal: () => {},
+  });
+
+  assert.deepEqual(methods, [
+    "account/read",
+    "account/logout",
+    "account/login/start",
+    "account/read",
+  ]);
+  const logoutWarning = logs.find(
+    (entry) => entry.event === "codex_auth_logout_failed",
+  );
+  assert.deepEqual(logoutWarning?.rpc_code, -32001);
+  assert.doesNotMatch(JSON.stringify(logoutWarning), /logout is unavailable/);
+});
+
+test("refresh recovery rejects when login leaves no authenticated account", async () => {
+  await assert.rejects(
+    ensureAuthenticated({
+      rpc: fakeRpc("refresh-error-still-unauthenticated"),
+      log: silentLogger,
+      timeoutMs: 100,
+      interactive: false,
+      terminal: () => {},
+    }),
+    /still reports no account/,
   );
 });
 

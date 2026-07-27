@@ -26,7 +26,7 @@ Check status:
 
 ## Authentication
 
-The proxy signs in with a ChatGPT account — no API key is exchanged. The spawned Codex runs in a proxy-owned home (`~/.codex-openai-proxy/codex-home` by default; override with `--codex-home`), isolated from any `~/.codex` install. If that home has no login yet, startup copies the existing `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`) into it, so a machine where the Codex CLI is already signed in needs no interaction; the copy is never overwritten afterwards. Only without any existing login does the proxy start one:
+The proxy signs in with a ChatGPT account — no API key is exchanged. The spawned Codex runs in a proxy-owned home (`~/.codex-openai-proxy/codex-home` by default; override with `--codex-home`), isolated from any `~/.codex` install. On every startup, the proxy compares that home's `auth.json` with the existing `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`) and adopts the source only when it is missing locally or the source is strictly newer. This newest-wins rule propagates a Codex CLI token refresh without replacing credentials the proxy refreshed more recently. If the available credentials are unusable, the proxy attempts one logout and runs the normal login flow instead of exiting:
 
 - **Interactive terminal** — the proxy opens the browser authorization page. Complete the login and leave `serve` running. If the browser can't be launched, the URL is printed to the terminal.
 - **Non-interactive (containers, services, CI)** — the proxy prints a verification URL and one-time device code to stderr. Keep stderr visible until login completes.
@@ -35,6 +35,8 @@ Notes:
 
 - Completions return `app_server_not_ready` and `/ready` returns 503 until login finishes.
 - The login deadline is fixed at 5 minutes.
+- `--sync-auth if-missing` restores the earlier copy-once behavior. `--sync-auth never` leaves the proxy's Codex home untouched, including when the source has newer credentials.
+- ChatGPT refresh tokens are single-use. Sharing one login between the Codex CLI and proxy means either side can invalidate the other's stored refresh token. For heavy simultaneous use, choose `--sync-auth never` and complete a proxy-only login.
 - Treat printed authorization URLs and device codes as credentials — don't paste them into issues or logs.
 - The proxy's login lives in its Codex home; deleting `~/.codex-openai-proxy/codex-home` signs the proxy out without touching the Codex CLI's own `~/.codex` session.
 
@@ -224,7 +226,7 @@ npm uninstall codex-openai-proxy
 ```
 
 - Continuation state lives under `~/.codex-openai-proxy` (one namespace per `--root`), or your custom `--state-dir`. The proxy's Codex home — including its ChatGPT login and Codex caches — lives at `~/.codex-openai-proxy/codex-home`, or your custom `--codex-home`. Uninstalling deletes neither.
-- Stop every proxy using a root before deleting its namespace. Deleting state invalidates its `previous_response_id` values but does not touch Codex's threads; deleting `codex-home` also signs the proxy out (the next startup re-seeds from `~/.codex` when a login exists there), while the Codex CLI's own `~/.codex` login is never affected.
+- Stop every proxy using a root before deleting its namespace. Deleting state invalidates its `previous_response_id` values but does not touch Codex's threads; deleting `codex-home` also signs the proxy out (the next startup re-seeds from `~/.codex` when a login exists there unless `--sync-auth never` is set), while the Codex CLI's own `~/.codex` login is never affected.
 
 ## Documentation
 

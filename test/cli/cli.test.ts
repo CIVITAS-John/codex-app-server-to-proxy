@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmod, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, utimes, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -111,6 +111,7 @@ test("CLI recovery uses the documented bounded retry schedule", () => {
   assert.equal(usage.includes("<root>/.codex-openai-proxy"), false);
   // Every configurable limit must be discoverable from the help output.
   assert.match(usage, /--request-timeout <duration>/);
+  assert.match(usage, /--sync-auth <always\|if-missing\|never>/);
   // Removed deadlines must not resurface in help: dynamic tool calls end
   // their turn immediately, so no tool or usage wait remains to configure.
   assert.equal(usage.includes("--tool-timeout"), false);
@@ -338,6 +339,129 @@ testWithPosixExecutable(
       assert.equal(stderr.includes(repoRootPath), false);
     }, "codex-proxy-test-");
   },
+);
+
+testWithPosixExecutable(
+  "CLI wires credential synchronization modes into app-server startup",
+  async () => {
+    for (const scenario of [
+      {
+        name: "default",
+        initialTarget: "target",
+        expected: "source",
+        syncAuth: undefined,
+      },
+      {
+        name: "if-missing-existing",
+        initialTarget: "target",
+        expected: "target",
+        syncAuth: "if-missing",
+      },
+      {
+        name: "if-missing-empty",
+        initialTarget: undefined,
+        expected: "source",
+        syncAuth: "if-missing",
+      },
+      {
+        name: "never",
+        initialTarget: undefined,
+        expected: undefined,
+        syncAuth: "never",
+      },
+    ] as const) {
+      await withTempDir(async (directory) => {
+        const sourceHome = join(directory, "source-codex-home");
+        const codexHome = join(directory, "proxy-codex-home");
+        const stateDir = join(directory, "state");
+        const sourceAuth = join(sourceHome, "auth.json");
+        const targetAuth = join(codexHome, "auth.json");
+        const fake = join(directory, "codex");
+        await mkdir(sourceHome, { recursive: true });
+        await mkdir(codexHome, { recursive: true });
+        await writeFile(sourceAuth, '{"kind":"source"}', "utf8");
+        if (scenario.initialTarget !== undefined)
+          await writeFile(
+            targetAuth,
+            `{"kind":"${scenario.initialTarget}"}`,
+            "utf8",
+          );
+        // Keep the source strictly newer even on filesystems with coarse mtimes.
+        const future = new Date(Date.now() + 60_000);
+        await utimes(sourceAuth, future, future);
+        await writeFile(
+          fake,
+          fakeCodexScript({
+            version: PINNED_CODEX_VERSION,
+            onLine: (message) => `  if (${message}.method === "account/read") {
+    console.log(JSON.stringify({ id: ${message}.id, result: ${embeddedProtocolResults.authenticatedAccount} }));
+    return;
+  }`,
+          }),
+          "utf8",
+        );
+        await chmod(fake, 0o755);
+        const child = spawn(
+          process.execPath,
+          [
+            "dist/bin.js",
+            "serve",
+            "--port",
+            "0",
+            "--state-dir",
+            stateDir,
+            "--codex-home",
+            codexHome,
+            "--codex-path",
+            fake,
+            ...(scenario.syncAuth === undefined
+              ? []
+              : ["--sync-auth", scenario.syncAuth]),
+          ],
+          {
+            cwd: repoRootPath,
+            env: { ...process.env, CODEX_HOME: sourceHome },
+            stdio: ["ignore", "pipe", "pipe"],
+          },
+        );
+        let stderr = "";
+        child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+          stderr += chunk;
+        });
+        const exit = once(child, "exit");
+        let exited = false;
+        try {
+          await waitForText(() => stderr, "app_server_ready");
+          child.kill("SIGTERM");
+          const [code, signal] = await exit;
+          exited = true;
+          assert.equal(code, 0, `${scenario.name} shutdown stderr:\n${stderr}`);
+          assert.equal(
+            signal,
+            null,
+            `${scenario.name} shutdown stderr:\n${stderr}`,
+          );
+          if (scenario.expected === undefined)
+            await assert.rejects(
+              readFile(targetAuth, "utf8"),
+              (error: unknown) =>
+                (error as NodeJS.ErrnoException).code === "ENOENT",
+            );
+          else
+            assert.equal(
+              await readFile(targetAuth, "utf8"),
+              `{"kind":"${scenario.expected}"}`,
+            );
+        } finally {
+          if (!exited && child.exitCode === null && child.signalCode === null) {
+            child.kill("SIGKILL");
+            await exit;
+          }
+        }
+      }, `codex-proxy-auth-${scenario.name}-`);
+    }
+  },
+  15_000,
 );
 
 testWithPosixExecutable(

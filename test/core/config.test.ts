@@ -6,6 +6,7 @@ import { join, sep } from "node:path";
 import { test } from "vitest";
 import {
   LOG_LEVELS,
+  SYNC_AUTH_MODES,
   normalizeLoopbackHost,
   parseServeOptions,
   resolveServeOptions,
@@ -44,6 +45,19 @@ test("log-level validation accepts every supported value and rejects others", ()
     (error: unknown) =>
       error instanceof Error &&
       error.message === "--log-level must be debug, info, warn, or error.",
+  );
+});
+
+test("sync-auth validation defaults to always and accepts supported modes", () => {
+  assert.equal(parseServeOptions([]).syncAuth, "always");
+  for (const syncAuth of SYNC_AUTH_MODES)
+    assert.equal(
+      parseServeOptions(["--sync-auth", syncAuth]).syncAuth,
+      syncAuth,
+    );
+  assert.throws(
+    () => parseServeOptions(["--sync-auth", "sometimes"]),
+    /--sync-auth must be always, if-missing, or never\./,
   );
 });
 
@@ -92,6 +106,7 @@ test("serve options have safe documented defaults and reject ambiguity", async (
     assert.equal(parsed.port, 8787);
     assert.equal(parsed.root, project);
     assert.equal(parsed.implicitToolContinuation, true);
+    assert.equal(parsed.syncAuth, "always");
     assert.equal(parsed.stateDir, undefined);
     assert.equal(parsed.codexHome, undefined);
     const finalized = await resolveServeOptions(parsed);

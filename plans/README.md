@@ -11,7 +11,8 @@ This directory is the source of truth for product decisions, implementation stat
 - Bind only to localhost/loopback and require no proxy bearer token.
 - Spawn and supervise `codex app-server` as a child process.
 - Depend on exact `@openai/codex 0.145.0` for default executable resolution and the generated contract. An explicit `--codex-path` override must report that same version; older and newer executables are rejected until their contracts are reviewed.
-- Run the package-owned app-server in the proxy-owned `~/.codex-openai-proxy/codex-home` by default, shared across roots but isolated from the ordinary Codex CLI home. Seed only a missing `auth.json` from the pre-existing Codex home, never overwrite the proxy login, and allow `--codex-home` to select another directory.
+- Run the package-owned app-server in the proxy-owned `~/.codex-openai-proxy/codex-home` by default, shared across roots but isolated from the ordinary Codex CLI home. On every startup, adopt `auth.json` from the pre-existing Codex home only when the target is missing or the source is strictly newer; `--sync-auth if-missing` retains the earlier seed-once behavior and `--sync-auth never` keeps a proxy-only login isolated. Allow `--codex-home` to select another directory.
+    - This is a breaking default from `0.1.0-rc.4`'s copy-once behavior. Strict-newer comparison prevents an older main-home refresh token from replacing credentials the proxy refreshed more recently, but sharing a single rotating ChatGPT login remains inherently racy.
     - The current unversioned proxy home is a reviewed `0.145.0` compatibility decision. A future Codex pin must prove its cache files are compatible or adopt an explicit versioned-home or migration decision before release.
 - Use persisted Codex threads behind the additive `previous_response_id` continuation field.
 - Support text, exposed reasoning, tool calls, tool results, and token usage streaming.

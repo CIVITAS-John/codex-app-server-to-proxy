@@ -41,6 +41,8 @@ Options:
   --codex-path <path>           Override the package-owned Codex executable
   --codex-home <directory>      Codex home for the spawned app-server
                                 (default: ${DEFAULT_CODEX_HOME_DESCRIPTION})
+  --sync-auth <always|if-missing|never>
+                                Synchronize credentials from the main Codex home (default: always)
   --implicit-tool-continuation <true|false>
                                 Resolve tool results by tool_call_id (default: true)
   --request-timeout <duration>  HTTP request deadline (default: 30s)
@@ -184,8 +186,13 @@ class AppServerSupervisor {
     const next = await startAppServer({
       codexPath: this.#options.codexPath,
       codexHome: this.#options.codexHome,
-      // Seed the isolated home from the login Codex itself would have used.
-      seedAuthFrom: process.env.CODEX_HOME ?? join(homedir(), ".codex"),
+      // A user-provided proxy-only login must remain untouched when opted out.
+      seedAuthFrom:
+        this.#options.syncAuth === "never"
+          ? undefined
+          : (process.env.CODEX_HOME ?? join(homedir(), ".codex")),
+      seedAuthMode:
+        this.#options.syncAuth === "never" ? undefined : this.#options.syncAuth,
       root: this.#options.root,
       startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS,
       shutdownTimeoutMs: this.#options.shutdownTimeoutMs,

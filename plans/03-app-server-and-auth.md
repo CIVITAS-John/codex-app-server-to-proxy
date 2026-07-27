@@ -18,7 +18,8 @@ Reliably own one initialized app-server child process and complete ChatGPT login
     - Pick one stable `clientInfo.name` and keep it fixed; app-server forwards it for compliance logging.
 5. Query account state at startup. If unauthenticated, call `account/login/start` with ChatGPT browser login.
     - Start the package-owned app-server with `CODEX_HOME` set to the proxy-owned home.
-    - Before first startup, copy an existing Codex `auth.json` only when the proxy home has none. Never overwrite an existing proxy login, and treat a missing or unreadable seed as a path-free, non-fatal diagnostic before continuing through normal login.
+    - On every startup, compare an existing Codex `auth.json` with the proxy copy and adopt it only when the target is missing or the source is strictly newer. `--sync-auth if-missing` preserves seed-once compatibility, while `--sync-auth never` leaves a proxy-only login untouched. Treat a missing or unreadable seed as a path-free, non-fatal diagnostic before continuing through normal login.
+    - If `account/read` returns an RPC error, attempt one best-effort `account/logout`, run the normal browser or device-code login, and require a usable follow-up `account/read`. Continue to fail startup on transport, timeout, cancellation, or failed recovery.
 6. Attempt to open the authorization URL using a narrowly scoped platform launcher.
     - If launching fails, write the authorization URL once to the interactive terminal with instructions; send only a redacted event to structured logs and never persist the URL.
     - Wait for `account/login/completed` and support cancellation/timeout.
@@ -37,8 +38,8 @@ Reliably own one initialized app-server child process and complete ChatGPT login
 ## Acceptance criteria
 
 - A fake app-server verifies initialization ordering, interleaved requests/notifications, overload errors, malformed output, crash loops, and graceful shutdown.
-- Auth tests cover already logged in, browser launch success, device-code fallback, login failure, cancellation, and timeout.
-- Codex-home tests cover environment propagation, owner-only POSIX permissions, first-run auth seeding, non-overwrite behavior, and path-free seed failure.
+- Auth tests cover already logged in, browser launch success, device-code fallback, login failure, refresh-error recovery, failed-logout recovery, failed post-login validation, cancellation, and timeout.
+- Codex-home tests cover environment propagation, owner-only POSIX permissions, seed-once compatibility, strict-newer synchronization in both directions, missing-source retention, and path-free seed failure.
 - Tests prove the fallback authorization URL reaches only the interactive terminal sink while structured logs, diagnostics, and state redact or omit it.
 - Elicitation capabilities are absent from initialization and unexpected elicitation requests receive an immediate fail-closed response.
 - No shell interpolation is used for spawning Codex or opening the browser.
@@ -58,7 +59,9 @@ The CLI starts app-server before becoming ready and may initiate ChatGPT login. 
 
 The proxy declares `@openai/codex` as a runtime dependency and resolves the package's declared `codex` binary. This makes a normal local install self-contained; existing deployments that rely on a global PATH installation continue to work only as a compatibility fallback, while `--codex-path` remains the explicit override.
 
-The spawned app-server uses `~/.codex-openai-proxy/codex-home` by default, shared across proxy roots and isolated from the ordinary Codex CLI home. A missing proxy login is seeded once from `$CODEX_HOME/auth.json` or `~/.codex/auth.json`; an existing proxy login is authoritative and is never overwritten. Seed failures contain only a sanitized filesystem error code and fall through to normal authentication. Passing `--codex-home ~/.codex` deliberately restores the earlier shared-home behavior.
+The spawned app-server uses `~/.codex-openai-proxy/codex-home` by default, shared across proxy roots and isolated from the ordinary Codex CLI home. On every startup, the CLI compares its `auth.json` with `$CODEX_HOME/auth.json` or `~/.codex/auth.json` and adopts only a missing target or strictly newer source. This breaking default replaces `0.1.0-rc.4`'s copy-once behavior so an actively refreshed main Codex login propagates, while the strict comparison protects credentials the proxy refreshed more recently. `--sync-auth if-missing` restores copy-once behavior; `--sync-auth never` supports a proxy-only login. Seed failures contain only a sanitized filesystem error code and fall through to normal authentication. Passing `--codex-home ~/.codex` deliberately restores the earlier shared-home behavior.
+
+An RPC error from the initial `account/read` proves the child is responsive but its stored credentials are unusable. The proxy records a content-free warning, attempts one bounded best-effort RPC logout, runs the existing browser or device-code login pathway, and requires a successful authenticated re-read before readiness. Timeout, cancellation, transport closure, and a failed recovery still fail closed. Sharing one rotating ChatGPT refresh token between the ordinary Codex CLI and proxy remains inherently racy; strict-newer synchronization reduces stale-copy failures but cannot make concurrent refreshes safe.
 
 The unversioned proxy home is accepted for the pinned `0.145.0` contract. Before a later Codex pin is released, Stage 03 and the release plan must either record cache-compatibility evidence or choose a versioned-home or explicit migration path.
 

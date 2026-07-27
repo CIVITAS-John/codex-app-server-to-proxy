@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import type { JsonRpcTransport } from "./json-rpc.js";
+import { RpcError, type JsonRpcTransport } from "./json-rpc.js";
 import type { Logger } from "../core/logger.js";
 import { listenForAbort, withDeadline } from "../core/abort.js";
 
@@ -37,7 +37,33 @@ export interface AuthenticationOptions {
 export async function ensureAuthenticated(
   options: AuthenticationOptions,
 ): Promise<void> {
-  // Bound the probe so a stalled app-server fails startup instead of hanging it.
+  let account: AccountResponse;
+  try {
+    account = await readAccount(options);
+  } catch (error) {
+    if (!(error instanceof RpcError)) throw error;
+    // An RPC error proves the server is alive but its stored credentials are not.
+    options.log("warn", "codex_auth_unusable", { rpc_code: error.rpcCode });
+    options.log("debug", "codex_auth_unusable_detail", {
+      error: error.message,
+    });
+    await bestEffortLogout(options);
+    await startAndWaitForLogin(options, !options.interactive);
+    if (!isAuthenticated(await readAccount(options)))
+      throw new Error(
+        "Login completed but account/read still reports no account.",
+      );
+    return;
+  }
+  if (isAuthenticated(account)) return;
+  await startAndWaitForLogin(options, !options.interactive);
+}
+
+/** Reads and validates the app-server authentication state without refreshing it. */
+async function readAccount(
+  options: AuthenticationOptions,
+): Promise<AccountResponse> {
+  // Never force a token rotation: shared refresh tokens are single-use.
   const account = (await withDeadline(
     options.signal,
     {
@@ -55,9 +81,35 @@ export async function ensureAuthenticated(
     throw new Error(
       "account/read returned an invalid requiresOpenaiAuth value.",
     );
-  if (!account.requiresOpenaiAuth || account.account != null) return;
-  const useDeviceCode = !options.interactive;
-  await startAndWaitForLogin(options, useDeviceCode);
+  return account;
+}
+
+/** Returns whether an account/read response permits using the app-server. */
+function isAuthenticated(account: AccountResponse): boolean {
+  return !account.requiresOpenaiAuth || account.account != null;
+}
+
+/** Clears unusable stored credentials without blocking a fresh login attempt. */
+async function bestEffortLogout(options: AuthenticationOptions): Promise<void> {
+  try {
+    await withDeadline(
+      options.signal,
+      {
+        milliseconds: options.timeoutMs,
+        timeoutReason: new Error("account/logout timed out."),
+      },
+      async (deadlineSignal) =>
+        await options.rpc.request("account/logout", undefined, deadlineSignal),
+    );
+  } catch (error) {
+    // Caller cancellation is authoritative and must never be mistaken for recovery.
+    if (options.signal?.aborted) throw error;
+    if (error instanceof RpcError)
+      options.log("warn", "codex_auth_logout_failed", {
+        rpc_code: error.rpcCode,
+      });
+    else options.log("warn", "codex_auth_logout_failed");
+  }
 }
 
 /** Starts a browser or device-code login and waits for its notification. */

@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  readdir,
+  readFile,
+  stat,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { test } from "vitest";
@@ -326,7 +334,7 @@ testWithPosixExecutable(
       } finally {
         await app.stop();
       }
-      // A login already present in the Codex home is never overwritten.
+      // The conservative library default is the historical seed-once behavior.
       await writeFile(
         join(sourceHome, "auth.json"),
         '{"fixture":"rotated"}',
@@ -342,6 +350,185 @@ testWithPosixExecutable(
         await second.stop();
       }
     }, "app-server-auth-seed-test-");
+  },
+);
+
+testWithPosixExecutable(
+  "app-server always seeding adopts newer source credentials and cleans temporary files",
+  async () => {
+    await withTempDir(async (directory) => {
+      const executable = join(directory, "codex");
+      const sourceHome = join(directory, "source-home");
+      const codexHome = join(directory, "codex-home");
+      const sourceAuth = join(sourceHome, "auth.json");
+      const targetAuth = join(codexHome, "auth.json");
+      await mkdir(sourceHome, { recursive: true });
+      await mkdir(codexHome, { recursive: true });
+      await writeFile(sourceAuth, '{"fixture":"rotated"}', "utf8");
+      await writeFile(targetAuth, '{"fixture":"stale"}', "utf8");
+      await utimes(sourceAuth, new Date(), new Date(Date.now() + 5_000));
+      await writeFile(
+        executable,
+        fakeCodexScript({ version: PINNED_CODEX_VERSION }),
+        "utf8",
+      );
+      await chmod(executable, 0o755);
+      const app = await startAppServer({
+        codexPath: executable,
+        codexHome,
+        seedAuthFrom: sourceHome,
+        seedAuthMode: "always",
+        root: directory,
+        startupTimeoutMs: 1_000,
+        shutdownTimeoutMs: 100,
+        log: silentLogger,
+      });
+      try {
+        assert.equal(
+          await readFile(targetAuth, "utf8"),
+          '{"fixture":"rotated"}',
+        );
+        assert.equal((await stat(targetAuth)).mode & 0o777, 0o600);
+        assert.equal(
+          (await readdir(codexHome)).some((entry) =>
+            /^auth\.json\.\d+\.tmp$/.test(entry),
+          ),
+          false,
+        );
+      } finally {
+        await app.stop();
+      }
+    }, "app-server-auth-always-seed-test-");
+  },
+);
+
+testWithPosixExecutable(
+  "app-server always seeding copies credentials into a missing target",
+  async () => {
+    await withTempDir(async (directory) => {
+      const executable = join(directory, "codex");
+      const sourceHome = join(directory, "source-home");
+      const codexHome = join(directory, "codex-home");
+      const sourceAuth = join(sourceHome, "auth.json");
+      const targetAuth = join(codexHome, "auth.json");
+      await mkdir(sourceHome, { recursive: true });
+      await writeFile(sourceAuth, '{"fixture":"credentials"}', "utf8");
+      await writeFile(
+        executable,
+        fakeCodexScript({ version: PINNED_CODEX_VERSION }),
+        "utf8",
+      );
+      await chmod(executable, 0o755);
+      const app = await startAppServer({
+        codexPath: executable,
+        codexHome,
+        seedAuthFrom: sourceHome,
+        seedAuthMode: "always",
+        root: directory,
+        startupTimeoutMs: 1_000,
+        shutdownTimeoutMs: 100,
+        log: silentLogger,
+      });
+      try {
+        assert.equal(
+          await readFile(targetAuth, "utf8"),
+          '{"fixture":"credentials"}',
+        );
+        assert.equal((await stat(targetAuth)).mode & 0o777, 0o600);
+        assert.equal(
+          (await readdir(codexHome)).some((entry) =>
+            /^auth\.json\.\d+\.tmp$/.test(entry),
+          ),
+          false,
+        );
+      } finally {
+        await app.stop();
+      }
+    }, "app-server-auth-always-missing-target-test-");
+  },
+);
+
+testWithPosixExecutable(
+  "app-server always seeding keeps newer target credentials",
+  async () => {
+    await withTempDir(async (directory) => {
+      const executable = join(directory, "codex");
+      const sourceHome = join(directory, "source-home");
+      const codexHome = join(directory, "codex-home");
+      const sourceAuth = join(sourceHome, "auth.json");
+      const targetAuth = join(codexHome, "auth.json");
+      await mkdir(sourceHome, { recursive: true });
+      await mkdir(codexHome, { recursive: true });
+      await writeFile(sourceAuth, '{"fixture":"stale"}', "utf8");
+      await writeFile(targetAuth, '{"fixture":"rotated"}', "utf8");
+      await utimes(sourceAuth, new Date(1_000), new Date(1_000));
+      await writeFile(
+        executable,
+        fakeCodexScript({ version: PINNED_CODEX_VERSION }),
+        "utf8",
+      );
+      await chmod(executable, 0o755);
+      const app = await startAppServer({
+        codexPath: executable,
+        codexHome,
+        seedAuthFrom: sourceHome,
+        seedAuthMode: "always",
+        root: directory,
+        startupTimeoutMs: 1_000,
+        shutdownTimeoutMs: 100,
+        log: silentLogger,
+      });
+      try {
+        assert.equal(
+          await readFile(targetAuth, "utf8"),
+          '{"fixture":"rotated"}',
+        );
+      } finally {
+        await app.stop();
+      }
+    }, "app-server-auth-newer-target-test-");
+  },
+);
+
+testWithPosixExecutable(
+  "app-server always seeding keeps target when source is missing",
+  async () => {
+    await withTempDir(async (directory) => {
+      const executable = join(directory, "codex");
+      const codexHome = join(directory, "codex-home");
+      const targetAuth = join(codexHome, "auth.json");
+      await mkdir(codexHome, { recursive: true });
+      await writeFile(targetAuth, '{"fixture":"target"}', "utf8");
+      await writeFile(
+        executable,
+        fakeCodexScript({ version: PINNED_CODEX_VERSION }),
+        "utf8",
+      );
+      await chmod(executable, 0o755);
+      const entries: Array<Record<string, unknown>> = [];
+      const app = await startAppServer({
+        codexPath: executable,
+        codexHome,
+        seedAuthFrom: join(directory, "missing-home"),
+        seedAuthMode: "always",
+        root: directory,
+        startupTimeoutMs: 1_000,
+        shutdownTimeoutMs: 100,
+        log: createLogger("debug", (entry) => entries.push(entry)),
+      });
+      try {
+        assert.equal(
+          await readFile(targetAuth, "utf8"),
+          '{"fixture":"target"}',
+        );
+        assert.equal(
+          entries.some((entry) => entry.event === "codex_auth_seed_failed"),
+          false,
+        );
+      } finally {
+        await app.stop();
+      }
+    }, "app-server-auth-missing-source-test-");
   },
 );
 
@@ -364,6 +551,7 @@ testWithPosixExecutable(
         codexPath: executable,
         codexHome,
         seedAuthFrom: sourceHome,
+        seedAuthMode: "always",
         root: directory,
         startupTimeoutMs: 1_000,
         shutdownTimeoutMs: 100,

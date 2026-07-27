@@ -35,6 +35,7 @@ export interface ServeOptions {
   bodyLimitBytes: number;
   maxRequests: number;
   logLevel: LogLevel;
+  syncAuth: SyncAuthMode;
   stateDir: string;
   codexHome: string;
 }
@@ -53,6 +54,12 @@ export const LOG_LEVELS = ["debug", "info", "warn", "error"] as const;
 
 /** A supported structured-log severity level. */
 export type LogLevel = (typeof LOG_LEVELS)[number];
+
+/** Supported credential synchronization modes. */
+export const SYNC_AUTH_MODES = ["always", "if-missing", "never"] as const;
+
+/** A supported credential synchronization mode. */
+export type SyncAuthMode = (typeof SYNC_AUTH_MODES)[number];
 
 /** Normalizes accepted host spellings to validated loopback addresses. */
 export function normalizeLoopbackHost(value: string): ServeOptions["host"] {
@@ -211,6 +218,7 @@ export function parseServeOptions(
     "--body-limit",
     "--max-requests",
     "--log-level",
+    "--sync-auth",
     "--state-dir",
     "--codex-home",
   ]);
@@ -224,6 +232,11 @@ export function parseServeOptions(
     "--log-level",
     values.get("--log-level") ?? "info",
     LOG_LEVELS,
+  );
+  const syncAuth = oneOf(
+    "--sync-auth",
+    values.get("--sync-auth") ?? "always",
+    SYNC_AUTH_MODES,
   );
   return {
     host: normalizeLoopbackHost(values.get("--host") ?? "127.0.0.1"),
@@ -255,6 +268,7 @@ export function parseServeOptions(
       10_000,
     ),
     logLevel,
+    syncAuth,
     ...(stateValue === undefined ? {} : { stateDir: stateValue }),
     ...(codexHomeValue === undefined ? {} : { codexHome: codexHomeValue }),
   };
