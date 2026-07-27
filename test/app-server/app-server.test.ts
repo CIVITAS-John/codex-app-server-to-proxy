@@ -17,6 +17,7 @@ import {
   resolveCodexExecutable,
   resolveCodexInvocation,
   startAppServer,
+  writeBackAuthCredentials,
 } from "../../src/app-server/app-server.js";
 import { createLogger } from "../../src/core/logger.js";
 import { fakeCodexScript } from "../support/fake-codex.js";
@@ -30,6 +31,164 @@ import { withTempDir } from "../support/temp.js";
 
 /** Skips fake shebang executables that Windows cannot spawn without a shell. */
 const testWithPosixExecutable = test.skipIf(process.platform === "win32");
+
+test("auth write-back replaces an older target credential file", async () => {
+  await withTempDir(async (directory) => {
+    const sourceHome = join(directory, "source-home");
+    const targetHome = join(directory, "target-home");
+    const sourceAuth = join(sourceHome, "auth.json");
+    const targetAuth = join(targetHome, "auth.json");
+    await mkdir(sourceHome, { recursive: true });
+    await mkdir(targetHome, { recursive: true });
+    await writeFile(sourceAuth, '{"fixture":"recovered"}', "utf8");
+    await writeFile(targetAuth, '{"fixture":"stale"}', "utf8");
+    await utimes(targetAuth, new Date(1_000), new Date(1_000));
+
+    await writeBackAuthCredentials(sourceHome, targetHome, silentLogger);
+
+    assert.equal(await readFile(targetAuth, "utf8"), '{"fixture":"recovered"}');
+    assert.equal(
+      (await readdir(targetHome)).some((entry) =>
+        /^auth\.json\..+\.tmp$/.test(entry),
+      ),
+      false,
+    );
+    if (process.platform !== "win32")
+      assert.equal((await stat(targetAuth)).mode & 0o777, 0o600);
+  }, "app-server-auth-write-back-replace-test-");
+});
+
+test("auth write-back leaves a missing target credential file absent", async () => {
+  await withTempDir(async (directory) => {
+    const sourceHome = join(directory, "source-home");
+    const targetHome = join(directory, "target-home");
+    await mkdir(sourceHome, { recursive: true });
+    await mkdir(targetHome, { recursive: true });
+    await writeFile(
+      join(sourceHome, "auth.json"),
+      '{"fixture":"recovered"}',
+      "utf8",
+    );
+
+    await writeBackAuthCredentials(sourceHome, targetHome, silentLogger);
+
+    await assert.rejects(stat(join(targetHome, "auth.json")), {
+      code: "ENOENT",
+    });
+  }, "app-server-auth-write-back-missing-test-");
+});
+
+test("auth write-back retains a newer target credential file", async () => {
+  await withTempDir(async (directory) => {
+    const sourceHome = join(directory, "source-home");
+    const targetHome = join(directory, "target-home");
+    const sourceAuth = join(sourceHome, "auth.json");
+    const targetAuth = join(targetHome, "auth.json");
+    await mkdir(sourceHome, { recursive: true });
+    await mkdir(targetHome, { recursive: true });
+    await writeFile(sourceAuth, '{"fixture":"stale"}', "utf8");
+    await writeFile(targetAuth, '{"fixture":"newer"}', "utf8");
+    await utimes(sourceAuth, new Date(1_000), new Date(1_000));
+
+    await writeBackAuthCredentials(sourceHome, targetHome, silentLogger);
+
+    assert.equal(await readFile(targetAuth, "utf8"), '{"fixture":"newer"}');
+  }, "app-server-auth-write-back-newer-target-test-");
+});
+
+test("auth write-back retains a target with the same credential mtime", async () => {
+  await withTempDir(async (directory) => {
+    const sourceHome = join(directory, "source-home");
+    const targetHome = join(directory, "target-home");
+    const sourceAuth = join(sourceHome, "auth.json");
+    const targetAuth = join(targetHome, "auth.json");
+    const equalMtime = new Date(2_000);
+    await mkdir(sourceHome, { recursive: true });
+    await mkdir(targetHome, { recursive: true });
+    await writeFile(sourceAuth, '{"fixture":"source"}', "utf8");
+    await writeFile(targetAuth, '{"fixture":"target"}', "utf8");
+    await utimes(sourceAuth, equalMtime, equalMtime);
+    await utimes(targetAuth, equalMtime, equalMtime);
+
+    await writeBackAuthCredentials(sourceHome, targetHome, silentLogger);
+
+    assert.equal(await readFile(targetAuth, "utf8"), '{"fixture":"target"}');
+  }, "app-server-auth-write-back-equal-mtime-test-");
+});
+
+test("auth write-back leaves a colliding temporary file untouched", async () => {
+  await withTempDir(async (directory) => {
+    const sourceHome = join(directory, "source-home");
+    const targetHome = join(directory, "target-home");
+    const sourceAuth = join(sourceHome, "auth.json");
+    const targetAuth = join(targetHome, "auth.json");
+    const temporary = `${targetAuth}.${process.pid}.tmp`;
+    await mkdir(sourceHome, { recursive: true });
+    await mkdir(targetHome, { recursive: true });
+    await writeFile(sourceAuth, '{"fixture":"recovered"}', "utf8");
+    await writeFile(targetAuth, '{"fixture":"target"}', "utf8");
+    await utimes(targetAuth, new Date(1_000), new Date(1_000));
+    await writeFile(temporary, '{"fixture":"foreign"}', "utf8");
+    const entries: Array<Record<string, unknown>> = [];
+
+    await writeBackAuthCredentials(
+      sourceHome,
+      targetHome,
+      createLogger("debug", (entry) => entries.push(entry)),
+    );
+
+    assert.equal(await readFile(targetAuth, "utf8"), '{"fixture":"target"}');
+    assert.equal(await readFile(temporary, "utf8"), '{"fixture":"foreign"}');
+    assert.equal(entries.length, 0);
+  }, "app-server-auth-write-back-temp-collision-test-");
+});
+
+test("auth write-back is a no-op when source and target homes match", async () => {
+  await withTempDir(async (directory) => {
+    const home = join(directory, "codex-home");
+    const auth = join(home, "auth.json");
+    await mkdir(home, { recursive: true });
+    await writeFile(auth, '{"fixture":"unchanged"}', "utf8");
+
+    await writeBackAuthCredentials(home, home, silentLogger);
+
+    assert.equal(await readFile(auth, "utf8"), '{"fixture":"unchanged"}');
+  }, "app-server-auth-write-back-self-test-");
+});
+
+test("auth write-back failures are best-effort and path-free", async () => {
+  await withTempDir(async (directory) => {
+    const sourceHome = join(directory, "private-source-home");
+    const targetHome = join(directory, "private-target-home");
+    await mkdir(sourceHome, { recursive: true });
+    await mkdir(join(targetHome, "auth.json"), { recursive: true });
+    await writeFile(
+      join(sourceHome, "auth.json"),
+      '{"fixture":"recovered"}',
+      "utf8",
+    );
+    await utimes(
+      join(targetHome, "auth.json"),
+      new Date(1_000),
+      new Date(1_000),
+    );
+    const entries: Array<Record<string, unknown>> = [];
+
+    await writeBackAuthCredentials(
+      sourceHome,
+      targetHome,
+      createLogger("debug", (entry) => entries.push(entry)),
+    );
+
+    const failure = entries.find(
+      (entry) => entry.event === "codex_auth_write_back_failed",
+    );
+    assert.equal(failure?.level, "warn");
+    assert.equal(typeof failure?.code, "string");
+    assert.equal(JSON.stringify(failure).includes(sourceHome), false);
+    assert.equal(JSON.stringify(failure).includes(targetHome), false);
+  }, "app-server-auth-write-back-failure-test-");
+});
 
 /** Complete generated server requests embedded in the fail-closed fake. */
 const embeddedDeclinedRequests = JSON.stringify([

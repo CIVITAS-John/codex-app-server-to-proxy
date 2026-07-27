@@ -151,13 +151,14 @@ function fakeRpc(
 }
 
 test("authentication accepts an existing account", async () => {
-  await ensureAuthenticated({
+  const result = await ensureAuthenticated({
     rpc: fakeRpc("logged-in"),
     log: silentLogger,
     timeoutMs: 100,
     interactive: true,
     terminal: () => assert.fail("unexpected terminal output"),
   });
+  assert.deepEqual(result, { recoveredLogin: false });
 });
 
 test("authentication fails closed when the auth requirement is missing", async () => {
@@ -220,13 +221,14 @@ test("failed browser launch prints the URL only to the terminal sink", async () 
 
 test("headless auth uses device code and login failures reject", async () => {
   const terminal: string[] = [];
-  await ensureAuthenticated({
+  const result = await ensureAuthenticated({
     rpc: fakeRpc("device"),
     log: silentLogger,
     timeoutMs: 100,
     interactive: false,
     terminal: (value) => terminal.push(value),
   });
+  assert.deepEqual(result, { recoveredLogin: false });
   assert.match(terminal.join(""), /SAFE-CODE/);
   await assert.rejects(
     ensureAuthenticated({
@@ -317,13 +319,14 @@ test("authentication bounds an account/read the app-server never answers", async
 test("refresh errors log out before re-running the device-code login", async () => {
   const methods: string[] = [];
   const logs: Record<string, unknown>[] = [];
-  await ensureAuthenticated({
+  const result = await ensureAuthenticated({
     rpc: fakeRpc("refresh-error", (method) => methods.push(method)),
     log: createLogger("debug", (entry) => logs.push(entry)),
     timeoutMs: 100,
     interactive: false,
     terminal: () => {},
   });
+  assert.deepEqual(result, { recoveredLogin: true });
 
   assert.deepEqual(methods, [
     "account/read",
@@ -348,7 +351,7 @@ test("refresh errors log out before re-running the device-code login", async () 
 test("refresh recovery continues after a failed logout", async () => {
   const methods: string[] = [];
   const logs: Record<string, unknown>[] = [];
-  await ensureAuthenticated({
+  const result = await ensureAuthenticated({
     rpc: fakeRpc("refresh-error-logout-fails", (method) =>
       methods.push(method),
     ),
@@ -357,6 +360,7 @@ test("refresh recovery continues after a failed logout", async () => {
     interactive: false,
     terminal: () => {},
   });
+  assert.deepEqual(result, { recoveredLogin: true });
 
   assert.deepEqual(methods, [
     "account/read",

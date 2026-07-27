@@ -7,6 +7,7 @@ All notable user-facing changes are recorded here. This project follows semantic
 ### Added
 
 - `--sync-auth <always|if-missing|never>` controls whether startup tracks credentials from `$CODEX_HOME` or `~/.codex`; the default `always` adopts the source when the target is missing or the source is strictly newer, `if-missing` retains the earlier seed-once behavior, and `never` leaves the proxy's Codex home untouched.
+- Successful recovery login uses a best-effort strictly-newer guard and atomic replacement to write back to an existing older main-home `auth.json` when default synchronization had supplied the unusable credential.
 
 ### Changed
 

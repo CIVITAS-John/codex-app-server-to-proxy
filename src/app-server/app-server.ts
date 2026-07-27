@@ -98,6 +98,8 @@ export interface AppServer {
   rpc: JsonRpcTransport;
   requirements: PolicyRequirements;
   child: ChildProcessWithoutNullStreams;
+  /** Whether this startup installed credentials from seedAuthFrom. */
+  authSeeded: boolean;
   stop(): Promise<void>;
 }
 
@@ -126,11 +128,12 @@ export async function startAppServer(
   const spawnProcess = options.spawnProcess ?? spawn;
   const invocation = resolveCodexInvocation(options.codexPath);
   let env = process.env;
+  let authSeeded = false;
   if (options.codexHome !== undefined) {
     // Auth material lands here, so keep the directory owner-only.
     await mkdir(options.codexHome, { recursive: true, mode: 0o700 });
     if (options.seedAuthFrom !== undefined)
-      await seedAuthCredentials(
+      authSeeded = await seedAuthCredentials(
         options.seedAuthFrom,
         options.codexHome,
         options.seedAuthMode ?? "if-missing",
@@ -211,6 +214,7 @@ export async function startAppServer(
     rpc,
     requirements,
     child,
+    authSeeded,
     async stop() {
       await stop();
     },
@@ -253,10 +257,10 @@ async function seedAuthCredentials(
   targetHome: string,
   mode: "always" | "if-missing",
   log: Logger,
-): Promise<void> {
+): Promise<boolean> {
   const source = join(sourceHome, "auth.json");
   const target = join(targetHome, "auth.json");
-  if (source === target) return;
+  if (source === target) return false;
   try {
     if (mode === "if-missing") {
       // EXCL keeps a concurrently-written login from being clobbered.
@@ -270,7 +274,7 @@ async function seedAuthCredentials(
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
-      if (sourceStat.mtimeMs <= targetMtimeMs) return;
+      if (sourceStat.mtimeMs <= targetMtimeMs) return false;
 
       const temporary = `${target}.${process.pid}.tmp`;
       try {
@@ -287,12 +291,86 @@ async function seedAuthCredentials(
       }
     }
     log("info", "codex_auth_seeded");
+    return true;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "EEXIST") return;
+    if (code === "ENOENT" || code === "EEXIST") return false;
     // The source can be an arbitrary CODEX_HOME outside every configured
     // redaction root. Keep this best-effort failure path-free by construction.
     log("warn", "codex_auth_seed_failed", {
+      code: typeof code === "string" ? code : "UNKNOWN",
+    });
+    return false;
+  }
+}
+
+/** Best-effort writes recovered child credentials back to an existing Codex home. */
+export async function writeBackAuthCredentials(
+  sourceHome: string,
+  targetHome: string,
+  log: Logger,
+): Promise<void> {
+  const source = join(sourceHome, "auth.json");
+  const target = join(targetHome, "auth.json");
+  if (source === target) return;
+  try {
+    let targetStat;
+    try {
+      targetStat = await stat(target);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    const sourceStat = await stat(source);
+    if (targetStat.mtimeMs >= sourceStat.mtimeMs) return;
+
+    const temporary = `${target}.${process.pid}.tmp`;
+    const credentials = await readFile(source);
+    try {
+      // Write and secure a private sibling before atomically replacing auth.
+      await writeFile(temporary, credentials, {
+        mode: 0o600,
+        flag: "wx",
+      });
+    } catch (error) {
+      // An exclusive-create collision belongs to another invocation.
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+      // A failed write may still have created a partial file that we own.
+      await rm(temporary, { force: true }).catch(() => undefined);
+      throw error;
+    }
+    let replaced = false;
+    try {
+      await chmod(temporary, 0o600);
+      let currentTargetStat;
+      try {
+        // Recheck immediately before replacement so a concurrent update wins.
+        currentTargetStat = await stat(target);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+        throw error;
+      }
+      if (
+        currentTargetStat.dev !== targetStat.dev ||
+        currentTargetStat.ino !== targetStat.ino ||
+        currentTargetStat.size !== targetStat.size ||
+        currentTargetStat.mtimeMs !== targetStat.mtimeMs ||
+        currentTargetStat.ctimeMs !== targetStat.ctimeMs ||
+        currentTargetStat.mtimeMs >= sourceStat.mtimeMs
+      )
+        return;
+      await rename(temporary, target);
+      replaced = true;
+    } finally {
+      if (!replaced)
+        await rm(temporary, { force: true }).catch(() => undefined);
+    }
+    log("info", "codex_auth_written_back");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return;
+    // The homes can be outside configured redaction roots, so failures stay path-free.
+    log("warn", "codex_auth_write_back_failed", {
       code: typeof code === "string" ? code : "UNKNOWN",
     });
   }

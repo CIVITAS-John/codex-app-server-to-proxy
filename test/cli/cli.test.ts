@@ -465,6 +465,189 @@ testWithPosixExecutable(
 );
 
 testWithPosixExecutable(
+  "CLI writes recovered credentials back to an older seeded home",
+  async () => {
+    await withTempDir(async (directory) => {
+      const sourceHome = join(directory, "source-codex-home");
+      const codexHome = join(directory, "proxy-codex-home");
+      const sourceAuth = join(sourceHome, "auth.json");
+      const fake = join(directory, "codex");
+      await mkdir(sourceHome, { recursive: true });
+      await writeFile(sourceAuth, '{"kind":"dead"}', "utf8");
+      // The recovery write-back only replaces an already older source file.
+      const past = new Date(Date.now() - 60_000);
+      await utimes(sourceAuth, past, past);
+      await writeFile(
+        fake,
+        fakeCodexScript({
+          version: PINNED_CODEX_VERSION,
+          setup:
+            "const fs = require('node:fs'); const authPath = require('node:path').join(process.env.CODEX_HOME, 'auth.json'); let accountReads = 0;",
+          onLine: (message) => `  if (${message}.method === "account/read") {
+    accountReads += 1;
+    if (accountReads === 1) {
+      if (fs.readFileSync(authPath, "utf8") !== '{"kind":"dead"}') throw new Error("seeded credential was not pulled");
+      console.log(JSON.stringify({ id: ${message}.id, error: { code: -32000, message: "expired credential" } }));
+    } else {
+      if (fs.readFileSync(authPath, "utf8") !== '{"kind":"fresh"}') throw new Error("recovery credential was not written");
+      console.log(JSON.stringify({ id: ${message}.id, result: ${embeddedProtocolResults.authenticatedAccount} }));
+    }
+    return;
+  }
+  if (${message}.method === "account/logout") {
+    console.log(JSON.stringify({ id: ${message}.id, result: {} }));
+    return;
+  }
+  if (${message}.method === "account/login/start") {
+    fs.writeFileSync(authPath, '{"kind":"fresh"}');
+    console.log(JSON.stringify({ id: ${message}.id, result: ${embeddedProtocolResults.login} }));
+    console.log(JSON.stringify({ method: "account/login/completed", params: { loginId: "login", success: true } }));
+    return;
+  }`,
+        }),
+        "utf8",
+      );
+      await chmod(fake, 0o755);
+      const child = spawn(
+        process.execPath,
+        [
+          "dist/bin.js",
+          "serve",
+          "--port",
+          "0",
+          "--state-dir",
+          join(directory, "state"),
+          "--codex-home",
+          codexHome,
+          "--codex-path",
+          fake,
+        ],
+        {
+          cwd: repoRootPath,
+          env: { ...process.env, CODEX_HOME: sourceHome },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let stderr = "";
+      child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+        stderr += chunk;
+      });
+      const exit = once(child, "exit");
+      let exited = false;
+      try {
+        await waitForText(() => stderr, "app_server_ready");
+        assert.equal(await readFile(sourceAuth, "utf8"), '{"kind":"fresh"}');
+        child.kill("SIGTERM");
+        const [code, signal] = await exit;
+        exited = true;
+        assert.equal(code, 0, `recovery shutdown stderr:\n${stderr}`);
+        assert.equal(signal, null, `recovery shutdown stderr:\n${stderr}`);
+      } finally {
+        if (!exited && child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGKILL");
+          await exit;
+        }
+      }
+    }, "codex-proxy-auth-recovery-write-back-");
+  },
+  15_000,
+);
+
+testWithPosixExecutable(
+  "CLI does not write recovered credentials back when seeding was skipped",
+  async () => {
+    await withTempDir(async (directory) => {
+      const sourceHome = join(directory, "source-codex-home");
+      const codexHome = join(directory, "proxy-codex-home");
+      const sourceAuth = join(sourceHome, "auth.json");
+      const targetAuth = join(codexHome, "auth.json");
+      const fake = join(directory, "codex");
+      await mkdir(sourceHome, { recursive: true });
+      await mkdir(codexHome, { recursive: true });
+      await writeFile(sourceAuth, '{"kind":"valid"}', "utf8");
+      await writeFile(targetAuth, '{"kind":"proxy-dead"}', "utf8");
+      // Coarse filesystems must still see the proxy credential as strictly newer.
+      const past = new Date(Date.now() - 60_000);
+      const future = new Date(Date.now() + 60_000);
+      await utimes(sourceAuth, past, past);
+      await utimes(targetAuth, future, future);
+      await writeFile(
+        fake,
+        fakeCodexScript({
+          version: PINNED_CODEX_VERSION,
+          setup:
+            "const fs = require('node:fs'); const authPath = require('node:path').join(process.env.CODEX_HOME, 'auth.json'); let accountReads = 0;",
+          onLine: (message) => `  if (${message}.method === "account/read") {
+    accountReads += 1;
+    if (accountReads === 1) {
+      if (fs.readFileSync(authPath, "utf8") !== '{"kind":"proxy-dead"}') throw new Error("newer proxy credential was replaced");
+      console.log(JSON.stringify({ id: ${message}.id, error: { code: -32000, message: "expired credential" } }));
+    } else {
+      if (fs.readFileSync(authPath, "utf8") !== '{"kind":"fresh"}') throw new Error("recovery credential was not written");
+      console.log(JSON.stringify({ id: ${message}.id, result: ${embeddedProtocolResults.authenticatedAccount} }));
+    }
+    return;
+  }
+  if (${message}.method === "account/logout") {
+    console.log(JSON.stringify({ id: ${message}.id, result: {} }));
+    return;
+  }
+  if (${message}.method === "account/login/start") {
+    fs.writeFileSync(authPath, '{"kind":"fresh"}');
+    console.log(JSON.stringify({ id: ${message}.id, result: ${embeddedProtocolResults.login} }));
+    console.log(JSON.stringify({ method: "account/login/completed", params: { loginId: "login", success: true } }));
+    return;
+  }`,
+        }),
+        "utf8",
+      );
+      await chmod(fake, 0o755);
+      const child = spawn(
+        process.execPath,
+        [
+          "dist/bin.js",
+          "serve",
+          "--port",
+          "0",
+          "--state-dir",
+          join(directory, "state"),
+          "--codex-home",
+          codexHome,
+          "--codex-path",
+          fake,
+        ],
+        {
+          cwd: repoRootPath,
+          env: { ...process.env, CODEX_HOME: sourceHome },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let stderr = "";
+      child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+        stderr += chunk;
+      });
+      const exit = once(child, "exit");
+      let exited = false;
+      try {
+        await waitForText(() => stderr, "app_server_ready");
+        assert.equal(await readFile(sourceAuth, "utf8"), '{"kind":"valid"}');
+        child.kill("SIGTERM");
+        const [code, signal] = await exit;
+        exited = true;
+        assert.equal(code, 0, `recovery shutdown stderr:\n${stderr}`);
+        assert.equal(signal, null, `recovery shutdown stderr:\n${stderr}`);
+      } finally {
+        if (!exited && child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGKILL");
+          await exit;
+        }
+      }
+    }, "codex-proxy-auth-recovery-no-write-back-");
+  },
+  15_000,
+);
+
+testWithPosixExecutable(
   "CLI makes readiness false and recovers after an unexpected child exit",
   async () => {
     await withTempDir(async (directory) => {

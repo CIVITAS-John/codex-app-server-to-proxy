@@ -36,7 +36,7 @@ export interface AuthenticationOptions {
 /** Ensures app-server has an authenticated OpenAI account. */
 export async function ensureAuthenticated(
   options: AuthenticationOptions,
-): Promise<void> {
+): Promise<{ recoveredLogin: boolean }> {
   let account: AccountResponse;
   try {
     account = await readAccount(options);
@@ -53,10 +53,11 @@ export async function ensureAuthenticated(
       throw new Error(
         "Login completed but account/read still reports no account.",
       );
-    return;
+    return { recoveredLogin: true };
   }
-  if (isAuthenticated(account)) return;
+  if (isAuthenticated(account)) return { recoveredLogin: false };
   await startAndWaitForLogin(options, !options.interactive);
+  return { recoveredLogin: false };
 }
 
 /** Reads and validates the app-server authentication state without refreshing it. */

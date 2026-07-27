@@ -17,6 +17,7 @@ import {
   CLIENT_VERSION,
   PINNED_CODEX_VERSION,
   startAppServer,
+  writeBackAuthCredentials,
   type AppServer,
 } from "../app-server/app-server.js";
 import { ensureAuthenticated } from "../app-server/auth.js";
@@ -183,14 +184,15 @@ class AppServerSupervisor {
 
   /** Starts and authenticates one child without exposing a partial transport. */
   async #initialize(): Promise<AppServer> {
+    const seedSource =
+      this.#options.syncAuth === "never"
+        ? undefined
+        : (process.env.CODEX_HOME ?? join(homedir(), ".codex"));
     const next = await startAppServer({
       codexPath: this.#options.codexPath,
       codexHome: this.#options.codexHome,
       // A user-provided proxy-only login must remain untouched when opted out.
-      seedAuthFrom:
-        this.#options.syncAuth === "never"
-          ? undefined
-          : (process.env.CODEX_HOME ?? join(homedir(), ".codex")),
+      seedAuthFrom: seedSource,
       seedAuthMode:
         this.#options.syncAuth === "never" ? undefined : this.#options.syncAuth,
       root: this.#options.root,
@@ -212,7 +214,7 @@ class AppServerSupervisor {
       }
     });
     try {
-      await ensureAuthenticated({
+      const { recoveredLogin } = await ensureAuthenticated({
         rpc: next.rpc,
         log: this.#log,
         timeoutMs: DEFAULT_STARTUP_TIMEOUT_MS,
@@ -220,6 +222,19 @@ class AppServerSupervisor {
         terminal: (message) => process.stderr.write(message),
         signal: this.#lifecycle.signal,
       });
+      if (
+        recoveredLogin &&
+        next.authSeeded &&
+        this.#options.syncAuth === "always" &&
+        seedSource !== undefined &&
+        !this.#lifecycle.signal.aborted &&
+        !exited
+      )
+        await writeBackAuthCredentials(
+          this.#options.codexHome,
+          seedSource,
+          this.#log,
+        );
     } catch (error) {
       await this.#stopPartial(next);
       if (this.#starting === next) this.#starting = undefined;
