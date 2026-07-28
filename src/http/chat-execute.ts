@@ -60,6 +60,7 @@ class IngressQueue {
   #wake: (() => void) | undefined;
   #queueError: Error | undefined;
   #transportError: Error | undefined;
+  #dynamicCallsCancelled = false;
   readonly #rejectDynamicCall: (call: PendingToolCall) => void;
 
   constructor(rejectDynamicCall: (call: PendingToolCall) => void) {
@@ -91,6 +92,7 @@ class IngressQueue {
 
   /** Retains one event within the count and approximate-byte limits. */
   enqueue(event: IngressEvent): void {
+    if (event.type === "dynamic_tool" && this.#dynamicCallsCancelled) return;
     if (this.#queueError) {
       if (event.type === "dynamic_tool") this.#rejectDynamicCall(event.call);
       return;
@@ -161,6 +163,19 @@ class IngressQueue {
       0,
     );
     return drained;
+  }
+
+  /** Drops current and future tool requests after their turn is interrupted. */
+  markDynamicCallsCancelled(): void {
+    this.#dynamicCallsCancelled = true;
+    const retained = this.#ingress.filter(
+      ({ event }) => event.type === "notification",
+    );
+    this.#ingress.splice(0, this.#ingress.length, ...retained);
+    this.#ingressBytes = retained.reduce(
+      (sum, queued) => sum + queued.bytes,
+      0,
+    );
   }
 
   /**
@@ -411,6 +426,7 @@ export async function execute(
                 threadId: handle.threadId,
                 turnId: handle.turnId,
               });
+              queue.markDynamicCallsCancelled();
             } catch {
               // Expire the batch unless interruption guarantees continuation.
               options.continuations.protectPendingFromReplay(responseId);

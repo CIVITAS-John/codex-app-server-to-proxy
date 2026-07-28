@@ -82,6 +82,8 @@ class ToolAppServer {
   readonly transport: FakeTransport;
   /** Rejections the proxy sent to the issued `item/tool/call` requests. */
   readonly rejections: CapturedRejection[] = [];
+  /** Whether interrupt acknowledgment is followed by one cancelled late call. */
+  sendLateToolCallAfterInterrupt = false;
   /** Raw Responses items received via thread/inject_items, in wire order. */
   readonly injected: Array<Record<string, unknown>> = [];
   /** The `input` array of every turn/start, in call order. */
@@ -194,6 +196,17 @@ class ToolAppServer {
         const turnId = this.#toolTurnId;
         if (!turnId) return;
         this.#toolTurnId = undefined;
+        if (this.sendLateToolCallAfterInterrupt) {
+          this.#toolRequestIds.add(903);
+          suspendWithTools(this.transport.send, this.#thread, turnId, [
+            {
+              id: 903,
+              callId: "call_late",
+              tool: "first",
+              arguments: { fragment: "late" },
+            },
+          ]);
+        }
         // Live app-server flushes the interrupted turn's usage within
         // milliseconds of the interrupt, before completion and idle.
         interruptTurn(this.transport.send, this.#thread, turnId, {
@@ -385,6 +398,7 @@ function toolTranscript(
 test("parallel fragmented tool calls interrupt the turn and continue by injecting result pairs", async () => {
   await withTempDir(async (directory) => {
     const fake = new ToolAppServer();
+    fake.sendLateToolCallAfterInterrupt = true;
     const { origin, proxy } = await startProxy(directory, fake);
     try {
       const firstResponse = await postChatCompletion(origin, {
@@ -441,8 +455,9 @@ test("parallel fragmented tool calls interrupt the turn and continue by injectin
         continued.choices[0]!.message.tool_calls?.map((call) => call.id),
         ["call_b", "call_a", "internal_after_results"],
       );
-      // The turn was interrupted at the batch, which cancels the captured
-      // requests app-server side; the proxy sends them no response at all.
+      // The turn was interrupted at the batch, which cancels both its captured
+      // requests and the fake's late pre-idle callback app-server side; the
+      // proxy sends all three no response at all.
       assert.equal(
         fake.methods.filter((method) => method === "turn/interrupt").length,
         1,
