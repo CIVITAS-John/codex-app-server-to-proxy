@@ -397,7 +397,7 @@ export async function execute(
           if (queue.peek()?.type === "dynamic_tool") {
             // Collect parallel tool calls issued in the same event-loop turn.
             await new Promise<void>((resolve) => setImmediate(resolve));
-            const { captured, calls, stored } = captureToolBatch(
+            const { captured, stored } = captureToolBatch(
               queue,
               options,
               responseId,
@@ -421,16 +421,10 @@ export async function execute(
                 "tool_turn_interrupt_failed",
               );
             }
-            // Close the cancelled requests with the continuation signal.
-            for (const call of calls)
-              try {
-                options.rpc.respondError(call.request.id, {
-                  code: -32003,
-                  message: "Tool results are delivered via continuation",
-                });
-              } catch {
-                // A closed transport has already made the request unanswerable.
-              }
+            // The interrupt already cancelled the captured requests app-server
+            // side, so they are deliberately left unanswered. Results are
+            // delivered by continuation, and a late response would only be
+            // logged there as an error for a request it no longer tracks.
             for (const event of emitCapturedBatch(
               captured,
               normalizer,
@@ -596,7 +590,6 @@ function captureToolBatch(
   handle: TurnHandle,
 ): {
   captured: IngressEvent[];
-  calls: PendingToolCall[];
   stored: StoredToolCall[];
 } {
   queue.assertQueueHealthy();
@@ -650,7 +643,7 @@ function captureToolBatch(
     for (const call of calls) rejectDynamicCall(options, call);
     throw error;
   }
-  return { captured, calls, stored };
+  return { captured, stored };
 }
 
 /** Normalizes one captured batch synchronously with the shared normalizer. */

@@ -533,17 +533,12 @@ test("streaming dynamic tools use standard argument deltas and interrupt at the 
       });
       assert.equal(choices.at(-1)?.finish_reason, "tool_calls");
 
-      // The turn was interrupted at the batch and its captured request was
-      // answered immediately; nothing stays pending, so replacing the
-      // transport later has no responders left to cancel.
-      assert.deepEqual(fake.responderErrors, [
-        {
-          code: -32003,
-          message: "Tool results are delivered via continuation",
-        },
-      ]);
+      // The interrupt cancelled the captured request app-server side, so the
+      // proxy never answers it; nothing stays pending, so replacing the
+      // transport later has no responders left to cancel either.
+      assert.deepEqual(fake.responderErrors, []);
       running.proxy.setTransport(undefined);
-      assert.equal(fake.responderErrors.length, 1);
+      assert.deepEqual(fake.responderErrors, []);
     } finally {
       await running.proxy.close();
     }

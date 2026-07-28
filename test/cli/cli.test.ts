@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, utimes, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
@@ -859,7 +860,7 @@ process.on("SIGTERM", () => {
 );
 
 testWithPosixExecutable(
-  "a dynamic tool call is interrupted, answered, and survives signal shutdown",
+  "a dynamic tool call is interrupted, unanswered, and survives signal shutdown",
   async () => {
     await withTempDir(async (directory) => {
       const fake = join(directory, "codex");
@@ -946,12 +947,10 @@ process.on("SIGTERM", () => setTimeout(() => process.exit(0), 200));`,
           .choices[0].finish_reason,
         "tool_calls",
       );
-      // The captured request was already answered at the interrupt, so
-      // shutdown has nothing pending to reject and exits cleanly.
-      const error = JSON.parse(await readFile(rejected, "utf8")) as {
-        code: number;
-      };
-      assert.equal(error.code, -32003);
+      // The interrupt cancelled the captured request app-server side, so the
+      // proxy answers it with nothing at all and shutdown has no responder
+      // left to reject; it still exits cleanly.
+      assert.equal(existsSync(rejected), false);
       child.kill("SIGTERM");
       const [code] = await once(child, "exit");
       assert.equal(code, 0);

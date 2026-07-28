@@ -441,16 +441,13 @@ test("parallel fragmented tool calls interrupt the turn and continue by injectin
         continued.choices[0]!.message.tool_calls?.map((call) => call.id),
         ["call_b", "call_a", "internal_after_results"],
       );
-      // The turn was interrupted at the batch and each captured request was
-      // answered with the continuation-delivery rejection.
+      // The turn was interrupted at the batch, which cancels the captured
+      // requests app-server side; the proxy sends them no response at all.
       assert.equal(
         fake.methods.filter((method) => method === "turn/interrupt").length,
         1,
       );
-      assert.deepEqual(fake.rejections, [
-        { id: 902, code: -32003 },
-        { id: 901, code: -32003 },
-      ]);
+      assert.deepEqual(fake.rejections, []);
       // Results reach the model as complete call/output pairs in batch order.
       assert.deepEqual(
         fake.injected.map((item) => [item.type, item.call_id]),

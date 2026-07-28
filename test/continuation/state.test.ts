@@ -710,7 +710,7 @@ test("dynamic tool callbacks route to exactly one thread owner", async () => {
   }, "codex-proxy-state-");
 });
 
-test("ownerless dynamic tool calls answer per the thread's pending batch", async () => {
+test("an ownerless dynamic tool call answers only without a pending batch", async () => {
   await withTempDir(async (directory) => {
     const output = new PassThrough();
     const written: Buffer[] = [];
@@ -744,14 +744,9 @@ test("ownerless dynamic tool calls answer per the thread's pending batch", async
       .split("\n")
       .filter(Boolean)
       .map((frame) => JSON.parse(frame) as Record<string, unknown>);
+    // The pending thread's late call is left unanswered; only the genuine
+    // correlation failure gets a response app-server is still waiting for.
     assert.deepEqual(frames, [
-      {
-        id: 1,
-        error: {
-          code: -32003,
-          message: "Tool results are delivered via continuation",
-        },
-      },
       {
         id: 2,
         error: { code: -32602, message: "Dynamic tool correlation mismatch" },

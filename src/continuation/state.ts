@@ -390,16 +390,15 @@ export class ContinuationCoordinator {
     }
     const owner = this.#toolOwners.get(params.threadId);
     if (!owner) {
-      // A late call from an interrupted thread belongs to its pending batch.
-      this.rpc.respondError(
-        request.id,
-        this.store.hasPendingToolForThread(params.threadId)
-          ? {
-              code: -32003,
-              message: "Tool results are delivered via continuation",
-            }
-          : { code: -32602, message: "Dynamic tool correlation mismatch" },
-      );
+      // A late call from an interrupted thread belongs to its pending batch:
+      // app-server already cancelled it, so answering would only be logged
+      // there as an error. Anything else is a real correlation failure that
+      // app-server is still waiting on.
+      if (!this.store.hasPendingToolForThread(params.threadId))
+        this.rpc.respondError(request.id, {
+          code: -32602,
+          message: "Dynamic tool correlation mismatch",
+        });
       return;
     }
     owner({

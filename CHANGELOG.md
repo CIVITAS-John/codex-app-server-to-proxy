@@ -4,6 +4,12 @@ All notable user-facing changes are recorded here. This project follows semantic
 
 ## Unreleased
 
+### Fixed
+
+- A successful `finish_reason: "tool_calls"` response no longer logs an app-server `ERROR` line for each tool call. The proxy used to answer the calls its `turn/interrupt` had already cancelled with a JSON-RPC `-32003` "Tool results are delivered via continuation" error; app-server logs any response it cannot match at `ERROR`, which the proxy then surfaced as a warning that read like a routing failure. Cancelled calls are now left unanswered, which is what app-server expects.
+
+## 0.1.0-rc.9 — July 27, 2026
+
 ### Added
 
 - `--sync-auth <always|if-missing|never>` controls whether startup tracks credentials from `$CODEX_HOME` or `~/.codex`; the default `always` adopts the source when the target is missing or the source is strictly newer, `if-missing` retains the earlier seed-once behavior, and `never` leaves the proxy's Codex home untouched.
