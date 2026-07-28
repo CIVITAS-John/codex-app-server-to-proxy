@@ -377,16 +377,14 @@ export async function execute(
       let failed = false;
       let pendingFinishReason: NormalizedEvent["finishReason"];
       let pendingUsage: Usage | undefined;
-      // Set once this response hands off a dynamic-tool batch; selects the
-      // pending-tool persistence path over the ready mapping after the loop.
+      // Tracks whether this response persisted a pending tool batch.
       let toolBatch: StoredToolCall[] | undefined;
       try {
         for (const result of continuationResults)
           yield normalizer.dynamicToolResult(result.call, result.content);
         while (!handle.terminal) {
           queue.assertHealthy();
-          // Preserve all already-arrived events. Once they are drained, abort is a
-          // terminal wake source even if interrupt fails or the transport wedges.
+          // Drain arrived events before treating abort as terminal.
           if (queue.empty && options.signal.aborted)
             throw new HttpError(
               408,
@@ -397,8 +395,7 @@ export async function execute(
           if (queue.empty) await queue.wait(options.signal);
           queue.assertHealthy();
           if (queue.peek()?.type === "dynamic_tool") {
-            // Let parallel app-server requests arriving in this event-loop turn
-            // join the batch before the synchronous persistence handoff.
+            // Collect parallel tool calls issued in the same event-loop turn.
             await new Promise<void>((resolve) => setImmediate(resolve));
             const { captured, calls, stored } = captureToolBatch(
               queue,
@@ -408,18 +405,14 @@ export async function execute(
               handle,
             );
             toolBatch = stored;
-            // Interrupt deliberately ignores the request signal: ending the
-            // turn is protocol hygiene owed even to a disconnecting client,
-            // and it is what flushes this turn's exact token usage.
+            // End the turn and flush usage even after client abort.
             try {
               await options.rpc.request("turn/interrupt", {
                 threadId: handle.threadId,
                 turnId: handle.turnId,
               });
             } catch {
-              // A tool_calls response promises a usable continuation. Make the
-              // durable batch non-replayable before failing instead of exposing
-              // calls whose original turn may still be active.
+              // Expire the batch unless interruption guarantees continuation.
               options.continuations.protectPendingFromReplay(responseId);
               throw new HttpError(
                 502,
@@ -428,8 +421,7 @@ export async function execute(
                 "tool_turn_interrupt_failed",
               );
             }
-            // The acknowledged interrupt already cancelled these requests, so
-            // answering them is local JSON-RPC hygiene.
+            // Close the cancelled requests with the continuation signal.
             for (const call of calls)
               try {
                 options.rpc.respondError(call.request.id, {
@@ -444,11 +436,7 @@ export async function execute(
               normalizer,
               handle,
             )) {
-              // Usage for the model request that produced this batch belongs
-              // after the terminal frame, exactly as a completed turn reports
-              // it. A finish reason captured with the batch — a client abort
-              // racing the widening window — must not precede the
-              // authoritative tool_calls frame.
+              // Emit usage after the authoritative tool_calls frame.
               if (event.usage) pendingUsage = event.usage;
               else if (event.finishReason) continue;
               else yield event;
@@ -658,8 +646,7 @@ function captureToolBatch(
       stored,
     );
   } catch (error) {
-    // Captured calls are no longer in ingress, so this handoff owns rejecting
-    // every responder if durable persistence fails.
+    // Reject captured responders if durable persistence fails.
     for (const call of calls) rejectDynamicCall(options, call);
     throw error;
   }
@@ -694,9 +681,7 @@ async function resumeContinuation(
   if (!stored) continuationFailure(404, "unknown_previous_response_id");
   if (stored.model !== binding.model)
     continuationFailure(409, "continuation_model_mismatch");
-  // Schema-version-0 records written before reasoning effort became binding
-  // data have neither field. Grandfather that ambiguous first continuation;
-  // every newly written record carries reasoningEffortBound for exact checks.
+  // Grandfather schema-version-0 records that predate effort binding.
   if (
     (stored.reasoningEffortBound === true ||
       stored.reasoningEffort !== undefined) &&
@@ -710,8 +695,7 @@ async function resumeContinuation(
   if (stored.policyHash !== binding.policyHash)
     continuationFailure(409, "continuation_policy_mismatch");
 
-  // Assignment precedes state validation so cleanup retains the original
-  // release behavior for every mid-setup continuation failure.
+  // Set threadId first so cleanup can release it after setup failures.
   handle.threadId = stored.threadId;
   if (
     stored.state === "expired" &&
@@ -723,23 +707,18 @@ async function resumeContinuation(
     if (!request.messages.some((message) => message.role === "tool"))
       continuationFailure(409, "tool_results_required");
     const pending = stored.pendingCalls;
-    // Belt and braces: the loader tombstones metadata-less pending records,
-    // so a live one without calls can only mean on-disk tampering.
+    // The loader tombstones legacy records without call metadata.
     if (!pending?.length) continuationFailure(410, "expired_tool_continuation");
     const results = validateToolResults(request.messages, pending);
-    // Nothing awaited since the record was read, so selection plus claim is
-    // atomic within this event-loop task: of two concurrent continuations,
-    // the loser observes thread_busy before any thread-mutating RPC.
+    // Claim before awaiting so concurrent continuations remain atomic.
     acquireThread(handle, options, onToolRequest);
     await resumeIdleThread(request, options, handle);
     const items = pending.flatMap((call) => [
-      // Always the complete pair: the interrupted turn never persisted its
-      // own function_call item, and an unpaired output is silently ignored.
+      // Inject the complete pair because an unpaired output is ignored.
       toFunctionCallItem(call),
       toFunctionCallOutputItem(call.callId, results.get(call.callId)!),
     ]);
-    // Establish the durable fail-closed boundary before the injection RPC. A
-    // failed state write leaves the still-unmodified thread safe to retry.
+    // Tombstone before injection to prevent replay after uncertain failure.
     options.continuations.protectPendingFromReplay(request.previousResponseId!);
     try {
       await options.rpc.request(
@@ -748,8 +727,7 @@ async function resumeContinuation(
         options.signal,
       );
     } catch (error) {
-      // The durable tombstone already prevents a retry if the injection
-      // reached an unknowable state.
+      // The tombstone blocks replay if the injection outcome is unknown.
       if (error instanceof HttpError) throw error;
       throw new HttpError(
         502,
@@ -758,8 +736,7 @@ async function resumeContinuation(
         "tool_result_injection_failed",
       );
     }
-    // Superseded is more descriptive after success, but this bookkeeping is
-    // best-effort because the durable expired state already prevents replay.
+    // Mark success best-effort; the tombstone already blocks replay.
     options.continuations.recordPendingConsumed(request.previousResponseId!);
     await startTurn(request, options, handle);
     return {

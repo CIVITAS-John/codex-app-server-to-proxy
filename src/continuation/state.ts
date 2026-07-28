@@ -390,11 +390,7 @@ export class ContinuationCoordinator {
     }
     const owner = this.#toolOwners.get(params.threadId);
     if (!owner) {
-      // App-server can dispatch a late call after its turn was interrupted at
-      // the captured batch — the interrupt cancels the call server-side. The
-      // thread's durable pending record identifies that expected case, and the
-      // continuation answer keeps app-server diagnostics consistent with the
-      // batch instead of reporting a proxy routing failure.
+      // A late call from an interrupted thread belongs to its pending batch.
       this.rpc.respondError(
         request.id,
         this.store.hasPendingToolForThread(params.threadId)
@@ -416,10 +412,7 @@ export class ContinuationCoordinator {
     });
   };
 
-  /**
-   * Atomically claims a thread and installs its sole dynamic-tool callback
-   * owner. The returned lease is the only authority that can release both.
-   */
+  /** Atomically claims a thread and installs its dynamic-tool owner. */
   acquireThread(
     threadId: string,
     owner: (request: PendingToolCall) => void,
@@ -436,8 +429,7 @@ export class ContinuationCoordinator {
       release: (): void => {
         if (released) return;
         released = true;
-        // Disposal may have already cleared both structures. Otherwise only
-        // the lease's exact callback can release this ownership generation.
+        // Only this lease may release the current ownership generation.
         if (this.#toolOwners.get(threadId) !== owner) return;
         this.#toolOwners.delete(threadId);
         this.#busy.delete(threadId);
@@ -469,31 +461,17 @@ export class ContinuationCoordinator {
     });
   }
 
-  /**
-   * Persists the exact cumulative boundary the continuation must subtract from.
-   * A tool-call response that observed no usage persists the boundary it
-   * started from, so the model requests behind the tool calls are attributed
-   * by the continuation instead of being lost. The pending mapping itself is
-   * already durable, so this best-effort update never reports failure: a
-   * disposed generation or a mapping that already left `pending_tool` simply
-   * forgoes the boundary.
-   */
+  /** Persists the best-effort usage boundary for a pending batch. */
   recordPendingUsage(
     responseId: string,
     usageTotal: TokenUsageCounters | undefined,
   ): void {
-    // An all-zero boundary is a legal, meaningful value — a fresh thread that
-    // parked before app-server attributed anything. Only the absent object
-    // may be skipped; never test a counter's value for truthiness here.
+    // Zero is valid; only an absent boundary skips the update.
     if (this.#disposed || !usageTotal) return;
     this.#updateBestEffort(responseId, "pending_tool", { usageTotal });
   }
 
-  /**
-   * Durably makes a pending batch non-replayable before injection. Losing the
-   * result to a crash between this write and injection is safer than allowing
-   * an unknowable or completed injection to be repeated.
-   */
+  /** Tombstones a pending batch before injection to prevent replay. */
   protectPendingFromReplay(responseId: string): void {
     const record = this.store.get(responseId);
     if (!record || record.state !== "pending_tool")
