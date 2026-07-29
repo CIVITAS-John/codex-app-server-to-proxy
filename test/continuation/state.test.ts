@@ -16,6 +16,7 @@ import { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
 import {
   bindingHash,
   ContinuationCoordinator,
+  MAX_INTERRUPTED_TOOL_TURNS,
   ResponseStore,
 } from "../../src/continuation/state.js";
 import { HttpError } from "../../src/http/errors.js";
@@ -705,6 +706,95 @@ test("dynamic tool callbacks route to exactly one thread owner", async () => {
     assert.deepEqual(second, ["call_2"]);
     firstLease.release();
     secondLease.release();
+    coordinator.dispose();
+    rpc.close();
+  }, "codex-proxy-state-");
+});
+
+test("late callbacks from an interrupted turn stay unanswered during its continuation", async () => {
+  await withTempDir(async (directory) => {
+    const output = new PassThrough();
+    const written: Buffer[] = [];
+    output.on("data", (chunk: Buffer) => written.push(chunk));
+    const rpc = new JsonRpcTransport(new PassThrough(), output);
+    const coordinator = new ContinuationCoordinator(
+      new ResponseStore(directory),
+      rpc,
+    );
+    const calls: string[] = [];
+    const lease = coordinator.acquireThread("thread_1", (call) =>
+      calls.push(call.callId),
+    );
+    assert.ok(lease);
+    coordinator.markTurnInterrupted("thread_1", "turn_old");
+
+    for (const [id, turnId, callId] of [
+      [1, "turn_old", "call_stale"],
+      [2, "turn_current", "call_current"],
+    ] as const)
+      rpc.emit("request", {
+        id,
+        method: "item/tool/call",
+        params: {
+          threadId: "thread_1",
+          turnId,
+          callId,
+          namespace: null,
+          tool: "lookup",
+          arguments: {},
+        },
+      });
+
+    assert.deepEqual(calls, ["call_current"]);
+    assert.equal(Buffer.concat(written).toString("utf8"), "");
+    lease.release();
+    coordinator.dispose();
+    rpc.close();
+  }, "codex-proxy-state-");
+});
+
+test("interrupted turn tombstones evict the least recently interrupted turn", async () => {
+  await withTempDir(async (directory) => {
+    const output = new PassThrough();
+    const written: Buffer[] = [];
+    output.on("data", (chunk: Buffer) => written.push(chunk));
+    const rpc = new JsonRpcTransport(new PassThrough(), output);
+    const coordinator = new ContinuationCoordinator(
+      new ResponseStore(directory),
+      rpc,
+    );
+    const calls: string[] = [];
+    const lease = coordinator.acquireThread("thread_1", (call) =>
+      calls.push(call.callId),
+    );
+    assert.ok(lease);
+    // One turn beyond the bound, so only the very first mark is evicted.
+    for (let turn = 0; turn <= MAX_INTERRUPTED_TOOL_TURNS; turn += 1)
+      coordinator.markTurnInterrupted("thread_1", `turn_${turn}`);
+
+    for (const [id, turnId, callId] of [
+      [1, "turn_0", "call_evicted"],
+      [2, "turn_1", "call_retained"],
+      [3, `turn_${MAX_INTERRUPTED_TOOL_TURNS}`, "call_newest"],
+    ] as const)
+      rpc.emit("request", {
+        id,
+        method: "item/tool/call",
+        params: {
+          threadId: "thread_1",
+          turnId,
+          callId,
+          namespace: null,
+          tool: "lookup",
+          arguments: {},
+        },
+      });
+
+    // An evicted turn is indistinguishable from a live one and reaches the
+    // owner again; every retained turn stays suppressed.
+    assert.deepEqual(calls, ["call_evicted"]);
+    assert.equal(Buffer.concat(written).toString("utf8"), "");
+    lease.release();
     coordinator.dispose();
     rpc.close();
   }, "codex-proxy-state-");

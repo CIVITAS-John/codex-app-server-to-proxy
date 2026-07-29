@@ -329,13 +329,20 @@ export async function execute(
     policyHash: policyBindingHash(request.policy),
   };
   const abort = async (): Promise<void> => {
-    if (handle.threadId && handle.turnId && !handle.terminal)
-      await options.rpc
-        .request("turn/interrupt", {
+    if (handle.threadId && handle.turnId && !handle.terminal) {
+      // Tombstone before the round trip: a lost or timed-out interrupt response
+      // does not prove the turn survived, and this execution is being torn down
+      // either way, so its remaining callbacks are stale whatever the outcome.
+      options.continuations.markTurnInterrupted(handle.threadId, handle.turnId);
+      try {
+        await options.rpc.request("turn/interrupt", {
           threadId: handle.threadId,
           turnId: handle.turnId,
-        })
-        .catch(() => undefined);
+        });
+      } catch {
+        // Cancellation is best-effort during request cleanup.
+      }
+    }
   };
   const onAbort = (): void => {
     // Interrupt is best-effort, but waking the consumer is mandatory: a wedged
@@ -415,7 +422,15 @@ export async function execute(
               handle,
             );
             toolBatch = stored;
-            // End the turn and flush usage even after client abort.
+            // End the turn and flush usage even after client abort. The
+            // tombstone precedes the round trip because a lost interrupt
+            // response does not prove the turn survived, and this response
+            // fails either way, so its remaining callbacks are stale whatever
+            // the outcome.
+            options.continuations.markTurnInterrupted(
+              handle.threadId!,
+              handle.turnId!,
+            );
             try {
               await options.rpc.request("turn/interrupt", {
                 threadId: handle.threadId,

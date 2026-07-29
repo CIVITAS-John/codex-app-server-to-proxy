@@ -2,6 +2,12 @@
 
 All notable user-facing changes are recorded here. This project follows semantic versioning once a version is published.
 
+## Unreleased
+
+### Fixed
+
+- Late dynamic-tool callbacks from an intentionally interrupted turn are now ignored even while the same thread is running its continuation, eliminating false `Dynamic tool correlation mismatch` warnings and request failures. The expected app-server cancellation diagnostic produced by that interrupt is also omitted from proxy logs, and the opt-in live contract now proves the behavior across three consecutive full-history tool-result requests.
+
 ## 0.1.0-rc.12 — July 29, 2026
 
 ### Fixed

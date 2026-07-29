@@ -68,4 +68,6 @@ The unversioned proxy home is accepted for the pinned `0.145.0` contract. Before
 
 When `--log-level debug` is enabled, bounded and path-redacted app-server stderr is included directly in the `app_server_stderr` warning instead of producing a placeholder warning followed by a separate debug-detail event. At other log levels, the warning retains its redacted placeholder.
 
+The proxy omits app-server's `dynamic tool call was cancelled before receiving a response` stderr diagnostic. That cancellation is the expected result of the proxy's deliberate tool-turn interrupt, so surfacing app-server's `ERROR`-level implementation detail as a proxy warning is a false alarm. Other app-server stderr remains bounded and redacted as above.
+
 Stage 03 is complete. The focused live contract passed through the real HTTP proxy on 2026-07-14 with two scenarios under the four-turn guard. It observed role-history streaming, a two-request dynamic-tool round trip, and completed-thread continuation after restarting both the proxy and app-server while retaining only the state directory and `previous_response_id`. Policy fields remain rejected until Stage 06 implements and verifies their full enforcement matrix; this preserves the Stage 03 fail-closed compatibility decision.

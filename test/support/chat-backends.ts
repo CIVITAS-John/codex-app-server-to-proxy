@@ -15,6 +15,7 @@ import {
   type PolicyRequirements,
 } from "../../src/core/policy.js";
 import {
+  CONTRACT_TOOL_KEYS,
   OBSERVATION_COMMAND,
   OBSERVATION_FIXTURE,
   type ChatContractBackend,
@@ -81,9 +82,8 @@ async function startLiveChatBackendOnce(
       log: silentLogger,
     });
     assertLivePolicyPrerequisites(appServer.requirements);
-    // Wire-level timeline for the open usage-ordering question: offsets of the
-    // dynamic tool request and every usage notification from the turn start
-    // that produced them. Numbers only; no payload content is logged.
+    // Report only the dynamic-tool dispatch offset; token-usage notifications
+    // are asserted through HTTP output and stay off stdout.
     let turnStartedAt = 0;
     const baseRequest = appServer.rpc.request.bind(appServer.rpc);
     appServer.rpc.request = (method, params, signal) => {
@@ -94,12 +94,6 @@ async function startLiveChatBackendOnce(
       if (method === "item/tool/call")
         console.info(
           `[live] item/tool/call at +${Date.now() - turnStartedAt} ms after turn/start`,
-        );
-    });
-    appServer.rpc.on("notification", (method: string) => {
-      if (method === "thread/tokenUsage/updated")
-        console.info(
-          `[live] thread/tokenUsage/updated at +${Date.now() - turnStartedAt} ms after turn/start`,
         );
     });
     const interactive = !process.env.CI && Boolean(process.stderr.isTTY);
@@ -160,7 +154,7 @@ async function createContractEnvironment(): Promise<ContractEnvironment> {
     };
   } catch (error) {
     // No backend wrapper exists yet to own a partially initialized directory.
-    await rm(base, { recursive: true, force: true }).catch(() => undefined);
+    await removeContractEnvironment(base).catch(() => undefined);
     throw error;
   }
 }
@@ -193,7 +187,7 @@ async function startRestartableBackend(
     current = await startOnce();
   } catch (error) {
     // No backend close hook exists yet, so the wrapper owns startup cleanup.
-    await rm(environment.base, { recursive: true, force: true });
+    await removeContractEnvironment(environment.base);
     throw error;
   }
   let priorModelCalls = 0;
@@ -217,10 +211,20 @@ async function startRestartableBackend(
       try {
         await current.close();
       } finally {
-        await rm(environment.base, { recursive: true, force: true });
+        await removeContractEnvironment(environment.base);
       }
     },
   };
+}
+
+/** Removes a released contract root with bounded Windows lock retries. */
+async function removeContractEnvironment(base: string): Promise<void> {
+  await rm(base, {
+    recursive: true,
+    force: true,
+    maxRetries: 10,
+    retryDelay: 100,
+  });
 }
 
 /** A scripted transport and its cleanup hook. */
@@ -414,10 +418,10 @@ function createScriptedTransport(
               params: {
                 threadId,
                 turnId,
-                callId: "call_contract_lookup",
+                callId: "call_contract_lookup_1",
                 namespace: null,
                 tool: "contract_lookup",
-                arguments: { key: "cedar" },
+                arguments: { key: CONTRACT_TOOL_KEYS[0] },
               },
             }),
           );
@@ -428,16 +432,43 @@ function createScriptedTransport(
           // function_call/function_call_output pairs are the model input.
           const pairs = injected.get(threadId) as
             Array<Record<string, unknown>> | undefined;
+          const callId =
+            typeof pairs?.[0]?.call_id === "string"
+              ? pairs[0].call_id
+              : undefined;
+          const match = /^call_contract_lookup_(\d+)$/.exec(callId ?? "");
           if (
             pairs?.length !== 2 ||
             pairs[0]?.type !== "function_call" ||
-            pairs[0]?.call_id !== "call_contract_lookup" ||
             pairs[1]?.type !== "function_call_output" ||
-            pairs[1]?.call_id !== "call_contract_lookup"
+            pairs[1]?.call_id !== callId ||
+            match === null
           )
             throw new Error(
               "tool results were not injected as a complete call/output pair",
             );
+          const completedRound = Number(match[1]);
+          const nextKey = CONTRACT_TOOL_KEYS[completedRound];
+          if (nextKey !== undefined) {
+            const requestId = ++nextServerRequest;
+            pendingTools.set(requestId, { threadId, turnId });
+            toolTurns.set(turnId, threadId);
+            send(
+              protocolServerRequest({
+                id: requestId,
+                method: "item/tool/call",
+                params: {
+                  threadId,
+                  turnId,
+                  callId: `call_contract_lookup_${completedRound + 1}`,
+                  namespace: null,
+                  tool: "contract_lookup",
+                  arguments: { key: nextKey },
+                },
+              }),
+            );
+            return;
+          }
           send(
             protocolNotification({
               method: "item/agentMessage/delta",

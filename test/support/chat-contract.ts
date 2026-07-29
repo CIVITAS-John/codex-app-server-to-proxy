@@ -4,8 +4,11 @@ import { afterAll, beforeAll, describe, test } from "vitest";
 /** Model fixed by the repository's live-test cost policy. */
 export const CONTRACT_MODEL = "gpt-5.6-luna";
 
-/** Hard model-turn guard with one retry above the normal nine live calls. */
-export const MAX_LIVE_MODEL_CALLS = 10;
+/** Hard model-turn guard with one retry above the normal eleven live calls. */
+export const MAX_LIVE_MODEL_CALLS = 12;
+
+/** Ordered lookup keys used to force three live tool-result continuations. */
+export const CONTRACT_TOOL_KEYS = ["cedar", "birch", "maple"] as const;
 
 /** Safe root-relative file read by the live built-in command scenario. */
 export const OBSERVATION_FIXTURE = ".codex-contract-observation";
@@ -14,13 +17,13 @@ export const OBSERVATION_FIXTURE = ".codex-contract-observation";
 export const OBSERVATION_COMMAND = `cat ${OBSERVATION_FIXTURE}`;
 
 /** Maximum model turns allowed by the comprehensive offline contract. */
-const MAX_OFFLINE_MODEL_CALLS = 12;
+const MAX_OFFLINE_MODEL_CALLS = 14;
 
 /**
- * Maximum model turns allowed for the complete tool round trip: the
- * interrupted tool-call turn plus the injected-result continuation turn.
+ * Maximum model turns allowed through the third tool-result continuation:
+ * the initial tool call plus one turn for each supplied result.
  */
-const MAX_TOOL_MODEL_CALLS = 2;
+const MAX_TOOL_MODEL_CALLS = 4;
 
 /** POSIX shell launchers recognized in app-server command display strings. */
 const POSIX_SHELL_LAUNCHERS = new Set([
@@ -311,7 +314,7 @@ export function registerChatContract(
       }, 130_000);
 
     if (scenarios.has("dynamic-tool-restart"))
-      test("completes a client function-tool round trip and resumes after restart", async () => {
+      test("continues three full-history tool results and resumes after restart", async () => {
         const callsBefore = backend!.modelCalls();
         const tools = [
           {
@@ -328,126 +331,135 @@ export function registerChatContract(
             },
           },
         ];
+        const transcript: Array<Record<string, unknown>> = [
+          {
+            role: "user",
+            content:
+              "Call contract_lookup exactly once with key cedar. After each result, follow its instruction to make the next lookup. Do not answer until the final result tells you to.",
+          },
+        ];
         const firstStarted = Date.now();
-        const first = await chat({
+        const firstResponse = await chat({
           model: CONTRACT_MODEL,
-          messages: [
-            {
-              role: "user",
-              content:
-                "Call contract_lookup exactly once with key cedar. Do not answer without using the tool.",
-            },
-          ],
+          messages: transcript,
           tools,
         });
-        const firstRaw = await first.text();
+        const firstRaw = await firstResponse.text();
         const firstElapsedMs = Date.now() - firstStarted;
-        assert.equal(first.status, 200, diagnostic(firstRaw));
-        const firstBody = parseJson<ToolCompletion>(
+        assert.equal(firstResponse.status, 200, diagnostic(firstRaw));
+        let callBody = parseJson<ToolCompletion>(
           firstRaw,
-          "dynamic-tool completion",
+          "dynamic-tool completion 1",
         );
-        const assistant = firstBody.choices?.[0]?.message;
-        const call = assistant?.tool_calls?.[0];
-        assert.match(firstBody.id ?? "", /^chatcmpl_codex_/);
-        assert.equal(firstBody.choices?.[0]?.finish_reason, "tool_calls");
-        assert.equal(assistant?.role, "assistant");
-        assert.equal(assistant?.tool_calls?.length, 1);
-        assert.ok(call?.id);
-        assert.ok(
-          call?.type === "function",
-          "dynamic tool call used an unsupported type",
-        );
-        assert.ok(
-          call?.function.name === "contract_lookup",
-          "dynamic tool name did not match the contract fixture",
-        );
-        // Interrupting the turn at its tool call flushes usage within
-        // milliseconds (live evidence, codex 0.145.0, 2026-07-26), so the
-        // tool_calls response always carries exact usage. Numbers only.
-        if (options.reportToolTimings)
-          console.info(
-            `[live] tool_calls response took ${firstElapsedMs} ms; reasoning_tokens=${String(firstBody.usage?.completion_tokens_details?.reasoning_tokens)}`,
+        let completedBody: ToolCompletion | undefined;
+        for (const [roundIndex, key] of CONTRACT_TOOL_KEYS.entries()) {
+          const assistant = callBody.choices?.[0]?.message;
+          const call = assistant?.tool_calls?.[0];
+          assert.match(callBody.id ?? "", /^chatcmpl_codex_/);
+          assert.equal(callBody.choices?.[0]?.finish_reason, "tool_calls");
+          assert.equal(assistant?.role, "assistant");
+          assert.equal(assistant?.tool_calls?.length, 1);
+          assert.ok(call?.id);
+          assert.ok(
+            call?.type === "function",
+            "dynamic tool call used an unsupported type",
           );
-        const firstUsage = firstBody.usage;
-        assert.ok(
-          firstUsage,
-          "tool_calls response omitted usage for an interrupted turn",
-        );
-        assertUsage(firstUsage);
-        assert.equal(
-          typeof firstUsage.completion_tokens_details?.reasoning_tokens,
-          "number",
-          "tool_calls response omitted reasoning token detail",
-        );
-        const callArguments = parseJson<Record<string, unknown>>(
-          call?.function.arguments ?? "",
-          "dynamic-tool arguments",
-        );
-        assert.ok(
-          callArguments.key === "cedar" &&
-            Object.keys(callArguments).length === 1,
-          "dynamic-tool arguments did not match the contract fixture",
-        );
+          assert.ok(
+            call?.function.name === "contract_lookup",
+            "dynamic tool name did not match the contract fixture",
+          );
+          const callArguments = parseJson<Record<string, unknown>>(
+            call?.function.arguments ?? "",
+            `dynamic-tool arguments ${roundIndex + 1}`,
+          );
+          assert.deepEqual(callArguments, { key });
+          const callUsage = callBody.usage;
+          assert.ok(
+            callUsage,
+            "tool_calls response omitted usage for an interrupted turn",
+          );
+          assertUsage(callUsage);
+          assert.equal(
+            typeof callUsage.completion_tokens_details?.reasoning_tokens,
+            "number",
+            "tool_calls response omitted reasoning token detail",
+          );
+          if (roundIndex === 0 && options.reportToolTimings)
+            console.info(
+              `[live] tool_calls response took ${firstElapsedMs} ms; reasoning_tokens=${String(callUsage.completion_tokens_details?.reasoning_tokens)}`,
+            );
 
-        const secondStarted = Date.now();
-        const second = await chat({
-          model: CONTRACT_MODEL,
-          messages: [
-            {
-              role: "assistant",
-              content: null,
-              tool_calls: assistant!.tool_calls,
-            },
-            {
-              role: "tool",
-              tool_call_id: call!.id,
-              content:
-                "The lookup succeeded. Reply exactly with contract-tool-ok.",
-            },
-          ],
-          tools,
-        });
-        const secondRaw = await second.text();
-        // Numbers only: pairs with the tool_calls timing line above.
-        if (options.reportToolTimings)
-          console.info(
-            `[live] tool-result response took ${Date.now() - secondStarted} ms`,
+          transcript.push({
+            role: "assistant",
+            content: assistant?.content ?? null,
+            tool_calls: assistant!.tool_calls,
+          });
+          const nextKey = CONTRACT_TOOL_KEYS[roundIndex + 1];
+          transcript.push({
+            role: "tool",
+            tool_call_id: call!.id,
+            content:
+              nextKey === undefined
+                ? "The third lookup succeeded. Reply exactly with contract-tool-ok."
+                : `The lookup succeeded. Now call contract_lookup exactly once with key ${nextKey}. Do not answer yet.`,
+          });
+
+          const resultStarted = Date.now();
+          const resultResponse = await chat({
+            model: CONTRACT_MODEL,
+            messages: transcript,
+            tools,
+          });
+          const resultRaw = await resultResponse.text();
+          if (options.reportToolTimings)
+            console.info(
+              `[live] tool-result request ${roundIndex + 1} took ${Date.now() - resultStarted} ms`,
+            );
+          assert.equal(resultResponse.status, 200, diagnostic(resultRaw));
+          const resultBody = parseJson<ToolCompletion>(
+            resultRaw,
+            `tool-result completion ${roundIndex + 1}`,
           );
-        assert.equal(second.status, 200, diagnostic(secondRaw));
-        const secondBody = parseJson<ToolCompletion>(
-          secondRaw,
-          "tool-result completion",
-        );
-        assert.equal(secondBody.choices?.[0]?.finish_reason, "stop");
+          if (nextKey !== undefined) {
+            assert.equal(
+              resultBody.choices?.[0]?.finish_reason,
+              "tool_calls",
+              `tool-result request ${roundIndex + 1} did not request the next lookup`,
+            );
+            callBody = resultBody;
+          } else completedBody = resultBody;
+        }
+
+        assert.ok(completedBody, "third tool-result request did not complete");
+        assert.equal(completedBody.choices?.[0]?.finish_reason, "stop");
         assert.ok(
           /contract-tool-ok/i.test(
-            secondBody.choices?.[0]?.message?.content ?? "",
+            completedBody.choices?.[0]?.message?.content ?? "",
           ),
-          "tool-result completion omitted the contract acknowledgment",
+          "third tool-result completion omitted the contract acknowledgment",
         );
-        const secondUsage = secondBody.usage;
+        const completedUsage = completedBody.usage;
         assert.ok(
-          secondUsage,
-          "tool-result completion omitted usage for a completed turn",
+          completedUsage,
+          "third tool-result completion omitted usage for a completed turn",
         );
-        assertUsage(secondUsage);
+        assertUsage(completedUsage);
         // Boundary carry-forward guarantees the continuation accounts for the
         // suspended request too, so a response that follows a tool call can
         // never report an empty span.
         assert.ok(
-          (secondUsage?.total_tokens ?? 0) > 0,
-          "tool-result completion reported no tokens for a completed turn",
+          (completedUsage?.total_tokens ?? 0) > 0,
+          "third tool-result completion reported no tokens",
         );
         assert.ok(
           backend!.modelCalls() - callsBefore <= MAX_TOOL_MODEL_CALLS,
-          `tool round trip exceeded ${MAX_TOOL_MODEL_CALLS} model calls`,
+          `three-result tool round trip exceeded ${MAX_TOOL_MODEL_CALLS} model calls`,
         );
 
         await backend!.restart();
         const continued = await chat({
           model: CONTRACT_MODEL,
-          previous_response_id: secondBody.id,
+          previous_response_id: completedBody.id,
           messages: [
             {
               role: "user",

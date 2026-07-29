@@ -33,6 +33,9 @@ export { bindingHash, canonicalJson };
 /** Current on-disk continuation-store schema for the unreleased format. */
 const SCHEMA_VERSION = 0;
 
+/** Maximum interrupted turn IDs retained to recognize late tool callbacks. */
+export const MAX_INTERRUPTED_TOOL_TURNS = 4_096;
+
 /** Context that must remain identical over a Codex thread's lifetime. */
 export interface ThreadBinding {
   model: string;
@@ -324,6 +327,7 @@ export interface ThreadLease {
 export class ContinuationCoordinator {
   readonly #busy = new Set<string>();
   readonly #toolOwners = new Map<string, (request: PendingToolCall) => void>();
+  readonly #interruptedToolTurns = new Set<string>();
   #disposed = false;
 
   constructor(
@@ -388,6 +392,12 @@ export class ContinuationCoordinator {
       });
       return;
     }
+    if (
+      this.#interruptedToolTurns.has(
+        interruptedToolTurnKey(params.threadId, params.turnId),
+      )
+    )
+      return;
     const owner = this.#toolOwners.get(params.threadId);
     if (!owner) {
       // A late call from an interrupted thread belongs to its pending batch:
@@ -410,6 +420,24 @@ export class ContinuationCoordinator {
       turnId: params.turnId,
     });
   };
+
+  /**
+   * Remembers a cancelled turn so its late dynamic callbacks stay unanswered.
+   * This relies on app-server never reusing a turn identifier within one
+   * thread and transport generation: a repeated identifier would silently
+   * discard the live calls of the turn that reused it. Re-adding refreshes
+   * insertion order so the bound evicts the least recently interrupted turn.
+   */
+  markTurnInterrupted(threadId: string, turnId: string): void {
+    if (this.#disposed) return;
+    const key = interruptedToolTurnKey(threadId, turnId);
+    this.#interruptedToolTurns.delete(key);
+    this.#interruptedToolTurns.add(key);
+    for (const oldest of this.#interruptedToolTurns) {
+      if (this.#interruptedToolTurns.size <= MAX_INTERRUPTED_TOOL_TURNS) break;
+      this.#interruptedToolTurns.delete(oldest);
+    }
+  }
 
   /** Atomically claims a thread and installs its dynamic-tool owner. */
   acquireThread(
@@ -545,7 +573,13 @@ export class ContinuationCoordinator {
     // Pending tool records are durable and need no per-responder cleanup.
     this.#toolOwners.clear();
     this.#busy.clear();
+    this.#interruptedToolTurns.clear();
   }
+}
+
+/** Builds an unambiguous process-local key for one interrupted Codex turn. */
+function interruptedToolTurnKey(threadId: string, turnId: string): string {
+  return JSON.stringify([threadId, turnId]);
 }
 
 /** Validates every persisted field before a record can influence continuation. */

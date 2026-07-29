@@ -232,6 +232,7 @@ function failingIngressAppServer(mode: "overflow" | "mismatch" | "suspend"): {
 } {
   const responderErrors: number[] = [];
   let interrupts = 0;
+  let turns = 0;
   const fake = createFakeTransport({
     onMessage(rawMessage, send) {
       const message = rawMessage as {
@@ -248,9 +249,10 @@ function failingIngressAppServer(mode: "overflow" | "mismatch" | "suspend"): {
           ),
         );
       else if (message.method === "turn/start") {
+        const turnId = `turn_overflow_${++turns}`;
         send(
           protocolResponse("turn/start", message.id, {
-            turn: protocolTurn("turn_overflow", "inProgress"),
+            turn: protocolTurn(turnId, "inProgress"),
           }),
         );
         for (const id of [7001, 7002])
@@ -261,9 +263,7 @@ function failingIngressAppServer(mode: "overflow" | "mismatch" | "suspend"): {
               params: {
                 threadId: "thr_overflow",
                 turnId:
-                  mode === "mismatch" && id === 7002
-                    ? "foreign_turn"
-                    : "turn_overflow",
+                  mode === "mismatch" && id === 7002 ? "foreign_turn" : turnId,
                 callId: `call_${id}`,
                 tool: "lookup",
                 namespace: null,
@@ -278,7 +278,7 @@ function failingIngressAppServer(mode: "overflow" | "mismatch" | "suspend"): {
                 method: "item/agentMessage/delta",
                 params: {
                   threadId: "thr_overflow",
-                  turnId: "turn_overflow",
+                  turnId,
                   itemId: "flood",
                   delta: ".",
                 },

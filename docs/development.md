@@ -61,9 +61,11 @@ Required CI runs `npm ci` followed by the same `npm run check` command contribut
 
 CI sets `CODEX_TEST_COVERAGE` explicitly. The primary Node.js 24 Linux job alone runs coverage and its floors and publishes the offline `coverage/` directory; the other operating-system and Node.js compatibility jobs run the same tests without redundant instrumentation. Omitting the variable locally keeps coverage enabled. Coverage is limited to maintained source and thresholds are based on the Stage 07 baseline. Pull requests never run the live suite.
 
+The recorded floors describe a complete offline run, so they are enforced only where one is possible. Windows skips the POSIX-only fixture, permission, and executable suites and therefore reports coverage without enforcing the floors; `npm run check` is expected to pass there. Treat the Linux coverage job as the authoritative gate.
+
 ## Live contract tests
 
-The live suite exercises streaming role history, a function-tool round trip, completed-thread continuation after restarting the proxy and app-server, explicit read-only/disabled-web policy, default disabled-sandbox chat without execution tools, bounded built-in tool observation, and continuation after that tool information. It runs serially, caps captured diagnostics, uses only `gpt-5.6-luna`, normally makes nine model calls, and attempts at most ten:
+The live suite exercises streaming role history, three consecutive full-history function-tool result continuations, completed-thread continuation after restarting the proxy and app-server, explicit read-only/disabled-web policy, default disabled-sandbox chat without execution tools, bounded built-in tool observation, and continuation after that tool information. It runs serially, caps captured diagnostics, uses only `gpt-5.6-luna`, normally makes eleven model calls, and attempts at most twelve:
 
 ```sh
 npm run test:live
@@ -71,7 +73,7 @@ npm run test:live
 
 Running that dedicated command is the explicit local opt-in. It uses an existing ChatGPT login when available and otherwise preserves the normal interactive login fallback in a TTY. The default executable is owned by the pinned npm package. Set `CODEX_PATH` only for an explicit override; it must report the exact pinned contract version.
 
-The checked-in online workflow is manual, serial, protected by the `codex-live-tests` GitHub environment, and fails before dependency installation when `CODEX_ACCESS_TOKEN` is absent. Headless CI suppresses device-code URLs and one-time codes; credentials are never printed. The workflow is optional and never a required pull-request or release gate. Before either live path, state the expected normal total of nine `gpt-5.6-luna` calls and the hard maximum of ten.
+The checked-in online workflow is manual, serial, protected by the `codex-live-tests` GitHub environment, and fails before dependency installation when `CODEX_ACCESS_TOKEN` is absent. Headless CI suppresses device-code URLs and one-time codes; credentials are never printed. The workflow is optional and never a required pull-request or release gate. Before either live path, state the expected normal total of eleven `gpt-5.6-luna` calls and the hard maximum of twelve.
 
 Transport framing, malformed-frame handling, process failures, and other fault injection remain fake-only because a live app-server cannot provide those cases deterministically.
 

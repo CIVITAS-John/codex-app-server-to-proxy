@@ -84,6 +84,8 @@ class ToolAppServer {
   readonly rejections: CapturedRejection[] = [];
   /** Whether interrupt acknowledgment is followed by one cancelled late call. */
   sendLateToolCallAfterInterrupt = false;
+  /** Whether the interrupted turn dispatches a stale call during continuation. */
+  sendLateToolCallDuringContinuation = false;
   /** Whether a result continuation replays one call before requesting a new one. */
   replayAndRequestNewToolOnContinuation = false;
   /** Raw Responses items received via thread/inject_items, in wire order. */
@@ -95,6 +97,8 @@ class ToolAppServer {
   #turn = 0;
   /** The tool-call turn currently awaiting its interrupt, if any. */
   #toolTurnId: string | undefined;
+  /** Interrupted turn whose delayed callback is emitted on the next turn. */
+  #delayedToolTurnId: string | undefined;
   #toolRequestIds = new Set([901, 902]);
   // Counts the model requests app-server has already attributed to the thread,
   // so a later turn's cumulative `total` covers every earlier request.
@@ -198,6 +202,8 @@ class ToolAppServer {
         const turnId = this.#toolTurnId;
         if (!turnId) return;
         this.#toolTurnId = undefined;
+        if (this.sendLateToolCallDuringContinuation)
+          this.#delayedToolTurnId = turnId;
         if (this.sendLateToolCallAfterInterrupt) {
           this.#toolRequestIds.add(903);
           suspendWithTools(this.transport.send, this.#thread, turnId, [
@@ -228,6 +234,24 @@ class ToolAppServer {
             turn: protocolTurn(turnId, "inProgress"),
           }),
         );
+        const delayedToolTurnId = this.#delayedToolTurnId;
+        if (delayedToolTurnId) {
+          this.#delayedToolTurnId = undefined;
+          this.#toolRequestIds.add(905);
+          suspendWithTools(
+            this.transport.send,
+            this.#thread,
+            delayedToolTurnId,
+            [
+              {
+                id: 905,
+                callId: "call_delayed",
+                tool: "first",
+                arguments: { fragment: "delayed" },
+              },
+            ],
+          );
+        }
         if (this.toolsOnFirstTurn && this.#turn === 1) {
           if (this.internalBeforeTools)
             this.#send(
@@ -467,6 +491,7 @@ test("parallel fragmented tool calls interrupt the turn and continue by injectin
   await withTempDir(async (directory) => {
     const fake = new ToolAppServer();
     fake.sendLateToolCallAfterInterrupt = true;
+    fake.sendLateToolCallDuringContinuation = true;
     const { origin, proxy } = await startProxy(directory, fake);
     try {
       const firstResponse = await postChatCompletion(origin, {
@@ -525,8 +550,8 @@ test("parallel fragmented tool calls interrupt the turn and continue by injectin
         ["internal_after_results"],
       );
       // The turn was interrupted at the batch, which cancels both its captured
-      // requests and the fake's late pre-idle callback app-server side; the
-      // proxy sends all three no response at all.
+      // requests and both fake late callbacks app-server side, including one
+      // dispatched during the continuation; the proxy answers none of them.
       assert.equal(
         fake.methods.filter((method) => method === "turn/interrupt").length,
         1,

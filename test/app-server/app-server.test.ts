@@ -10,8 +10,10 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { PassThrough } from "node:stream";
 import { test } from "vitest";
 import {
+  attachAppServerStderrLogging,
   CLIENT_VERSION,
   PINNED_CODEX_VERSION,
   resolveCodexExecutable,
@@ -31,6 +33,63 @@ import { withTempDir } from "../support/temp.js";
 
 /** Skips fake shebang executables that Windows cannot spawn without a shell. */
 const testWithPosixExecutable = test.skipIf(process.platform === "win32");
+
+test("stderr logging drops fragmented expected cancellation diagnostics only", () => {
+  const stderr = new PassThrough();
+  const entries: Array<Record<string, unknown>> = [];
+  attachAppServerStderrLogging(stderr, {
+    root: process.cwd(),
+    diagnosticLogging: true,
+    log: createLogger("debug", (entry) => entries.push(entry)),
+  });
+
+  stderr.write(
+    "2026-07-29T07:34:47Z ERROR codex_core::tools::router: error=dynamic tool call was can",
+  );
+  stderr.end("celled before receiving a response\nreal diagnostic\n");
+
+  assert.deepEqual(
+    entries.filter((entry) => entry.event === "app_server_stderr"),
+    [
+      {
+        time: entries[0]?.time,
+        level: "warn",
+        event: "app_server_stderr",
+        message: "real diagnostic",
+      },
+    ],
+  );
+});
+
+test("stderr logging keeps diagnostics that only embed the expected record", () => {
+  const stderr = new PassThrough();
+  const entries: Array<Record<string, unknown>> = [];
+  attachAppServerStderrLogging(stderr, {
+    root: process.cwd(),
+    diagnosticLogging: true,
+    log: createLogger("debug", (entry) => entries.push(entry)),
+  });
+
+  // A tool name or argument reaching app-server stderr must not suppress its
+  // own line by quoting the expected record, either mid-line or as a suffix.
+  stderr.end(
+    [
+      "ERROR codex_core::tools::router: error=dynamic tool call was cancelled before receiving a response while draining",
+      "ERROR codex_core::tools::registry: tool=codex_core::tools::router: error=dynamic tool call was cancelled before receiving a response",
+      "",
+    ].join("\n"),
+  );
+
+  assert.deepEqual(
+    entries
+      .filter((entry) => entry.event === "app_server_stderr")
+      .map((entry) => entry.message),
+    [
+      "ERROR codex_core::tools::router: error=dynamic tool call was cancelled before receiving a response while draining",
+      "ERROR codex_core::tools::registry: tool=codex_core::tools::router: error=dynamic tool call was cancelled before receiving a response",
+    ],
+  );
+});
 
 test("auth write-back replaces an older target credential file", async () => {
   await withTempDir(async (directory) => {
@@ -394,7 +453,14 @@ let initialized = false;`,
           id: "unknown",
           error: { code: -32601, message: "Unsupported server request" },
         });
-        app.child.stderr.emit("data", `${homedir()}/private-file`);
+        app.child.stderr.emit(
+          "data",
+          "2026-07-29T07:34:47Z ERROR codex_core::tools::router: error=dynamic tool call was can",
+        );
+        app.child.stderr.emit(
+          "data",
+          `celled before receiving a response\n${homedir()}/private-file\n`,
+        );
         const stderrLogs = logs
           .map((entry) => JSON.parse(entry) as Record<string, unknown>)
           .filter((entry) => entry.event === "app_server_stderr");
