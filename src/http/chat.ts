@@ -9,6 +9,7 @@ import {
 import { execute, type ChatHandlerOptions } from "./chat-execute.js";
 import {
   policyHttpError,
+  terminalToolResultBlock,
   validateRequest,
   type ChatRequest,
   type ParsedChatRequest,
@@ -82,13 +83,9 @@ export async function handleChatCompletion(
       : {}),
     policy,
   };
-  if (
-    !request.previousResponseId &&
-    request.messages.some((message) => message.role === "tool")
-  ) {
-    const callIds = request.messages
-      .filter((message) => message.role === "tool")
-      .map((message) => message.toolCallId!);
+  const terminalToolResults = terminalToolResultBlock(request.messages);
+  if (!request.previousResponseId && terminalToolResults.length) {
+    const callIds = terminalToolResults.map((message) => message.toolCallId!);
     request.previousResponseId =
       options.continuations.findPendingResponse(callIds);
   }

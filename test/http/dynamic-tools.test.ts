@@ -297,6 +297,9 @@ class ToolAppServer {
           // injected function_call_output pairs are the model-visible input.
           if (this.replayAndRequestNewToolOnContinuation) {
             this.#emitReplayedDynamicToolLifecycle(turnId);
+            // The next tool-result continuation must finish so transcript
+            // correlation tests prove the third request does not loop.
+            this.replayAndRequestNewToolOnContinuation = false;
             this.#toolRequestIds.add(904);
             suspendWithTools(this.transport.send, this.#thread, turnId, [
               {
@@ -653,6 +656,106 @@ test("streaming continuations hide replayed client calls but expose new calls", 
       await proxy.close();
     }
   }, "codex-dynamic-tools-replay-sse-");
+});
+
+test("third full-history tool continuation correlates only its terminal result batch", async () => {
+  for (const explicitPreviousResponseId of [false, true]) {
+    await withTempDir(async (directory) => {
+      const fake = new ToolAppServer();
+      fake.replayAndRequestNewToolOnContinuation = true;
+      const { origin, proxy } = await startProxy(directory, fake);
+      const tools = [
+        { type: "function", function: { name: "first", parameters: {} } },
+        { type: "function", function: { name: "second", parameters: {} } },
+      ];
+      try {
+        const initial = (await (
+          await postChatCompletion(origin, {
+            model: "m",
+            tools,
+            messages: [{ role: "user", content: "use tools" }],
+          })
+        ).json()) as CompletionBody;
+        const initialCalls = initial.choices[0]!.message.tool_calls;
+        const second = (await (
+          await postChatCompletion(origin, {
+            model: "m",
+            tools,
+            previous_response_id: initial.id,
+            messages: toolTranscript(initialCalls, "first result"),
+          })
+        ).json()) as CompletionBody;
+        const secondCalls = second.choices[0]!.message.tool_calls;
+        assert.deepEqual(
+          secondCalls?.map((call) => call.id),
+          ["call_new"],
+        );
+
+        const thirdResponse = await postChatCompletion(origin, {
+          model: "m",
+          tools,
+          ...(explicitPreviousResponseId
+            ? { previous_response_id: second.id }
+            : {}),
+          messages: [
+            ...toolTranscript(initialCalls, "first result"),
+            ...toolTranscript(secondCalls, "second result"),
+          ],
+        });
+        assert.equal(
+          thirdResponse.status,
+          200,
+          await thirdResponse.clone().text(),
+        );
+        const third = (await thirdResponse.json()) as CompletionBody;
+        assert.equal(third.choices[0]!.message.content, "after tools");
+        assert.equal(third.choices[0]!.finish_reason, "stop");
+        // The historical A result remains replay context. Only B's terminal
+        // result is paired and injected on the third continuation.
+        assert.deepEqual(
+          fake.injected.slice(4).map((item) => [item.type, item.call_id]),
+          [
+            ["function_call", "call_new"],
+            ["function_call_output", "call_new"],
+          ],
+        );
+      } finally {
+        await proxy.close();
+      }
+    }, "codex-terminal-tool-results-");
+  }
+});
+
+test("historical tool results without a continuation ID stay out of fresh-thread history", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ToolAppServer();
+    const { origin, proxy } = await startProxy(directory, fake);
+    try {
+      const response = await postChatCompletion(origin, {
+        model: "m",
+        messages: [
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_old",
+                type: "function",
+                function: { name: "first", arguments: "{}" },
+              },
+            ],
+          },
+          { role: "tool", tool_call_id: "call_old", content: "old result" },
+          { role: "user", content: "continue" },
+        ],
+      });
+      assert.equal(response.status, 400);
+      assert.equal(await responseErrorCode(response), "invalid_request");
+      assert.equal(fake.methods.length, 0);
+    } finally {
+      await proxy.close();
+    }
+  }, "codex-historical-tool-results-");
 });
 
 test("verbatim mixed internal and dynamic calls resolve only the pending batch", async () => {

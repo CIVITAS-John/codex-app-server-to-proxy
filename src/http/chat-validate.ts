@@ -46,6 +46,15 @@ export interface ChatMessage {
   toolCalls?: Array<{ id: string; name: string; arguments: string }>;
 }
 
+/** Returns the terminal contiguous block of client-supplied tool results. */
+export function terminalToolResultBlock(
+  messages: readonly ChatMessage[],
+): ChatMessage[] {
+  let first = messages.length;
+  while (messages[first - 1]?.role === "tool") first -= 1;
+  return messages.slice(first);
+}
+
 /** The Stage 04 request subset after validation. */
 export interface ChatRequest {
   model: string;
@@ -101,8 +110,23 @@ export function validateRequest(
   const messages = body.messages.map((entry, index) =>
     validateMessage(entry, index),
   );
-  const hasToolResults = messages.some((message) => message.role === "tool");
-  if (!body.previous_response_id && hasToolResults && !implicitToolContinuation)
+  const terminalToolResults = terminalToolResultBlock(messages);
+  // This shape is not an implicit continuation: letting it fall through would
+  // inject unsupported historical tool roles into a fresh Codex thread.
+  if (
+    !body.previous_response_id &&
+    !terminalToolResults.length &&
+    messages.some((message) => message.role === "tool")
+  )
+    invalid(
+      "Historical tool results require previous_response_id.",
+      "previous_response_id",
+    );
+  if (
+    !body.previous_response_id &&
+    terminalToolResults.length &&
+    !implicitToolContinuation
+  )
     invalid(
       "Tool results require previous_response_id when implicit tool continuation is disabled.",
       "previous_response_id",
@@ -381,12 +405,8 @@ export function validateToolResults(
   messages: ChatMessage[],
   pending: StoredToolCall[],
 ): Map<string, string> {
-  const assistant = [...messages]
-    .reverse()
-    .find(
-      (message) =>
-        message.role === "assistant" && message.toolCalls !== undefined,
-    );
+  const toolResults = terminalToolResultBlock(messages);
+  const assistant = messages[messages.length - toolResults.length - 1];
   if (!assistant?.toolCalls)
     invalid("The assistant tool-call message is required.", "messages");
   const expected = new Map(pending.map((call) => [call.callId, call]));
@@ -410,8 +430,7 @@ export function validateToolResults(
       "messages",
     );
   const results = new Map<string, string>();
-  for (const message of messages) {
-    if (message.role !== "tool") continue;
+  for (const message of toolResults) {
     if (!message.toolCallId || !expected.has(message.toolCallId))
       invalid("The tool result references a foreign call ID.", "messages");
     if (results.has(message.toolCallId))

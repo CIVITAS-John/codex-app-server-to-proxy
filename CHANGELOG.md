@@ -2,7 +2,13 @@
 
 All notable user-facing changes are recorded here. This project follows semantic versioning once a version is published.
 
-## Unreleased
+## 0.1.0-rc.12 — July 29, 2026
+
+### Fixed
+
+- Third and later full-history tool continuations now correlate only their terminal `role: "tool"` block, so previously completed tool IDs no longer cause `unknown_tool_call_id` or foreign-call errors for the current batch.
+
+## 0.1.0-rc.11 — July 28, 2026
 
 ### Fixed
 

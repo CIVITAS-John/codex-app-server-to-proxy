@@ -114,7 +114,7 @@ Function tools follow the normal multi-request Chat Completions flow:
 3. Execute the functions in your client.
 4. Send the assistant tool-call message plus matching `role: "tool"` messages — repeating the same `tools`, `reasoning_effort`, and `x_codex` settings as the original request.
 
-Changing those settings between the call and its results is rejected (`continuation_reasoning_effort_mismatch` / `continuation_policy_mismatch`); the pending call stays intact so you can retry corrected. The proxy ends the Codex turn the moment it captures the tool calls, so the `tool_calls` response returns promptly with exact usage; your later tool results are delivered into the persisted thread when you continue, but are never echoed back in response `tool_calls` or `tool_results`. Pending tool calls are durable — they survive a proxy restart and expire only with the normal continuation retention.
+Changing those settings between the call and its results is rejected (`continuation_reasoning_effort_mismatch` / `continuation_policy_mismatch`); the pending call stays intact so you can retry corrected. When your client replays a full transcript across multiple tool rounds, only its terminal contiguous `role: "tool"` block is correlated and injected; earlier completed tool exchanges stay historical context. The proxy ends the Codex turn the moment it captures the tool calls, so the `tool_calls` response returns promptly with exact usage; your later tool results are delivered into the persisted thread when you continue, but are never echoed back in response `tool_calls` or `tool_results`. Pending tool calls are durable — they survive a proxy restart and expire only with the normal continuation retention.
 
 ## Codex-specific extensions
 

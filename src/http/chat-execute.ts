@@ -31,6 +31,7 @@ import {
   toFunctionCallItem,
   toFunctionCallOutputItem,
   toHistoryItem,
+  terminalToolResultBlock,
   validateToolResults,
   type ChatRequest,
 } from "./chat-validate.js";
@@ -700,14 +701,15 @@ async function resumeContinuation(
 
   // Set threadId first so cleanup can release it after setup failures.
   handle.threadId = stored.threadId;
+  const terminalToolResults = terminalToolResultBlock(request.messages);
   if (
     stored.state === "expired" &&
     stored.callIds?.length &&
-    request.messages.some((message) => message.role === "tool")
+    terminalToolResults.length
   )
     continuationFailure(410, "expired_tool_continuation");
   if (stored.state === "pending_tool") {
-    if (!request.messages.some((message) => message.role === "tool"))
+    if (!terminalToolResults.length)
       continuationFailure(409, "tool_results_required");
     const pending = stored.pendingCalls;
     // The loader tombstones legacy records without call metadata.
@@ -751,7 +753,7 @@ async function resumeContinuation(
     continuationFailure(409, "superseded_previous_response_id");
   if (stored.state !== "ready")
     continuationFailure(500, "corrupt_response_state");
-  if (request.messages.at(-1)?.role === "tool")
+  if (terminalToolResults.length)
     continuationFailure(409, "tool_results_without_pending_call");
   acquireThread(handle, options, onToolRequest);
   await resumeIdleThread(request, options, handle);
