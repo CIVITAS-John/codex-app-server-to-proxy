@@ -2,6 +2,12 @@
 
 All notable user-facing changes are recorded here. This project follows semantic versioning once a version is published.
 
+## Unreleased
+
+### Fixed
+
+- Client `role: "tool"` outputs are now injected into their continuation without being echoed as observational `tool_calls` or `tool_results`; replayed dynamic-tool lifecycle items are likewise hidden, so a continuation without a newly requested client tool correctly ends with `finish_reason: "stop"`.
+
 ## 0.1.0-rc.10 — July 28, 2026
 
 ### Fixed

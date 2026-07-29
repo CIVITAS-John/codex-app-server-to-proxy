@@ -3,7 +3,7 @@ import { realpathSync } from "node:fs";
 import { mkdir, realpath, symlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, sep } from "node:path";
-import { test } from "vitest";
+import { afterAll, test, vi } from "vitest";
 import {
   LOG_LEVELS,
   SYNC_AUTH_MODES,
@@ -12,6 +12,24 @@ import {
   resolveServeOptions,
 } from "../../src/core/config.js";
 import { withTempDir } from "../support/temp.js";
+
+/** Preserves the Windows profile path replaced for constrained test hosts. */
+const originalWindowsUserProfile = vi.hoisted(() => {
+  if (process.platform !== "win32") return undefined;
+  const original = process.env.USERPROFILE;
+  // A test worker cannot asynchronously read the real profile in the Windows
+  // sandbox. Set this before config imports `homedir` so default-path checks
+  // use the readable workspace root instead.
+  process.env.USERPROFILE = process.cwd();
+  return original;
+});
+
+/** Restores the caller's Windows profile after this test module completes. */
+afterAll(() => {
+  if (process.platform !== "win32") return;
+  if (originalWindowsUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = originalWindowsUserProfile;
+});
 
 test("loopback validation accepts only exact safe forms", () => {
   assert.equal(normalizeLoopbackHost("127.0.0.1"), "127.0.0.1");
@@ -97,7 +115,11 @@ test("serve options have safe documented defaults and reject ambiguity", async (
     const project = join(directory, "project");
     const projectLink = join(directory, "project-link");
     await mkdir(project);
-    await symlink(project, projectLink, "dir");
+    await symlink(
+      project,
+      projectLink,
+      process.platform === "win32" ? "junction" : "dir",
+    );
     // Match the promise-based canonicalization used by resolveServeOptions;
     // Windows may spell the same path differently in sync and async realpath.
     const canonicalProject = await realpath(project);

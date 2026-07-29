@@ -257,7 +257,6 @@ interface TurnHandle {
 
 /** Setup output shared by ready and pending-tool continuation paths. */
 interface ContinuationSetup {
-  results: Array<{ call: StoredToolCall; content: string }>;
   usageBaseline: TokenUsageCounters | undefined;
 }
 
@@ -319,8 +318,6 @@ export async function execute(
   options.rpc.on("notification", onNotification);
   options.rpc.once("close", onClose);
   let disposed = false;
-  let continuationResults: Array<{ call: StoredToolCall; content: string }> =
-    [];
   const binding: ThreadBinding = {
     model: request.model,
     ...(request.reasoningEffort
@@ -370,7 +367,6 @@ export async function execute(
         handle,
         onToolRequest,
       );
-      continuationResults = continuation.results;
       usageBaseline = continuation.usageBaseline;
     } else {
       await startFreshThread(request, options, handle, onToolRequest);
@@ -395,8 +391,6 @@ export async function execute(
       // Tracks whether this response persisted a pending tool batch.
       let toolBatch: StoredToolCall[] | undefined;
       try {
-        for (const result of continuationResults)
-          yield normalizer.dynamicToolResult(result.call, result.content);
         while (!handle.terminal) {
           queue.assertHealthy();
           // Drain arrived events before treating abort as terminal.
@@ -748,13 +742,7 @@ async function resumeContinuation(
     // Mark success best-effort; the tombstone already blocks replay.
     options.continuations.recordPendingConsumed(request.previousResponseId!);
     await startTurn(request, options, handle);
-    return {
-      results: pending.map((call) => ({
-        call,
-        content: results.get(call.callId)!,
-      })),
-      usageBaseline: stored.usageTotal,
-    };
+    return { usageBaseline: stored.usageTotal };
   }
 
   if (stored.state === "expired")
@@ -768,7 +756,7 @@ async function resumeContinuation(
   acquireThread(handle, options, onToolRequest);
   await resumeIdleThread(request, options, handle);
   await startTurn(request, options, handle);
-  return { results: [], usageBaseline: stored.usageTotal };
+  return { usageBaseline: stored.usageTotal };
 }
 
 /** Gates on a resumable thread status and resumes it under this request's policy. */

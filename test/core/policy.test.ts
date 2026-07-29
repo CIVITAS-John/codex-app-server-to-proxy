@@ -201,7 +201,11 @@ test("a request without cwd returns the root verbatim without re-canonicalizing"
     const real = join(directory, "real");
     const link = join(directory, "link");
     await mkdir(real);
-    await symlink(real, link, "dir");
+    await symlink(
+      real,
+      link,
+      process.platform === "win32" ? "junction" : "dir",
+    );
     // `link` is a non-canonical root whose realpath is the sibling `real`. The
     // previous build re-canonicalized the root on every request and rejected it
     // as cwd_outside_root; a request naming no cwd must now return the root as
@@ -296,7 +300,11 @@ test("root and cwd canonicalization enforce the real root boundary", async () =>
       mkdir(prefixPath),
     ]);
     await writeFile(filePath, "not a directory", "utf8");
-    await symlink(siblingPath, escapeLink, "dir");
+    await symlink(
+      siblingPath,
+      escapeLink,
+      process.platform === "win32" ? "junction" : "dir",
+    );
     const root = await canonicalizeRoot(rootPath);
     assert.equal(root, await realpath(rootPath));
     assert.equal(

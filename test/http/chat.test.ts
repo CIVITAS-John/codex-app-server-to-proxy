@@ -726,37 +726,20 @@ test("normalizes interleaved text, reasoning, internal items, tools, usage, and 
     normalizer.normalize(reasoningDelta.method, reasoningDelta.params),
     [{ delta: { reasoning: "why" } }],
   );
-  /** Builds a generated-protocol dynamic tool start notification. */
-  const dynamicTool = (id: string, tool: string) =>
-    protocolNotification({
-      method: "item/started",
-      params: {
-        threadId: "thread",
-        turnId: "turn",
-        startedAtMs: 0,
-        item: {
-          type: "dynamicToolCall",
-          id,
-          namespace: null,
-          tool,
-          arguments: tool === "lookup" ? { id: 1 } : {},
-          status: "inProgress",
-          contentItems: null,
-          success: null,
-          durationMs: null,
-        },
-      },
-    });
-  const firstNotification = dynamicTool("call_a", "lookup");
-  const first = normalizer.normalize(
-    firstNotification.method,
-    firstNotification.params,
-  );
-  const secondNotification = dynamicTool("call_b", "other");
-  const second = normalizer.normalize(
-    secondNotification.method,
-    secondNotification.params,
-  );
+  const first = [
+    normalizer.dynamicToolCall({
+      callId: "call_a",
+      name: "lookup",
+      arguments: '{"id":1}',
+    }),
+  ];
+  const second = [
+    normalizer.dynamicToolCall({
+      callId: "call_b",
+      name: "other",
+      arguments: "{}",
+    }),
+  ];
   assert.equal(
     (first[0]?.delta?.tool_calls as Array<{ index: number }>)[0]?.index,
     0,
@@ -936,6 +919,89 @@ test("normalizes interleaved text, reasoning, internal items, tools, usage, and 
   assert.equal(
     normalizeNotification(error.method, error.params)[0]?.error,
     "failed",
+  );
+});
+
+test("hides replayed dynamic lifecycle items without changing continuation finish reason", () => {
+  /** Builds a generated dynamic-tool lifecycle notification for this turn. */
+  const replayedDynamicTool = (method: "item/started" | "item/completed") => {
+    const item = {
+      type: "dynamicToolCall" as const,
+      id: "call_replayed",
+      namespace: null,
+      tool: "set-research",
+      arguments: { enabled: true },
+      success: true,
+    };
+    if (method === "item/started")
+      return protocolNotification({
+        method,
+        params: {
+          threadId: "thread",
+          turnId: "continuation",
+          startedAtMs: 0,
+          item: {
+            ...item,
+            status: "inProgress",
+            contentItems: null,
+            durationMs: null,
+          },
+        },
+      });
+    return protocolNotification({
+      method,
+      params: {
+        threadId: "thread",
+        turnId: "continuation",
+        completedAtMs: 1,
+        item: {
+          ...item,
+          status: "completed",
+          // This is the byte-for-byte output the client submitted.
+          contentItems: [
+            {
+              type: "inputText",
+              text: '{"_oracle":true,"message":"Tool set-research not executed in replay mode."}',
+            },
+          ],
+          durationMs: 1,
+        },
+      },
+    });
+  };
+  const replayNormalizer = new EventNormalizer();
+  for (const method of ["item/started", "item/completed"] as const) {
+    const replay = replayedDynamicTool(method);
+    assert.deepEqual(
+      replayNormalizer.normalize(replay.method, replay.params),
+      [],
+    );
+  }
+  const completed = protocolNotification({
+    method: "turn/completed",
+    params: {
+      threadId: "thread",
+      turn: protocolTurn("continuation", "completed"),
+    },
+  });
+  assert.deepEqual(
+    replayNormalizer.normalize(completed.method, completed.params),
+    [{ finishReason: "stop" }],
+  );
+
+  const newCallNormalizer = new EventNormalizer();
+  const newCall = newCallNormalizer.dynamicToolCall({
+    callId: "call_new",
+    name: "keep-status-quo",
+    arguments: "{}",
+  });
+  assert.deepEqual(
+    newCall.delta?.tool_calls?.map((call) => call.id),
+    ["call_new"],
+  );
+  assert.deepEqual(
+    newCallNormalizer.normalize(completed.method, completed.params),
+    [{ finishReason: "tool_calls" }],
   );
 });
 
@@ -1253,7 +1319,7 @@ test("backfills completed reasoning without duplicating streamed prefixes", () =
   );
 });
 
-test("allocates unique call indexes across internal, dynamic, continuation, and orphan progress", () => {
+test("allocates unique call indexes across internal, dynamic, and orphan progress", () => {
   const normalizer = new EventNormalizer();
   const internal = normalizer.normalize("item/started", {
     item: { id: "internal", type: "commandExecution", command: "pwd" },
@@ -1263,14 +1329,6 @@ test("allocates unique call indexes across internal, dynamic, continuation, and 
     name: "lookup",
     arguments: '{"id":1}',
   });
-  const result = normalizer.dynamicToolResult(
-    {
-      callId: "continued",
-      name: "weather",
-      arguments: '{"city":"Chicago"}',
-    },
-    "sunny",
-  );
   const laterInternal = normalizer.normalize("item/started", {
     item: { id: "later", type: "webSearch", query: "forecast" },
   });
@@ -1278,19 +1336,13 @@ test("allocates unique call indexes across internal, dynamic, continuation, and 
     itemId: "orphan",
     delta: "working",
   });
-  const indexes = [
-    internal[0],
-    dynamic,
-    result,
-    laterInternal[0],
-    orphan[0],
-  ].map(
+  const indexes = [internal[0], dynamic, laterInternal[0], orphan[0]].map(
     (event) => (event?.delta?.tool_calls as Array<{ index: number }>)[0]?.index,
   );
-  assert.deepEqual(indexes, [0, 1, 2, 3, 4]);
+  assert.deepEqual(indexes, [0, 1, 2, 3]);
   assert.deepEqual(orphan[0]?.delta?.tool_calls, [
     {
-      index: 4,
+      index: 3,
       id: "orphan",
       type: "function",
       function: { name: "mcpToolCall_progress", arguments: "{}" },

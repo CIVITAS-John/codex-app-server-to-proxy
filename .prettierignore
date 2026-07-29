@@ -1,6 +1,7 @@
 dist
 node_modules
 AGENTS.md
+CLAUDE.md
 docs
 plans
 protocol/CONTRACT.md

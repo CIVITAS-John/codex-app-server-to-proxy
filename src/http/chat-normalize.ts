@@ -215,36 +215,20 @@ export class EventNormalizer {
     return boundary ? { ...boundary } : undefined;
   }
 
-  /** Converts one authoritative dynamic call to a function tool call. */
+  /**
+   * Converts one authoritative pending dynamic call to a function tool call.
+   * Notification lifecycle items are observational only: app-server can replay
+   * a resolved client call when a continuation starts, so only its server
+   * request may make this response end with `tool_calls`.
+   */
   dynamicToolCall(call: StoredToolCall): NormalizedEvent {
+    this.#sawClientTool = true;
     const publicCall = this.#allocateToolCall(
       call.callId,
       call.name,
       call.arguments,
     );
     return { delta: { tool_calls: [publicCall] } };
-  }
-
-  /** Emits an accepted dynamic result together with its matching call. */
-  dynamicToolResult(call: StoredToolCall, content: string): NormalizedEvent {
-    const publicCall = this.#allocateToolCall(
-      call.callId,
-      call.name,
-      call.arguments,
-    );
-    return {
-      delta: {
-        tool_calls: [publicCall],
-        tool_results: [
-          {
-            id: call.callId,
-            type: "function",
-            function: publicCall.function,
-            result: { status: "completed", content },
-          },
-        ],
-      },
-    };
   }
 
   /** Converts one app-server notification into zero or more public events. */
@@ -319,16 +303,10 @@ export class EventNormalizer {
     }
     if (method === "item/started" || method === "item/completed") {
       const item = record(params.item);
-      if (method === "item/started" && item?.type === "dynamicToolCall") {
-        this.#sawClientTool = true;
-        const itemId = String(item.id);
-        const publicCall = this.#allocateToolCall(
-          itemId,
-          String(item.tool),
-          JSON.stringify(item.arguments ?? {}),
-        );
-        return [{ delta: { tool_calls: [publicCall] } }];
-      }
+      // Continuation turns replay resolved dynamic calls as lifecycle items.
+      // They are client-executed work, not provider activity, and must never
+      // mint an observational call/result pair or affect the finish reason.
+      if (item?.type === "dynamicToolCall") return [];
       if (!item || item.type === "agentMessage" || item.type === "userMessage")
         return [];
       if (item.type === "reasoning")

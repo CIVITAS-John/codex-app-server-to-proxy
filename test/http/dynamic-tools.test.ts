@@ -84,6 +84,8 @@ class ToolAppServer {
   readonly rejections: CapturedRejection[] = [];
   /** Whether interrupt acknowledgment is followed by one cancelled late call. */
   sendLateToolCallAfterInterrupt = false;
+  /** Whether a result continuation replays one call before requesting a new one. */
+  replayAndRequestNewToolOnContinuation = false;
   /** Raw Responses items received via thread/inject_items, in wire order. */
   readonly injected: Array<Record<string, unknown>> = [];
   /** The `input` array of every turn/start, in call order. */
@@ -293,6 +295,20 @@ class ToolAppServer {
         } else if (input.length === 0) {
           // A tool-result continuation starts its turn with no user input; the
           // injected function_call_output pairs are the model-visible input.
+          if (this.replayAndRequestNewToolOnContinuation) {
+            this.#emitReplayedDynamicToolLifecycle(turnId);
+            this.#toolRequestIds.add(904);
+            suspendWithTools(this.transport.send, this.#thread, turnId, [
+              {
+                id: 904,
+                callId: "call_new",
+                tool: "first",
+                arguments: { fragment: "new" },
+              },
+            ]);
+            this.#toolTurnId = turnId;
+            return;
+          }
           this.#send(
             protocolNotification({
               method: "item/started",
@@ -323,6 +339,55 @@ class ToolAppServer {
     if (!error) return;
     this.rejections.push({ id, code: error.code });
     this.#toolRequestIds.delete(id);
+  }
+
+  /** Replays the client-owned output app-server reports on a continuation. */
+  #emitReplayedDynamicToolLifecycle(turnId: string): void {
+    const item = {
+      type: "dynamicToolCall" as const,
+      id: "call_b",
+      namespace: null,
+      tool: "second",
+      arguments: { fragment: "b" },
+      success: true,
+    };
+    this.#send(
+      protocolNotification({
+        method: "item/started",
+        params: {
+          threadId: this.#thread,
+          turnId,
+          startedAtMs: 0,
+          item: {
+            ...item,
+            status: "inProgress",
+            contentItems: null,
+            durationMs: null,
+          },
+        },
+      }),
+    );
+    this.#send(
+      protocolNotification({
+        method: "item/completed",
+        params: {
+          threadId: this.#thread,
+          turnId,
+          completedAtMs: 1,
+          item: {
+            ...item,
+            status: "completed",
+            contentItems: [
+              {
+                type: "inputText",
+                text: '{"_oracle":true,"message":"Tool set-research not executed in replay mode."}',
+              },
+            ],
+            durationMs: 1,
+          },
+        },
+      }),
+    );
   }
 
   /** Emits a typed assistant delta and successful turn completion. */
@@ -412,6 +477,7 @@ test("parallel fragmented tool calls interrupt the turn and continue by injectin
       assert.equal(firstResponse.status, 200);
       const first = (await firstResponse.json()) as CompletionBody;
       assert.equal(first.choices[0]!.message.content, "before tools");
+      assert.equal(first.choices[0]!.finish_reason, "tool_calls");
       const calls = first.choices[0]!.message.tool_calls;
       assert.deepEqual(
         calls?.map((call) => call.id),
@@ -447,13 +513,13 @@ test("parallel fragmented tool calls interrupt the turn and continue by injectin
       assert.equal(continuedResponse.status, 200);
       const continued = (await continuedResponse.json()) as CompletionBody;
       assert.equal(continued.choices[0]!.message.content, "after tools");
-      assert.deepEqual(
-        continued.choices[0]!.message.tool_results?.map((result) => result.id),
-        ["call_b", "call_a"],
-      );
+      assert.equal(continued.choices[0]!.finish_reason, "stop");
+      // Client-owned outputs are injected into the Codex thread only. They
+      // must not be re-announced as observational provider tool results.
+      assert.equal(continued.choices[0]!.message.tool_results, undefined);
       assert.deepEqual(
         continued.choices[0]!.message.tool_calls?.map((call) => call.id),
-        ["call_b", "call_a", "internal_after_results"],
+        ["internal_after_results"],
       );
       // The turn was interrupted at the batch, which cancels both its captured
       // requests and the fake's late pre-idle callback app-server side; the
@@ -519,6 +585,74 @@ test("parallel fragmented tool calls interrupt the turn and continue by injectin
       await proxy.close();
     }
   }, "codex-dynamic-tools-");
+});
+
+test("streaming continuations hide replayed client calls but expose new calls", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ToolAppServer();
+    fake.replayAndRequestNewToolOnContinuation = true;
+    const { origin, proxy } = await startProxy(directory, fake);
+    const tools = [
+      { type: "function", function: { name: "first", parameters: {} } },
+      { type: "function", function: { name: "second", parameters: {} } },
+    ];
+    const oracleOutput =
+      '{"_oracle":true,"message":"Tool set-research not executed in replay mode."}';
+    try {
+      const initialResponse = await postChatCompletion(origin, {
+        model: "m",
+        tools,
+        messages: [{ role: "user", content: "use tools" }],
+      });
+      const initial = (await initialResponse.json()) as CompletionBody;
+      const calls = initial.choices[0]!.message.tool_calls;
+
+      const continuedResponse = await postChatCompletion(origin, {
+        model: "m",
+        stream: true,
+        tools,
+        previous_response_id: initial.id,
+        messages: toolTranscript(calls, oracleOutput),
+      });
+      assert.equal(continuedResponse.status, 200);
+      const frames = (await continuedResponse.text())
+        .split("\n\n")
+        .filter(Boolean)
+        .map((frame) => frame.slice("data: ".length));
+      assert.equal(frames.at(-1), "[DONE]");
+      const chunks = frames
+        .slice(0, -1)
+        .map((frame) => JSON.parse(frame) as Record<string, unknown>);
+      const choices = chunks.flatMap(
+        (chunk) =>
+          (chunk.choices as
+            | Array<{
+                delta: Record<string, unknown>;
+                finish_reason: string | null;
+              }>
+            | undefined) ?? [],
+      );
+      const toolCalls = choices.flatMap(
+        (choice) =>
+          (choice.delta.tool_calls as Array<{ id: string }> | undefined) ?? [],
+      );
+      assert.deepEqual(
+        toolCalls.map((call) => call.id),
+        ["call_new"],
+      );
+      assert.equal(
+        choices.some((choice) => choice.delta.tool_results !== undefined),
+        false,
+      );
+      assert.equal(choices.at(-1)?.finish_reason, "tool_calls");
+      assert.doesNotMatch(
+        JSON.stringify(chunks),
+        /Tool set-research not executed in replay mode/,
+      );
+    } finally {
+      await proxy.close();
+    }
+  }, "codex-dynamic-tools-replay-sse-");
 });
 
 test("verbatim mixed internal and dynamic calls resolve only the pending batch", async () => {
