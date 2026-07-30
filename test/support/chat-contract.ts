@@ -332,7 +332,7 @@ export function registerChatContract(
             function: {
               name: "contract_lookup",
               description:
-                "Looks up one fixed live-contract value. Independent lookups can run in parallel.",
+                "Looks up one fixed live-contract value. Include this direct function in the same response as any requested independent lookup.",
               parameters: {
                 type: "object",
                 properties: { key: { type: "string" } },
@@ -346,7 +346,7 @@ export function registerChatContract(
             function: {
               name: "contract_lookup_secondary",
               description:
-                "Performs the independent spruce lookup. Call it alongside the primary cedar lookup.",
+                "Performs the independent spruce lookup. Include this direct function in the same response as the primary cedar lookup.",
               parameters: {
                 type: "object",
                 properties: { key: { type: "string", enum: ["spruce"] } },
@@ -360,7 +360,7 @@ export function registerChatContract(
           {
             role: "user",
             content:
-              "In the same turn, call contract_lookup with key cedar and call contract_lookup_secondary with key spruce. These are two distinct independent tools, so issue both calls in parallel before waiting for either result. After receiving every result, follow its instruction. Do not answer until the final result tells you to.",
+              "This is a tool-concurrency conformance check. In your next response, issue exactly two direct function calls: contract_lookup with key cedar and contract_lookup_secondary with key spruce. Put both independent calls in the same response without using exec, wait, or waiting for either result. After receiving every result, follow its instruction. Do not answer until the final result tells you to.",
           },
         ];
         const firstStarted = Date.now();
@@ -386,11 +386,13 @@ export function registerChatContract(
           assert.match(callBody.id ?? "", /^chatcmpl_codex_/);
           assert.equal(callBody.choices?.[0]?.finish_reason, "tool_calls");
           assert.equal(assistant?.role, "assistant");
+          const observedCallNames =
+            calls.map((call) => call.function.name).join(", ") || "none";
           assert.equal(
             calls.length,
             expectedKeys.length,
             roundIndex === 0
-              ? "regular Responses framing did not issue both independent tool calls in parallel"
+              ? `regular Responses framing did not issue both independent tool calls in parallel; observed: ${observedCallNames}`
               : `dynamic-tool batch ${roundIndex + 1} had an unexpected size`,
           );
           const actualCalls = calls.map((call, callIndex) => {

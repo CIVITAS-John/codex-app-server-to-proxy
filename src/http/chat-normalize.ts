@@ -109,8 +109,8 @@ const NOTIFICATION_BEHAVIORS = new Map<string, NotificationBehavior>([
   ["item/reasoning/textDelta", "normalize"],
   ["item/started", "normalize"],
   ["item/completed", "normalize"],
-  // Raw items are expected after opting into raw completion boundaries, but
-  // their provider-native payload is neither normalized nor exposed.
+  // Direct declared function calls are consumed by the execution coordinator;
+  // every other provider-native raw item remains unexposed.
   ["rawResponseItem/completed", "ignore"],
   // The event closes one upstream Responses completion and therefore one
   // dynamic-tool callback batch. Its per-request usage remains unexposed.

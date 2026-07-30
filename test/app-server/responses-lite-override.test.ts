@@ -21,8 +21,21 @@ test("Responses Lite override clones every model and preserves other config", as
       {
         fetched_at: "fixture",
         models: [
-          { slug: "gpt-5.6-sol", use_responses_lite: true, priority: 1 },
-          { slug: "gpt-5.4", priority: 2 },
+          {
+            slug: "gpt-5.6-sol",
+            use_responses_lite: true,
+            supports_parallel_tool_calls: true,
+            tool_mode: "code_mode",
+            priority: 1,
+          },
+          {
+            slug: "gpt-5.6-serial",
+            use_responses_lite: true,
+            supports_parallel_tool_calls: false,
+            tool_mode: "code_mode_only",
+            priority: 2,
+          },
+          { slug: "gpt-5.4", priority: 3 },
         ],
       },
       null,
@@ -46,7 +59,7 @@ test("Responses Lite override clones every model and preserves other config", as
     assert.deepEqual(first, {
       status: "applied",
       changed: true,
-      modelCount: 2,
+      modelCount: 3,
     });
     assert.equal(await readFile(cachePath, "utf8"), source);
 
@@ -59,10 +72,24 @@ test("Responses Lite override clones every model and preserves other config", as
       (override.models as Array<Record<string, unknown>>).map((model) => ({
         slug: model.slug,
         use_responses_lite: model.use_responses_lite,
+        tool_mode: model.tool_mode,
       })),
       [
-        { slug: "gpt-5.6-sol", use_responses_lite: false },
-        { slug: "gpt-5.4", use_responses_lite: false },
+        {
+          slug: "gpt-5.6-sol",
+          use_responses_lite: false,
+          tool_mode: undefined,
+        },
+        {
+          slug: "gpt-5.6-serial",
+          use_responses_lite: false,
+          tool_mode: "code_mode_only",
+        },
+        {
+          slug: "gpt-5.4",
+          use_responses_lite: false,
+          tool_mode: undefined,
+        },
       ],
     );
 
@@ -83,7 +110,7 @@ test("Responses Lite override clones every model and preserves other config", as
     assert.deepEqual(second, {
       status: "applied",
       changed: false,
-      modelCount: 2,
+      modelCount: 3,
     });
     if (process.platform !== "win32") {
       assert.equal((await stat(overridePath)).mode & 0o777, 0o600);

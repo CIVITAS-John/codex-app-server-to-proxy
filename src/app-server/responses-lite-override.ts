@@ -99,7 +99,12 @@ function disableResponsesLite(source: string): {
       throw new Error(
         `Codex models_cache.json model ${index} is not an object.`,
       );
+    const usedResponsesLite = model.use_responses_lite === true;
     model.use_responses_lite = false;
+    // Code-only routing turns dynamic functions into nested exec callbacks.
+    // Clear it only where the catalog advertises native parallel-tool support.
+    if (usedResponsesLite && model.supports_parallel_tool_calls === true)
+      delete model.tool_mode;
   }
 
   return {
@@ -127,8 +132,8 @@ function renderConfig(existing: string, catalogPath: string): string {
 }
 
 /**
- * Installs a separate model catalog that disables Responses Lite for all
- * cached models without mutating Codex's refreshable models_cache.json.
+ * Installs a separate catalog that disables Responses Lite and restores direct
+ * tools where native parallel calls are advertised, without mutating the cache.
  */
 export async function installResponsesLiteOverride(
   codexHome: string,

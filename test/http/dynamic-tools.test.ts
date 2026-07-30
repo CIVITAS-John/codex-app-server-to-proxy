@@ -90,6 +90,10 @@ class ToolAppServer {
   replayAndRequestNewToolOnContinuation = false;
   /** Delay between callbacks from one parallel model response. */
   parallelToolGapMs = 0;
+  /** Whether raw calls precede only the first serialized client callback. */
+  serializeParallelCallbacksFromRawBatch = false;
+  /** Whether a result turn replays raw history before one newly issued call. */
+  replayRawHistoryWithNewCallAfterResults = false;
   /** Raw Responses items received via thread/inject_items, in wire order. */
   readonly injected: Array<Record<string, unknown>> = [];
   /** The `input` array of every turn/start, in call order. */
@@ -324,7 +328,34 @@ class ToolAppServer {
             priorRequests: this.#priorRequests,
           };
           this.#toolTurnId = turnId;
-          if (this.parallelToolGapMs > 0) {
+          if (this.serializeParallelCallbacksFromRawBatch) {
+            for (const call of parallelCalls)
+              this.#send(
+                protocolNotification({
+                  method: "rawResponseItem/completed",
+                  params: {
+                    threadId: this.#thread,
+                    turnId,
+                    item: {
+                      type: "function_call",
+                      call_id: call.callId,
+                      name: call.tool,
+                      arguments: JSON.stringify(call.arguments),
+                    },
+                  },
+                }),
+              );
+            suspendWithTools(
+              this.transport.send,
+              this.#thread,
+              turnId,
+              [parallelCalls[0]!],
+              {
+                ...usageOptions,
+                completeRawResponse: this.#rawResponseBoundaries,
+              },
+            );
+          } else if (this.parallelToolGapMs > 0) {
             suspendWithTools(
               this.transport.send,
               this.#thread,
@@ -362,6 +393,59 @@ class ToolAppServer {
         } else if (input.length === 0) {
           // A tool-result continuation starts its turn with no user input; the
           // injected function_call_output pairs are the model-visible input.
+          if (this.replayRawHistoryWithNewCallAfterResults) {
+            this.replayRawHistoryWithNewCallAfterResults = false;
+            const rawCalls = [
+              {
+                callId: "call_b",
+                tool: "second",
+                arguments: { fragment: "b" },
+              },
+              {
+                callId: "call_a",
+                tool: "first",
+                arguments: { fragment: "a" },
+              },
+              {
+                callId: "call_new",
+                tool: "first",
+                arguments: { fragment: "new" },
+              },
+            ];
+            for (const call of rawCalls)
+              this.#send(
+                protocolNotification({
+                  method: "rawResponseItem/completed",
+                  params: {
+                    threadId: this.#thread,
+                    turnId,
+                    item: {
+                      type: "function_call",
+                      call_id: call.callId,
+                      name: call.tool,
+                      arguments: JSON.stringify(call.arguments),
+                    },
+                  },
+                }),
+              );
+            this.#toolRequestIds.add(904);
+            suspendWithTools(
+              this.transport.send,
+              this.#thread,
+              turnId,
+              [
+                {
+                  id: 904,
+                  callId: "call_new",
+                  tool: "first",
+                  arguments: { fragment: "new" },
+                },
+              ],
+              { completeRawResponse: this.#rawResponseBoundaries },
+            );
+            this.#toolTurnId = turnId;
+            return;
+          }
           if (this.replayAndRequestNewToolOnContinuation) {
             this.#emitReplayedDynamicToolLifecycle(turnId);
             // The next tool-result continuation must finish so transcript
@@ -667,6 +751,65 @@ test("parallel fragmented tool calls interrupt the turn and continue by injectin
       await proxy.close();
     }
   }, "codex-dynamic-tools-");
+});
+
+test("raw direct calls preserve a parallel batch when callbacks are serialized", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ToolAppServer();
+    fake.serializeParallelCallbacksFromRawBatch = true;
+    fake.replayRawHistoryWithNewCallAfterResults = true;
+    const { origin, proxy } = await startProxy(directory, fake);
+    try {
+      const response = await postChatCompletion(origin, {
+        model: "m",
+        tools: [
+          { type: "function", function: { name: "first", parameters: {} } },
+          { type: "function", function: { name: "second", parameters: {} } },
+        ],
+        messages: [{ role: "user", content: "use both tools" }],
+      });
+      assert.equal(response.status, 200);
+      const completion = (await response.json()) as CompletionBody;
+      assert.equal(completion.choices[0]!.finish_reason, "tool_calls");
+      assert.deepEqual(
+        completion.choices[0]!.message.tool_calls?.map((call) => [
+          call.id,
+          call.function.name,
+          call.function.arguments,
+        ]),
+        [
+          ["call_b", "second", '{"fragment":"b"}'],
+          ["call_a", "first", '{"fragment":"a"}'],
+        ],
+      );
+      assert.equal(
+        fake.methods.filter((method) => method === "turn/interrupt").length,
+        1,
+      );
+
+      const continuedResponse = await postChatCompletion(origin, {
+        model: "m",
+        tools: [
+          { type: "function", function: { name: "first", parameters: {} } },
+          { type: "function", function: { name: "second", parameters: {} } },
+        ],
+        previous_response_id: completion.id,
+        messages: toolTranscript(completion.choices[0]!.message.tool_calls),
+      });
+      assert.equal(continuedResponse.status, 200);
+      const continued = (await continuedResponse.json()) as CompletionBody;
+      assert.deepEqual(
+        continued.choices[0]!.message.tool_calls?.map((call) => [
+          call.id,
+          call.function.name,
+          call.function.arguments,
+        ]),
+        [["call_new", "first", '{"fragment":"new"}']],
+      );
+    } finally {
+      await proxy.close();
+    }
+  }, "codex-tool-raw-parallel-test-");
 });
 
 test("streaming continuations hide replayed client calls but expose new calls", async () => {

@@ -1,6 +1,15 @@
 import { randomBytes } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import {
   startAppServer,
@@ -17,6 +26,7 @@ import {
 } from "../../src/core/policy.js";
 import {
   CONTRACT_TOOL_BATCHES,
+  CONTRACT_MODEL,
   OBSERVATION_COMMAND,
   OBSERVATION_FIXTURE,
   type ChatContractBackend,
@@ -75,6 +85,7 @@ async function startLiveChatBackendOnce(
 ): Promise<ChatContractBackend> {
   let appServer: AppServer | undefined;
   try {
+    await seedLiveModelCache(environment.codexHome);
     for (let attempt = 0; attempt < 2; attempt += 1) {
       appServer = await startAppServer({
         codexPath: process.env.CODEX_PATH ?? "codex",
@@ -159,6 +170,32 @@ async function startLiveChatBackendOnce(
       `Live Codex backend failed to start or authenticate: ${error instanceof Error ? error.message : String(error)}`,
       { cause: error },
     );
+  }
+}
+
+/** Seeds isolated live runs from existing metadata without changing its owner. */
+async function seedLiveModelCache(codexHome: string): Promise<void> {
+  const sourceHomes = [
+    process.env.CODEX_HOME,
+    join(homedir(), ".codex-openai-proxy", "codex-home"),
+    join(homedir(), ".codex"),
+  ].filter((candidate): candidate is string => candidate !== undefined);
+  await mkdir(codexHome, { recursive: true, mode: 0o700 });
+  for (const sourceHome of new Set(sourceHomes)) {
+    try {
+      const source = JSON.parse(
+        await readFile(join(sourceHome, "models_cache.json"), "utf8"),
+      ) as { models?: Array<{ slug?: unknown }> };
+      if (!source.models?.some((model) => model.slug === CONTRACT_MODEL))
+        continue;
+      const target = join(codexHome, "models_cache.json");
+      await copyFile(join(sourceHome, "models_cache.json"), target);
+      await chmod(target, 0o600);
+      return;
+    } catch (error) {
+      if (error instanceof SyntaxError) continue;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
   }
 }
 

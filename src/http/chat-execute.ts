@@ -49,7 +49,12 @@ const RAW_RESPONSE_THREADS = new WeakMap<JsonRpcTransport, Set<string>>();
 /** One arrival-ordered app-server notification or dynamic tool request. */
 type IngressEvent =
   | { type: "notification"; method: string; params: unknown }
-  | { type: "dynamic_tool"; call: PendingToolCall };
+  | { type: "dynamic_tool"; call: PendingToolCall }
+  | {
+      type: "raw_dynamic_tool";
+      call: StoredToolCall;
+      params: unknown;
+    };
 
 /** One queued ingress event with the retained byte size computed at enqueue. */
 interface QueuedIngress {
@@ -298,11 +303,39 @@ export async function execute(
   responseId: string,
 ): Promise<ExecutionSession> {
   const queue = new IngressQueue((call) => rejectDynamicCall(options, call));
+  const dynamicToolNames = new Set(
+    request.dynamicTools
+      .map((tool) => tool.name)
+      .filter((name): name is string => typeof name === "string"),
+  );
+  const historicalToolCallIds = new Set(
+    request.messages.flatMap((message) => [
+      ...(message.toolCalls ?? []).map((call) => call.id),
+      ...(message.internalToolCallIds ?? []),
+    ]),
+  );
   const handle: TurnHandle = {
     rawResponseBoundaries: false,
     terminal: false,
   };
   const onNotification = (method: string, params: unknown): void => {
+    if (method === "rawResponseItem/completed") {
+      if (
+        isEstablishedUnrelatedNotification(
+          params,
+          handle.threadId,
+          handle.turnId,
+        )
+      )
+        return;
+      const call = rawDynamicToolCall(
+        params,
+        dynamicToolNames,
+        historicalToolCallIds,
+      );
+      if (call) queue.enqueue({ type: "raw_dynamic_tool", call, params });
+      return;
+    }
     const behavior = notificationBehavior(method);
     if (behavior === "diagnose") {
       diagnoseUnexposedNotification(method, params, options.rpc, options.log);
@@ -436,7 +469,18 @@ export async function execute(
             );
           if (queue.empty) await queue.wait(options.signal);
           queue.assertHealthy();
-          if (queue.peek()?.type === "dynamic_tool") {
+          const head = queue.peek();
+          if (
+            head?.type === "raw_dynamic_tool" &&
+            !matchesTurn(head.params, handle.threadId, handle.turnId)
+          ) {
+            queue.shift();
+            continue;
+          }
+          if (
+            head?.type === "dynamic_tool" ||
+            head?.type === "raw_dynamic_tool"
+          ) {
             if (!handle.rawResponseBoundaries)
               throw new HttpError(
                 502,
@@ -509,7 +553,8 @@ export async function execute(
           }
           const next = queue.shift();
           if (!next) continue;
-          if (next.type === "dynamic_tool") continue;
+          if (next.type === "dynamic_tool" || next.type === "raw_dynamic_tool")
+            continue;
           if (!matchesTurn(next.params, handle.threadId, handle.turnId))
             continue;
           for (const event of normalizer.normalize(next.method, next.params)) {
@@ -649,6 +694,29 @@ function toStoredToolCall(call: PendingToolCall): StoredToolCall {
   };
 }
 
+/** Extracts one declared direct function call from an opted-in raw item. */
+function rawDynamicToolCall(
+  value: unknown,
+  dynamicToolNames: ReadonlySet<string>,
+  historicalToolCallIds: ReadonlySet<string>,
+): StoredToolCall | undefined {
+  const item = record(record(value)?.item);
+  if (
+    item?.type !== "function_call" ||
+    typeof item.call_id !== "string" ||
+    typeof item.name !== "string" ||
+    typeof item.arguments !== "string" ||
+    !dynamicToolNames.has(item.name) ||
+    historicalToolCallIds.has(item.call_id)
+  )
+    return undefined;
+  return {
+    callId: item.call_id,
+    name: item.name,
+    arguments: item.arguments,
+  };
+}
+
 /** Captures and durably records the current dynamic-tool batch synchronously. */
 function captureToolBatch(
   queue: IngressQueue,
@@ -668,6 +736,13 @@ function captureToolBatch(
         event.type === "dynamic_tool",
     )
     .map((event) => event.call);
+  const rawCalls = captured
+    .filter(
+      (event): event is Extract<IngressEvent, { type: "raw_dynamic_tool" }> =>
+        event.type === "raw_dynamic_tool" &&
+        matchesTurn(event.params, handle.threadId, handle.turnId),
+    )
+    .map((event) => event.call);
   if (
     calls.some(
       (call) =>
@@ -681,8 +756,18 @@ function captureToolBatch(
       });
     throw new Error("Dynamic tool request did not match the active turn.");
   }
-  const stored = calls.map(toStoredToolCall);
-  if (new Set(stored.map((call) => call.callId)).size !== stored.length) {
+  const callbackCalls = calls.map(toStoredToolCall);
+  const invalidRawIds =
+    new Set(rawCalls.map((call) => call.callId)).size !== rawCalls.length;
+  const invalidCallbackIds =
+    new Set(callbackCalls.map((call) => call.callId)).size !==
+    callbackCalls.length;
+  const rawById = new Map(rawCalls.map((call) => [call.callId, call]));
+  const conflictingCallback = callbackCalls.some((call) => {
+    const raw = rawById.get(call.callId);
+    return raw !== undefined && raw.name !== call.name;
+  });
+  if (invalidRawIds || invalidCallbackIds || conflictingCallback) {
     for (const call of calls)
       try {
         options.rpc.respondError(call.request.id, {
@@ -698,6 +783,19 @@ function captureToolBatch(
       "server_error",
       "invalid_dynamic_tool_batch",
     );
+  }
+  const stored: StoredToolCall[] = [];
+  const seen = new Set<string>();
+  for (const event of captured) {
+    const call =
+      event.type === "raw_dynamic_tool"
+        ? event.call
+        : event.type === "dynamic_tool"
+          ? toStoredToolCall(event.call)
+          : undefined;
+    if (!call || seen.has(call.callId)) continue;
+    seen.add(call.callId);
+    stored.push(call);
   }
   try {
     options.continuations.recordPendingTool(
@@ -720,13 +818,25 @@ function* emitCapturedBatch(
   normalizer: EventNormalizer,
   handle: TurnHandle,
 ): Generator<NormalizedEvent> {
+  const emittedCalls = new Set<string>();
   for (const event of captured) {
     if (event.type === "notification") {
       if (!matchesTurn(event.params, handle.threadId, handle.turnId)) continue;
       yield* normalizer.normalize(event.method, event.params);
       continue;
     }
-    yield normalizer.dynamicToolCall(toStoredToolCall(event.call));
+    if (
+      event.type === "raw_dynamic_tool" &&
+      !matchesTurn(event.params, handle.threadId, handle.turnId)
+    )
+      continue;
+    const call =
+      event.type === "raw_dynamic_tool"
+        ? event.call
+        : toStoredToolCall(event.call);
+    if (emittedCalls.has(call.callId)) continue;
+    emittedCalls.add(call.callId);
+    yield normalizer.dynamicToolCall(call);
   }
 }
 
