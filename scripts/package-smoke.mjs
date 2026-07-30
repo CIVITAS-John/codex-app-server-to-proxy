@@ -211,6 +211,7 @@ const cwd = process.cwd();
 const thread = {
   id: "thr_package_smoke", extra: null, sessionId: "session_package_smoke",
   forkedFromId: null, parentThreadId: null, preview: "", ephemeral: false,
+  isPinned: false,
   historyMode: "paginated", modelProvider: "openai", createdAt: 0, updatedAt: 0,
   recencyAt: null, status: { type: "idle" }, path: null, cwd, cliVersion: "${codexVersion}",
   source: "unknown", threadSource: null, agentNickname: null, agentRole: null,
@@ -435,6 +436,7 @@ async function main() {
 
     reportPhase("starting shim and exercising loopback request");
     const stateDirectory = join(installRoot, "state");
+    const codexHome = join(installRoot, "codex-home");
     const server = spawnShim(
       shim,
       [
@@ -447,6 +449,8 @@ async function main() {
         installRoot,
         "--state-dir",
         stateDirectory,
+        "--codex-home",
+        codexHome,
         "--shutdown-timeout",
         "2s",
       ],

@@ -754,6 +754,8 @@ test("normalizes interleaved text, reasoning, internal items, tools, usage, and 
       item: {
         type: "commandExecution",
         id: "command",
+        pluginId: null,
+        scriptPath: null,
         command: "pwd",
         cwd: "/tmp",
         processId: null,
@@ -821,6 +823,8 @@ test("normalizes interleaved text, reasoning, internal items, tools, usage, and 
       item: {
         type: "commandExecution",
         id: "command",
+        pluginId: null,
+        scriptPath: null,
         command: "pwd",
         cwd: "/tmp",
         processId: null,

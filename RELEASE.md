@@ -6,7 +6,7 @@ Record the command or workflow URL, UTC date, commit SHA, version, and result be
 
 - [ ] Confirm the candidate version and intended dist-tag. The first candidate is `0.1.0-rc.0` on `next`; the prerelease workflow rejects stable versions.
 - [ ] Review the diff for credentials, login URLs, prompts, tool arguments/results, absolute personal paths, captured transcripts, and local state.
-- [ ] Refresh the generated app-server contract only if the exact `@openai/codex` pin changed: update the pin, run `npm ci` and `npm run generate:protocol`, review the complete generated diff, and commit `protocol/VERSION.json` with both generated trees. Otherwise run `npm run check:protocol` and record that the `0.144.5` snapshot is clean.
+- [ ] Refresh the generated app-server contract only if the exact `@openai/codex` pin changed: update the pin, run `npm ci` and `npm run generate:protocol`, review the complete generated diff, and commit `protocol/VERSION.json` with both generated trees. Otherwise run `npm run check:protocol` and record that the `0.146.0` snapshot is clean.
 - [ ] Update [CHANGELOG.md](CHANGELOG.md). Keep the candidate marked pending until registry verification succeeds.
 - [ ] Run the deterministic offline gate from a clean install:
 

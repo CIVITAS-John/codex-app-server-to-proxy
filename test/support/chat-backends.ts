@@ -624,6 +624,8 @@ function createScriptedTransport(
           const baseItem = {
             type: "commandExecution" as const,
             id: itemId,
+            pluginId: null,
+            scriptPath: null,
             command,
             cwd: root,
             processId: null,

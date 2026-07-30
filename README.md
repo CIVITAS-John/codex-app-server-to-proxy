@@ -43,7 +43,7 @@ Notes:
 
 ### Temporary Responses Lite override
 
-For the pinned Codex `0.145.0` runtime, proxy startup installs a temporary [model catalog override](https://developers.openai.com/codex/config-reference/#configtoml) in the selected Codex home. It copies `models_cache.json` to `models.no-responses-lite.json`, sets `use_responses_lite` to `false` on every model entry, and removes `tool_mode` from entries that originally used Responses Lite while advertising native parallel-tool support. This makes declared client functions direct Responses tools instead of serialized nested code-mode callbacks. The proxy adds a marked top-level `model_catalog_json` block to `config.toml` and never edits the refreshable cache directly.
+For the pinned Codex `0.146.0` runtime, proxy startup installs a temporary [model catalog override](https://developers.openai.com/codex/config-reference/#configtoml) in the selected Codex home. It copies `models_cache.json` to `models.no-responses-lite.json`, sets `use_responses_lite` to `false` on every model entry, and removes `tool_mode` from entries that originally used Responses Lite while advertising native parallel-tool support. This makes declared client functions direct Responses tools instead of serialized nested code-mode callbacks. The proxy adds a marked top-level `model_catalog_json` block to `config.toml` and never edits the refreshable cache directly.
 
 If a new Codex home creates its first model cache during initialization, that bootstrap app-server remains private; the proxy installs the override and restarts app-server once before reporting ready. The generated catalog intentionally freezes the cached model metadata while this workaround is active, changes the affected models from code-mode-only to direct tool routing, and replaces any prior top-level `model_catalog_json` value in the selected Codex home. The opt-in live contract requires one model turn to issue two independent client tool calls in the same batch, directly checking the behavior this compatibility patch is intended to restore. Remove the patch when the pinned runtime can expose and batch those calls without it.
 
@@ -219,7 +219,7 @@ The request deadline aborts downstream work and closes any response that is stil
 | `/ready` returns 503             | Login or startup hasn't finished — follow [Authentication](#authentication) and check the stderr logs for `app_server_ready` or `startup_failed` |
 | Browser login never appears      | Non-terminal stderr selects device-code login; run `serve` in a foreground terminal without redirecting stderr                                   |
 | Address already in use           | Choose another loopback `--port`                                                                                                                 |
-| `--codex-path` override rejected | The override must report exactly `codex-cli 0.145.0` (the version bundled with this package); remove the flag to use the bundled executable      |
+| `--codex-path` override rejected | The override must report exactly `codex-cli 0.146.0` (the version bundled with this package); remove the flag to use the bundled executable      |
 | Policy request denied            | Managed requirements disallow the value; the proxy never silently weakens policy                                                                 |
 
 For deeper diagnosis, temporarily add `--log-level debug` — but treat its output as sensitive.

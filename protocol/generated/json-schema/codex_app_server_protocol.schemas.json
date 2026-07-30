@@ -3138,6 +3138,30 @@
           "type": "object",
           "required": [
             "id",
+            "method",
+            "params"
+          ],
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "type": "string",
+              "enum": [
+                "externalAgentConfig/import/recordHistory"
+              ],
+              "title": "ExternalAgentConfig/import/recordHistoryRequestMethod"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ExternalAgentConfigImportHistoryRecordParams"
+            }
+          },
+          "title": "ExternalAgentConfig/import/recordHistoryRequest"
+        },
+        {
+          "type": "object",
+          "required": [
+            "id",
             "method"
           ],
           "properties": {
@@ -8887,6 +8911,13 @@
               }
             ]
           },
+          "isPinned": {
+            "description": "Patch whether this thread is pinned. Omit to leave the stored value unchanged.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "threadId": {
             "type": "string"
           }
@@ -9442,6 +9473,13 @@
               }
             ]
           },
+          "isPinned": {
+            "description": "Optional pinned filter; when set, only threads matching this value are returned.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "limit": {
             "description": "Optional page size; defaults to a reasonable server-side value.",
             "type": [
@@ -9900,6 +9938,10 @@
             "items": {
               "$ref": "#/definitions/v2/AbsolutePathBuf"
             }
+          },
+          "forceRefetch": {
+            "description": "Whether the client requests a fresh remote plugin catalog fetch.",
+            "type": "boolean"
           },
           "marketplaceKinds": {
             "description": "Optional marketplace kind filter. When omitted, only local marketplaces are queried, plus the default remote catalog when enabled by feature flag.",
@@ -11121,6 +11163,19 @@
               "boolean",
               "null"
             ]
+          },
+          "codexResponseHandoffChannelPrefixes": {
+            "description": "Overrides BEM channel prefixes by `analysis`, `commentary`, or `final`. Omitted channels retain their default uppercase bracketed prefixes.",
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
           },
           "codexResponseHandoffMode": {
             "description": "Selects how automatic Codex responses are routed in Frameless Bidi sessions. Omitted values default to `thinking`. Realtime V1 and V2 ignore this setting.",
@@ -12602,6 +12657,24 @@
             "description": "If true, include detection under the user's home directory.",
             "type": "boolean"
           },
+          "maxSessionAgeDays": {
+            "description": "Maximum age in days for detected sessions. Missing values use the default limit.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0
+          },
+          "maxSessions": {
+            "description": "Maximum number of sessions to detect. Missing values use the default limit.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint32",
+            "minimum": 0
+          },
           "migrationSource": {
             "description": "Optional migration-source selector. Missing or unrecognized values use the default source.",
             "type": [
@@ -12840,12 +12913,138 @@
               "null"
             ]
           },
+          "providerId": {
+            "description": "Opaque provider identifier supplied by the caller for analytics attribution and import history display. This does not select the migration source.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "source": {
             "description": "Optional identifier for the product that initiated the import.",
             "type": [
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "ExternalAgentConfigImportItemTypeFailure": {
+        "type": "object",
+        "required": [
+          "failureStage",
+          "itemType",
+          "message"
+        ],
+        "properties": {
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "errorType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "failureStage": {
+            "type": "string"
+          },
+          "itemType": {
+            "$ref": "#/definitions/v2/ExternalAgentConfigMigrationItemType"
+          },
+          "message": {
+            "type": "string"
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subErrorType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ExternalAgentConfigImportItemTypeSuccess": {
+        "type": "object",
+        "required": [
+          "itemType"
+        ],
+        "properties": {
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "itemType": {
+            "$ref": "#/definitions/v2/ExternalAgentConfigMigrationItemType"
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ExternalAgentConfigImportTypeResult": {
+        "type": "object",
+        "required": [
+          "failures",
+          "itemType",
+          "successes"
+        ],
+        "properties": {
+          "failures": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/v2/ExternalAgentConfigImportItemTypeFailure"
+            }
+          },
+          "itemType": {
+            "$ref": "#/definitions/v2/ExternalAgentConfigMigrationItemType"
+          },
+          "successes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/v2/ExternalAgentConfigImportItemTypeSuccess"
+            }
+          }
+        }
+      },
+      "ExternalAgentConfigImportHistoryRecordParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "ExternalAgentConfigImportHistoryRecordParams",
+        "type": "object",
+        "required": [
+          "itemTypeResults",
+          "providerId"
+        ],
+        "properties": {
+          "itemTypeResults": {
+            "description": "Completed results grouped by imported item type.",
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/v2/ExternalAgentConfigImportTypeResult"
+            }
+          },
+          "providerId": {
+            "description": "Opaque provider identifier for the externally completed import.",
+            "type": "string"
           }
         }
       },
@@ -12933,7 +13132,7 @@
             ]
           },
           "reloadUserConfig": {
-            "description": "When true, hot-reload the updated user config into all loaded threads after writing.",
+            "description": "When true, hot-reload updated runtime settings into loaded threads after writing. Session-static model, reasoning-effort, Plan-mode reasoning-effort, service-tier, and personality defaults are not reloaded.",
             "type": "boolean"
           }
         }
@@ -13829,6 +14028,11 @@
             "description": "Identifier for this thread. Codex-generated thread IDs are UUIDv7.",
             "type": "string"
           },
+          "isPinned": {
+            "description": "Whether the thread has been pinned by the user.",
+            "default": false,
+            "type": "boolean"
+          },
           "modelProvider": {
             "description": "Model provider used for this thread (for example, 'openai').",
             "type": "string"
@@ -14148,8 +14352,24 @@
               "id": {
                 "type": "string"
               },
+              "pluginId": {
+                "description": "Trusted first-party plugin id when this command resolves to one plugin script.",
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "processId": {
                 "description": "Identifier for the underlying PTY process (when available).",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scriptPath": {
+                "description": "Safe plugin-relative path when this command resolves to one plugin script.",
+                "default": null,
                 "type": [
                   "string",
                   "null"
@@ -15972,6 +16192,13 @@
               }
             ]
           },
+          "iconLargeUrl": {
+            "description": "Remote large icon URL from the plugin catalog.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "iconSmall": {
             "anyOf": [
               {
@@ -15980,6 +16207,13 @@
               {
                 "type": "null"
               }
+            ]
+          },
+          "iconSmallUrl": {
+            "description": "Remote small icon URL from the plugin catalog.",
+            "type": [
+              "string",
+              "null"
             ]
           },
           "shortDescription": {
@@ -16684,6 +16918,13 @@
           "remotePluginId"
         ],
         "properties": {
+          "canPublishToWorkspace": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "creatorAccountUserId": {
             "type": [
               "string",
@@ -17459,6 +17700,13 @@
           "shareUrl"
         ],
         "properties": {
+          "canPublishToWorkspace": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "remotePluginId": {
             "type": "string"
           },
@@ -17578,6 +17826,20 @@
         "properties": {
           "description": {
             "type": "string"
+          },
+          "disabledReason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "isEnabled": {
+            "default": true,
+            "type": "boolean"
+          },
+          "isReadOnly": {
+            "default": false,
+            "type": "boolean"
           },
           "name": {
             "type": "string"
@@ -17848,12 +18110,6 @@
           "firstPartyRequiresInstall": {
             "type": [
               "boolean",
-              "null"
-            ]
-          },
-          "firstPartyType": {
-            "type": [
-              "string",
               "null"
             ]
           },
@@ -19693,6 +19949,7 @@
           "team",
           "self_serve_business_usage_based",
           "business",
+          "ent26",
           "enterprise_cbp_usage_based",
           "enterprise",
           "edu",
@@ -21079,6 +21336,19 @@
           }
         }
       },
+      "ExternalAgentConfigImportHistoryRecordResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "ExternalAgentConfigImportHistoryRecordResponse",
+        "type": "object",
+        "required": [
+          "importId"
+        ],
+        "properties": {
+          "importId": {
+            "type": "string"
+          }
+        }
+      },
       "ExternalAgentConfigImportHistory": {
         "type": "object",
         "required": [
@@ -21101,83 +21371,17 @@
           "importId": {
             "type": "string"
           },
+          "providerId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "successes": {
             "type": "array",
             "items": {
               "$ref": "#/definitions/v2/ExternalAgentConfigImportItemTypeSuccess"
             }
-          }
-        }
-      },
-      "ExternalAgentConfigImportItemTypeFailure": {
-        "type": "object",
-        "required": [
-          "failureStage",
-          "itemType",
-          "message"
-        ],
-        "properties": {
-          "cwd": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "errorType": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "failureStage": {
-            "type": "string"
-          },
-          "itemType": {
-            "$ref": "#/definitions/v2/ExternalAgentConfigMigrationItemType"
-          },
-          "message": {
-            "type": "string"
-          },
-          "source": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "subErrorType": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
-      },
-      "ExternalAgentConfigImportItemTypeSuccess": {
-        "type": "object",
-        "required": [
-          "itemType"
-        ],
-        "properties": {
-          "cwd": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "itemType": {
-            "$ref": "#/definitions/v2/ExternalAgentConfigMigrationItemType"
-          },
-          "source": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "target": {
-            "type": [
-              "string",
-              "null"
-            ]
           }
         }
       },
@@ -21291,6 +21495,17 @@
           }
         }
       },
+      "BrowserUseRequirements": {
+        "type": "object",
+        "properties": {
+          "disableAutoReview": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
       "ComputerUseRequirements": {
         "type": "object",
         "properties": {
@@ -21306,6 +21521,12 @@
         "type": "object",
         "properties": {
           "allowAppshots": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "allowLoginShell": {
             "type": [
               "boolean",
               "null"
@@ -21377,6 +21598,22 @@
               "$ref": "#/definitions/v2/WindowsSandboxSetupMode"
             }
           },
+          "browserUse": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/BrowserUseRequirements"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "checkForUpdateOnStartup": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "computerUse": {
             "anyOf": [
               {
@@ -21412,6 +21649,16 @@
               "type": "boolean"
             }
           },
+          "feedback": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/FeedbackRequirements"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "hooks": {
             "anyOf": [
               {
@@ -21420,6 +21667,18 @@
               {
                 "type": "null"
               }
+            ]
+          },
+          "logDir": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "modelCatalogJson": {
+            "type": [
+              "string",
+              "null"
             ]
           },
           "models": {
@@ -21440,6 +21699,18 @@
               {
                 "type": "null"
               }
+            ]
+          },
+          "sqliteHome": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "windowsSandboxPrivateDesktop": {
+            "type": [
+              "boolean",
+              "null"
             ]
           }
         }
@@ -21548,6 +21819,17 @@
           "matcher": {
             "type": [
               "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "FeedbackRequirements": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": [
+              "boolean",
               "null"
             ]
           }
@@ -23938,31 +24220,6 @@
           },
           "status": {
             "$ref": "#/definitions/v2/RemoteControlConnectionStatus"
-          }
-        }
-      },
-      "ExternalAgentConfigImportTypeResult": {
-        "type": "object",
-        "required": [
-          "failures",
-          "itemType",
-          "successes"
-        ],
-        "properties": {
-          "failures": {
-            "type": "array",
-            "items": {
-              "$ref": "#/definitions/v2/ExternalAgentConfigImportItemTypeFailure"
-            }
-          },
-          "itemType": {
-            "$ref": "#/definitions/v2/ExternalAgentConfigMigrationItemType"
-          },
-          "successes": {
-            "type": "array",
-            "items": {
-              "$ref": "#/definitions/v2/ExternalAgentConfigImportItemTypeSuccess"
-            }
           }
         }
       },

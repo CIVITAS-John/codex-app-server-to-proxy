@@ -74,6 +74,17 @@
         }
       ]
     },
+    "BrowserUseRequirements": {
+      "type": "object",
+      "properties": {
+        "disableAutoReview": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
     "ComputerUseRequirements": {
       "type": "object",
       "properties": {
@@ -89,6 +100,12 @@
       "type": "object",
       "properties": {
         "allowAppshots": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allowLoginShell": {
           "type": [
             "boolean",
             "null"
@@ -160,6 +177,22 @@
             "$ref": "#/definitions/WindowsSandboxSetupMode"
           }
         },
+        "browserUse": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/BrowserUseRequirements"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checkForUpdateOnStartup": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "computerUse": {
           "anyOf": [
             {
@@ -195,6 +228,16 @@
             "type": "boolean"
           }
         },
+        "feedback": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FeedbackRequirements"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "hooks": {
           "anyOf": [
             {
@@ -203,6 +246,18 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "logDir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "modelCatalogJson": {
+          "type": [
+            "string",
+            "null"
           ]
         },
         "models": {
@@ -223,6 +278,18 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "sqliteHome": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "windowsSandboxPrivateDesktop": {
+          "type": [
+            "boolean",
+            "null"
           ]
         }
       }
@@ -331,6 +398,17 @@
         "matcher": {
           "type": [
             "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "FeedbackRequirements": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
             "null"
           ]
         }

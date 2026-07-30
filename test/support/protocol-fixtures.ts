@@ -111,6 +111,7 @@ export function protocolThread(
     parentThreadId: null,
     preview: "",
     ephemeral: false,
+    isPinned: false,
     historyMode: "paginated",
     modelProvider: "openai",
     createdAt: 0,

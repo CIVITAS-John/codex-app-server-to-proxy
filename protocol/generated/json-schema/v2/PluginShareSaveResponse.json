@@ -7,6 +7,13 @@
     "shareUrl"
   ],
   "properties": {
+    "canPublishToWorkspace": {
+      "default": null,
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "remotePluginId": {
       "type": "string"
     },

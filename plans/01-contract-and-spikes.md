@@ -80,7 +80,7 @@ Complete contract and schema work offline.
 
 Implemented on 2026-07-12:
 
-- Generated experimental TypeScript and JSON Schema artifacts from the exact package-owned Codex version; commands and executable-source decision are recorded in `protocol/VERSION.json`. The contract was refreshed to `codex-cli 0.145.0` on 2026-07-23.
+- Generated experimental TypeScript and JSON Schema artifacts from the exact package-owned Codex version; commands and executable-source decision are recorded in `protocol/VERSION.json`. The contract was refreshed to `codex-cli 0.146.0` on 2026-07-30.
 - Froze the request, protocol, SSE, error, usage, tool-suspension, response-ID, and continuation contracts in `protocol/CONTRACT.md`.
 - Added schemas for `x_codex` and version 0 durable response mappings.
 - Added synthetic exposed-event and rejected-continuation fixtures.

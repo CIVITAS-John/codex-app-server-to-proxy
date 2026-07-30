@@ -10,11 +10,11 @@ This directory is the source of truth for product decisions, implementation stat
 - Ship only an npm CLI named `codex-openai-proxy`.
 - Bind only to localhost/loopback and require no proxy bearer token.
 - Spawn and supervise `codex app-server` as a child process.
-- Depend on exact `@openai/codex 0.145.0` for default executable resolution and the generated contract. An explicit `--codex-path` override must report that same version; older and newer executables are rejected until their contracts are reviewed.
+- Depend on exact `@openai/codex 0.146.0` for default executable resolution and the generated contract. An explicit `--codex-path` override must report that same version; older and newer executables are rejected until their contracts are reviewed.
 - Run the package-owned app-server in the proxy-owned `~/.codex-openai-proxy/codex-home` by default, shared across roots but isolated from the ordinary Codex CLI home. On every startup, adopt `auth.json` from the pre-existing Codex home only when the target is missing or the source is strictly newer; `--sync-auth if-missing` retains the earlier seed-once behavior and `--sync-auth never` keeps a proxy-only login isolated. Allow `--codex-home` to select another directory.
     - This is a breaking default from `0.1.0-rc.4`'s copy-once behavior. Strict-newer comparison prevents an older main-home refresh token from replacing credentials the proxy refreshed more recently, but sharing a single rotating ChatGPT login remains inherently racy.
     - After default synchronization supplied a credential that fails initial `account/read`, successful fresh recovery may use a best-effort strictly-newer guard and atomic replacement to write back to an existing older main-home `auth.json`. It never creates a target or writes back for `if-missing` or `never`; this preserves proxy-only and seed-once compatibility while allowing recovery to heal a stale shared home.
-    - The current unversioned proxy home is a reviewed `0.145.0` compatibility decision. A future Codex pin must prove its cache files are compatible or adopt an explicit versioned-home or migration decision before release.
+    - The current unversioned proxy home is a reviewed `0.146.0` compatibility decision. The `0.145.0` upgrade keeps proxy-owned persisted filenames and schemas unchanged, preserves unknown model-catalog metadata, and adds no incompatible app-server field used by the proxy. A future Codex pin must repeat that review or adopt an explicit versioned-home or migration decision before release.
 - Use persisted Codex threads behind the additive `previous_response_id` continuation field.
 - Support text, exposed reasoning, tool calls, tool results, and token usage streaming.
 - Support client-defined dynamic tools across multiple HTTP requests. Interrupt the turn at the tool batch and deliver later results by injecting call/output pairs into the persisted thread (decision reversed 2026-07-26; see plans/05).
@@ -52,7 +52,7 @@ This directory is the source of truth for product decisions, implementation stat
 
 ### Implemented locally
 
-Stages 01 through 08 are implemented in the source tree. Stage 08 includes the package metadata, deterministic packed-package smoke, registry-backed smoke workflow, trusted-publishing prerelease workflow, published-user README, changelog, and release runbook. The exact Codex dependency and generated contract remain pinned to `0.145.0`.
+Stages 01 through 08 are implemented in the source tree. Stage 08 includes the package metadata, deterministic packed-package smoke, registry-backed smoke workflow, trusted-publishing prerelease workflow, published-user README, changelog, and release runbook. The exact Codex dependency and generated contract remain pinned to `0.146.0`.
 
 The default TypeScript/Vitest configuration is deterministic and offline; opt-in live-test filenames are excluded. The expanded live contract names four scenarios, normally makes eleven `gpt-5.6-luna` calls on POSIX, and enforces a twelve-call maximum. Its client-defined tool scenario requires an initial two-call parallel batch, then submits three consecutive full-history tool-result requests before restart continuation. On 2026-07-16, `npm run check` passed 19 files and 155 tests with coverage thresholds, the offline `npm run test:package` and local `--registry-install` mode passed, and the final dry pack contained 51 files at 71,939 bytes packed and 295,941 bytes unpacked.
 
