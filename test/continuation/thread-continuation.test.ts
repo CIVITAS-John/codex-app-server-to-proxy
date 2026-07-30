@@ -119,6 +119,17 @@ class ContinuationAppServer {
             },
           }),
         );
+        this.#send(
+          protocolNotification({
+            method: "rawResponse/completed",
+            params: {
+              threadId: this.#threadId,
+              turnId,
+              responseId: `raw_${turnId}`,
+              usage: null,
+            },
+          }),
+        );
         return;
       }
       const complete = (): void => {

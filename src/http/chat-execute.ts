@@ -43,6 +43,9 @@ const MAX_INGRESS_EVENTS = 1_024;
 /** Maximum approximate JSON bytes retained in one response's ingress queue. */
 const MAX_INGRESS_BYTES = 8 * 1024 * 1024;
 
+/** Proxy-created thread subscriptions with raw boundaries on each transport. */
+const RAW_RESPONSE_THREADS = new WeakMap<JsonRpcTransport, Set<string>>();
+
 /** One arrival-ordered app-server notification or dynamic tool request. */
 type IngressEvent =
   | { type: "notification"; method: string; params: unknown }
@@ -223,6 +226,24 @@ class IngressQueue {
     });
   }
 
+  /** Waits for the raw completion that closes one upstream tool-call batch. */
+  async waitForDynamicToolBatch(
+    signal: AbortSignal,
+    threadId: string,
+    turnId: string,
+  ): Promise<boolean> {
+    const hasBoundary = (): boolean =>
+      this.#ingress.some(
+        ({ event }) =>
+          event.type === "notification" &&
+          event.method === "rawResponse/completed" &&
+          matchesTurn(event.params, threadId, turnId),
+      );
+    await this.wait(signal, { ready: hasBoundary });
+    this.assertHealthy();
+    return hasBoundary();
+  }
+
   /** Rejects every retained dynamic request during unsuspended cleanup. */
   rejectQueuedDynamicCalls(): void {
     for (const { event } of this.#ingress)
@@ -252,6 +273,7 @@ export interface ExecutionSession {
 interface TurnHandle {
   threadId?: string;
   turnId?: string;
+  rawResponseBoundaries: boolean;
   terminal: boolean;
   lease?: ThreadLease;
 }
@@ -276,7 +298,10 @@ export async function execute(
   responseId: string,
 ): Promise<ExecutionSession> {
   const queue = new IngressQueue((call) => rejectDynamicCall(options, call));
-  const handle: TurnHandle = { terminal: false };
+  const handle: TurnHandle = {
+    rawResponseBoundaries: false,
+    terminal: false,
+  };
   const onNotification = (method: string, params: unknown): void => {
     const behavior = notificationBehavior(method);
     if (behavior === "diagnose") {
@@ -412,8 +437,25 @@ export async function execute(
           if (queue.empty) await queue.wait(options.signal);
           queue.assertHealthy();
           if (queue.peek()?.type === "dynamic_tool") {
-            // Collect parallel tool calls issued in the same event-loop turn.
-            await new Promise<void>((resolve) => setImmediate(resolve));
+            if (!handle.rawResponseBoundaries)
+              throw new HttpError(
+                502,
+                "The resumed app-server thread cannot expose a dynamic tool batch boundary.",
+                "server_error",
+                "dynamic_tool_batch_boundary_unavailable",
+              );
+            const batchCompleted = await queue.waitForDynamicToolBatch(
+              options.signal,
+              handle.threadId!,
+              handle.turnId!,
+            );
+            if (!batchCompleted)
+              throw new HttpError(
+                408,
+                "The request timed out or was disconnected.",
+                "server_error",
+                "request_timeout",
+              );
             const { captured, stored } = captureToolBatch(
               queue,
               options,
@@ -820,6 +862,9 @@ async function resumeIdleThread(
   // never transfer ownership to, or start work on, an unexpected thread.
   if (resumedThreadId !== handle.threadId)
     continuationFailure(409, "thread_not_resumable");
+  handle.rawResponseBoundaries = rawResponseThreads(options.rpc).has(
+    handle.threadId,
+  );
 }
 
 /** Starts one fresh durable thread and its initial turn. */
@@ -835,6 +880,7 @@ async function startFreshThread(
       {
         model: request.model,
         ephemeral: false,
+        experimentalRawEvents: true,
         ...threadPolicyParams(request.policy),
         ...environmentParams(request.policy),
         ...(request.dynamicTools.length
@@ -846,6 +892,8 @@ async function startFreshThread(
     "thread/start",
   );
   handle.threadId = requiredId(started.thread, "thread/start.thread");
+  rawResponseThreads(options.rpc).add(handle.threadId);
+  handle.rawResponseBoundaries = true;
   acquireThread(handle, options, onToolRequest);
   // Only a trailing user message becomes new turn input. Any other trailing
   // message joins the injected history and the empty-input turn asks the model
@@ -934,6 +982,15 @@ function rejectDynamicCall(
   } catch {
     // A closed transport has already made the request unanswerable.
   }
+}
+
+/** Returns the raw-boundary subscriptions known on one transport generation. */
+function rawResponseThreads(rpc: JsonRpcTransport): Set<string> {
+  const existing = RAW_RESPONSE_THREADS.get(rpc);
+  if (existing) return existing;
+  const created = new Set<string>();
+  RAW_RESPONSE_THREADS.set(rpc, created);
+  return created;
 }
 
 /** Builds native thread settings shared by thread start and resume. */

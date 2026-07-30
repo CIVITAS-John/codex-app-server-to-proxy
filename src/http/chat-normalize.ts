@@ -90,7 +90,7 @@ const MAX_DIAGNOSTIC_METHODS = 32;
 
 /** Explicit handling selected for one pinned app-server notification method. */
 export type NotificationBehavior =
-  "normalize" | "progress" | "lifecycle" | "ignore" | "diagnose";
+  "normalize" | "progress" | "lifecycle" | "boundary" | "ignore" | "diagnose";
 
 /** Classifies pinned notification methods without implicitly exposing them. */
 const NOTIFICATION_BEHAVIORS = new Map<string, NotificationBehavior>([
@@ -109,11 +109,12 @@ const NOTIFICATION_BEHAVIORS = new Map<string, NotificationBehavior>([
   ["item/reasoning/textDelta", "normalize"],
   ["item/started", "normalize"],
   ["item/completed", "normalize"],
-  // Internal-only usage for one upstream model response. It is a per-request
-  // delta rather than a cumulative total, so folding it into the subtraction
-  // model would require inferring whether the same tokens reappear in a later
-  // `thread/tokenUsage/updated.total`. Diagnosed, never exposed.
-  ["rawResponse/completed", "diagnose"],
+  // Raw items are expected after opting into raw completion boundaries, but
+  // their provider-native payload is neither normalized nor exposed.
+  ["rawResponseItem/completed", "ignore"],
+  // The event closes one upstream Responses completion and therefore one
+  // dynamic-tool callback batch. Its per-request usage remains unexposed.
+  ["rawResponse/completed", "boundary"],
   ["serverRequest/resolved", "ignore"],
   ["thread/status/changed", "lifecycle"],
   ["thread/tokenUsage/updated", "normalize"],

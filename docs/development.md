@@ -65,7 +65,7 @@ The recorded floors describe a complete offline run, so they are enforced only w
 
 ## Live contract tests
 
-The live suite exercises streaming role history, three consecutive full-history function-tool result continuations, completed-thread continuation after restarting the proxy and app-server, explicit read-only/disabled-web policy, default disabled-sandbox chat without execution tools, bounded built-in tool observation, and continuation after that tool information. It runs serially, caps captured diagnostics, uses only `gpt-5.6-luna`, normally makes eleven model calls, and attempts at most twelve:
+The live suite exercises streaming role history, a required two-call parallel client-tool batch followed by three consecutive full-history function-tool result continuations, completed-thread continuation after restarting the proxy and app-server, explicit read-only/disabled-web policy, default disabled-sandbox chat without execution tools, bounded built-in tool observation, and continuation after that tool information. Its app-server uses an ephemeral proxy-style Codex home and must load the temporary regular-Responses catalog before any model call. It runs serially, caps captured diagnostics, uses only `gpt-5.6-luna`, normally makes eleven model calls, and attempts at most twelve:
 
 ```sh
 npm run test:live

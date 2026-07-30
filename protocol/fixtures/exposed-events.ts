@@ -111,6 +111,23 @@ export const exposedEvents = [
     },
   },
   {
+    method: "rawResponseItem/completed",
+    params: {
+      threadId: "thr_fixture",
+      turnId: "turn_fixture",
+      item: { type: "other" },
+    },
+  },
+  {
+    method: "rawResponse/completed",
+    params: {
+      threadId: "thr_fixture",
+      turnId: "turn_fixture",
+      responseId: "resp_fixture",
+      usage: null,
+    },
+  },
+  {
     method: "thread/tokenUsage/updated",
     params: {
       threadId: "thr_fixture",

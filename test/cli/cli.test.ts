@@ -68,6 +68,17 @@ const embeddedProtocolResults = {
       },
     }),
   ),
+  rawResponseCompleted: JSON.stringify(
+    protocolNotification({
+      method: "rawResponse/completed",
+      params: {
+        threadId: "thr_shutdown",
+        turnId: "turn_shutdown",
+        responseId: "raw_turn_shutdown",
+        usage: null,
+      },
+    }),
+  ),
   turnInterrupted: JSON.stringify(
     protocolNotification({
       method: "turn/completed",
@@ -340,6 +351,97 @@ testWithPosixExecutable(
       assert.equal(stderr.includes(repoRootPath), false);
     }, "codex-proxy-test-");
   },
+);
+
+testWithPosixExecutable(
+  "CLI restarts setup once when Codex creates the model cache",
+  async () => {
+    await withTempDir(async (directory) => {
+      const fake = join(directory, "codex");
+      const codexHome = join(directory, "codex-home");
+      const starts = join(directory, "starts.txt");
+      await writeFile(
+        fake,
+        fakeCodexScript({
+          version: PINNED_CODEX_VERSION,
+          setup: `const fs = require("node:fs");
+const path = require("node:path");
+const startsPath = ${JSON.stringify(starts)};
+const startCount = fs.existsSync(startsPath)
+  ? Number(fs.readFileSync(startsPath, "utf8")) + 1
+  : 1;
+fs.writeFileSync(startsPath, String(startCount));
+const cachePath = path.join(process.env.CODEX_HOME, "models_cache.json");
+if (!fs.existsSync(cachePath))
+  fs.writeFileSync(cachePath, JSON.stringify({
+    fetched_at: "fixture",
+    models: [
+      { slug: "gpt-5.6-sol", use_responses_lite: true },
+      { slug: "gpt-5.4", use_responses_lite: false }
+    ]
+  }));`,
+          onLine: (message) => `  if (${message}.method === "account/read") {
+    console.log(JSON.stringify({ id: ${message}.id, result: ${embeddedProtocolResults.authenticatedAccount} }));
+    return;
+  }`,
+        }),
+        "utf8",
+      );
+      await chmod(fake, 0o755);
+      const child = spawn(
+        process.execPath,
+        [
+          "dist/bin.js",
+          "serve",
+          "--port",
+          "0",
+          "--state-dir",
+          join(directory, "state"),
+          "--codex-home",
+          codexHome,
+          "--codex-path",
+          fake,
+        ],
+        { cwd: repoRootPath, stdio: ["ignore", "pipe", "pipe"] },
+      );
+      let stderr = "";
+      child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+        stderr += chunk;
+      });
+      const exit = once(child, "exit");
+      let exited = false;
+      try {
+        await waitForText(() => stderr, "app_server_ready");
+        assert.equal(await readFile(starts, "utf8"), "2");
+        const override = JSON.parse(
+          await readFile(
+            join(codexHome, "models.no-responses-lite.json"),
+            "utf8",
+          ),
+        ) as { models: Array<{ use_responses_lite: boolean }> };
+        assert.deepEqual(
+          override.models.map((model) => model.use_responses_lite),
+          [false, false],
+        );
+        assert.match(
+          await readFile(join(codexHome, "config.toml"), "utf8"),
+          /^model_catalog_json = /mu,
+        );
+
+        child.kill("SIGTERM");
+        const [code, signal] = await exit;
+        exited = true;
+        assert.equal(code, 0, `bootstrap shutdown stderr:\n${stderr}`);
+        assert.equal(signal, null, `bootstrap shutdown stderr:\n${stderr}`);
+      } finally {
+        if (!exited && child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGKILL");
+          await exit;
+        }
+      }
+    }, "codex-proxy-responses-lite-bootstrap-test-");
+  },
+  15_000,
 );
 
 testWithPosixExecutable(
@@ -890,6 +992,7 @@ process.on("SIGTERM", () => setTimeout(() => process.exit(0), 200));`,
   if (${message}.method === "turn/start") {
     console.log(JSON.stringify({ id: ${message}.id, result: ${embeddedProtocolResults.turnStart} }));
     console.log(JSON.stringify(${embeddedProtocolResults.toolCall}));
+    console.log(JSON.stringify(${embeddedProtocolResults.rawResponseCompleted}));
     return;
   }
   if (${message}.method === "turn/interrupt") {

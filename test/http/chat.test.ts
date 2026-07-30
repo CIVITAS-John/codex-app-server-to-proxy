@@ -31,10 +31,12 @@ import { startProxyWithTransport } from "../support/http.js";
 import { silentLogger } from "../support/logger.js";
 import { withTempDir } from "../support/temp.js";
 import {
+  completeRawResponseBatch,
   completeTurn,
   createFakeTransport,
   interruptTurn,
   sendTokenUsage,
+  suspendWithTools,
   tokenUsageFixture,
   type FakeTransport,
   type UsageWireOrder,
@@ -108,20 +110,14 @@ function fakeAppServer({
           }),
         );
         if (requestTool) {
-          send(
-            protocolServerRequest({
+          suspendWithTools(send, thread, "turn_test", [
+            {
               id: 8_001,
-              method: "item/tool/call",
-              params: {
-                threadId: thread,
-                turnId: "turn_test",
-                callId: "call_lookup",
-                tool: "lookup",
-                namespace: null,
-                arguments: { key: "value" },
-              },
-            }),
-          );
+              callId: "call_lookup",
+              tool: "lookup",
+              arguments: { key: "value" },
+            },
+          ]);
           return;
         }
         // A turn that runs internal activity spans several model requests, each
@@ -284,6 +280,7 @@ function failingIngressAppServer(mode: "overflow" | "mismatch" | "suspend"): {
                 },
               }),
             );
+        else completeRawResponseBatch(send, "thr_overflow", turnId);
       } else if (message.method === "turn/interrupt") {
         interrupts += 1;
         send(protocolResponse("turn/interrupt", message.id, {}));
@@ -1225,14 +1222,11 @@ test("hands the next response a boundary even when nothing was attributed", () =
   assert.equal(new EventNormalizer().usageBoundary(), undefined);
 });
 
-test("internal raw-response usage is diagnosed rather than exposed", () => {
+test("raw-response completion is handled as an unexposed boundary", () => {
   // `rawResponse/completed` carries exact per-request usage, but it is an
-  // internal-only per-request delta rather than a cumulative total, so it is
-  // deliberately excluded from the exposed surface instead of normalized.
-  assert.equal(
-    HANDLED_NOTIFICATION_METHODS.has("rawResponse/completed"),
-    false,
-  );
+  // internal-only per-request delta. The executor consumes its ordering while
+  // the normalizer deliberately excludes its payload from the HTTP surface.
+  assert.equal(HANDLED_NOTIFICATION_METHODS.has("rawResponse/completed"), true);
   assert.deepEqual(
     normalizeNotification("rawResponse/completed", {
       threadId: "thread",
@@ -2556,6 +2550,7 @@ test("request policies map exactly, bind continuations, and honor managed denial
       assert.deepEqual(thread?.params, {
         model: "m",
         ephemeral: false,
+        experimentalRawEvents: true,
         cwd,
         sandbox: "workspace-write",
         approvalPolicy: "never",
@@ -2721,6 +2716,7 @@ test("request policies map exactly, bind continuations, and honor managed denial
         {
           model: "m",
           ephemeral: false,
+          experimentalRawEvents: true,
           cwd: root,
           sandbox: "read-only",
           approvalPolicy: "never",

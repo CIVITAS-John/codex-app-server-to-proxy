@@ -88,6 +88,8 @@ class ToolAppServer {
   sendLateToolCallDuringContinuation = false;
   /** Whether a result continuation replays one call before requesting a new one. */
   replayAndRequestNewToolOnContinuation = false;
+  /** Delay between callbacks from one parallel model response. */
+  parallelToolGapMs = 0;
   /** Raw Responses items received via thread/inject_items, in wire order. */
   readonly injected: Array<Record<string, unknown>> = [];
   /** The `input` array of every turn/start, in call order. */
@@ -100,6 +102,7 @@ class ToolAppServer {
   /** Interrupted turn whose delayed callback is emitted on the next turn. */
   #delayedToolTurnId: string | undefined;
   #toolRequestIds = new Set([901, 902]);
+  #rawResponseBoundaries = false;
   // Counts the model requests app-server has already attributed to the thread,
   // so a later turn's cumulative `total` covers every earlier request.
   #priorRequests = 0;
@@ -145,7 +148,11 @@ class ToolAppServer {
     if (typeof message.method === "string") {
       this.methods.push(message.method);
       const id = message.id as number;
-      if (message.method === "thread/start")
+      if (message.method === "thread/start") {
+        const params = message.params as Record<string, unknown>;
+        this.#rawResponseBoundaries = params.experimentalRawEvents === true;
+        if (!this.#rawResponseBoundaries)
+          throw new Error("thread did not opt into raw response events");
         this.#send(
           protocolResponse(
             "thread/start",
@@ -153,7 +160,7 @@ class ToolAppServer {
             protocolThreadStartResponse(protocolThread(this.#thread)),
           ),
         );
-      else if (message.method === "thread/read")
+      } else if (message.method === "thread/read")
         this.#send(
           protocolResponse("thread/read", id, {
             thread: protocolThread(this.#thread),
@@ -206,14 +213,22 @@ class ToolAppServer {
           this.#delayedToolTurnId = turnId;
         if (this.sendLateToolCallAfterInterrupt) {
           this.#toolRequestIds.add(903);
-          suspendWithTools(this.transport.send, this.#thread, turnId, [
+          suspendWithTools(
+            this.transport.send,
+            this.#thread,
+            turnId,
+            [
+              {
+                id: 903,
+                callId: "call_late",
+                tool: "first",
+                arguments: { fragment: "late" },
+              },
+            ],
             {
-              id: 903,
-              callId: "call_late",
-              tool: "first",
-              arguments: { fragment: "late" },
+              completeRawResponse: this.#rawResponseBoundaries,
             },
-          ]);
+          );
         }
         // Live app-server flushes the interrupted turn's usage within
         // milliseconds of the interrupt, before completion and idle.
@@ -250,6 +265,7 @@ class ToolAppServer {
                 arguments: { fragment: "delayed" },
               },
             ],
+            { completeRawResponse: this.#rawResponseBoundaries },
           );
         }
         if (this.toolsOnFirstTurn && this.#turn === 1) {
@@ -288,34 +304,61 @@ class ToolAppServer {
           );
           // Deliberately issue call_b first; the proxy must preserve arrival order.
           const suspendOrder = this.usage.suspendOrder ?? "never";
-          suspendWithTools(
-            this.transport.send,
-            this.#thread,
-            turnId,
-            [
-              {
-                id: 902,
-                callId: "call_b",
-                tool: "second",
-                arguments: { fragment: "b" },
-              },
-              {
-                id: 901,
-                callId: this.failures.duplicateToolCallId ? "call_b" : "call_a",
-                tool: "first",
-                arguments: { fragment: "a" },
-              },
-            ],
+          const parallelCalls = [
             {
-              usageOrder: suspendOrder,
-              reasoningOutputTokens: this.usage.reasoningOutputTokens ?? 0,
-              priorRequests: this.#priorRequests,
+              id: 902,
+              callId: "call_b",
+              tool: "second",
+              arguments: { fragment: "b" },
             },
-          );
+            {
+              id: 901,
+              callId: this.failures.duplicateToolCallId ? "call_b" : "call_a",
+              tool: "first",
+              arguments: { fragment: "a" },
+            },
+          ];
+          const usageOptions = {
+            usageOrder: suspendOrder,
+            reasoningOutputTokens: this.usage.reasoningOutputTokens ?? 0,
+            priorRequests: this.#priorRequests,
+          };
+          this.#toolTurnId = turnId;
+          if (this.parallelToolGapMs > 0) {
+            suspendWithTools(
+              this.transport.send,
+              this.#thread,
+              turnId,
+              [parallelCalls[0]!],
+              { ...usageOptions, completeRawResponse: false },
+            );
+            setTimeout(
+              () =>
+                suspendWithTools(
+                  this.transport.send,
+                  this.#thread,
+                  turnId,
+                  [parallelCalls[1]!],
+                  {
+                    completeRawResponse: this.#rawResponseBoundaries,
+                  },
+                ),
+              this.parallelToolGapMs,
+            );
+          } else
+            suspendWithTools(
+              this.transport.send,
+              this.#thread,
+              turnId,
+              parallelCalls,
+              {
+                ...usageOptions,
+                completeRawResponse: this.#rawResponseBoundaries,
+              },
+            );
           // The model request behind these calls ran whether or not app-server
           // attributed it, so every later cumulative total must include it.
           this.#priorRequests += 1;
-          this.#toolTurnId = turnId;
         } else if (input.length === 0) {
           // A tool-result continuation starts its turn with no user input; the
           // injected function_call_output pairs are the model-visible input.
@@ -325,14 +368,22 @@ class ToolAppServer {
             // correlation tests prove the third request does not loop.
             this.replayAndRequestNewToolOnContinuation = false;
             this.#toolRequestIds.add(904);
-            suspendWithTools(this.transport.send, this.#thread, turnId, [
+            suspendWithTools(
+              this.transport.send,
+              this.#thread,
+              turnId,
+              [
+                {
+                  id: 904,
+                  callId: "call_new",
+                  tool: "first",
+                  arguments: { fragment: "new" },
+                },
+              ],
               {
-                id: 904,
-                callId: "call_new",
-                tool: "first",
-                arguments: { fragment: "new" },
+                completeRawResponse: this.#rawResponseBoundaries,
               },
-            ]);
+            );
             this.#toolTurnId = turnId;
             return;
           }
@@ -490,6 +541,9 @@ function toolTranscript(
 test("parallel fragmented tool calls interrupt the turn and continue by injecting result pairs", async () => {
   await withTempDir(async (directory) => {
     const fake = new ToolAppServer();
+    // Separate the callbacks beyond the retired quiet-period heuristic. The
+    // raw completion still keeps both in one upstream response batch.
+    fake.parallelToolGapMs = 75;
     fake.sendLateToolCallAfterInterrupt = true;
     fake.sendLateToolCallDuringContinuation = true;
     const { origin, proxy } = await startProxy(directory, fake);
@@ -1161,6 +1215,53 @@ test("a pending tool continuation survives proxy restart", async () => {
       await secondServer.proxy.close();
     }
   }, "codex-tool-restart-");
+});
+
+test("a post-restart dynamic tool fails without a raw batch boundary", async () => {
+  await withTempDir(async (directory) => {
+    const firstFake = new ToolAppServer();
+    const firstServer = await startProxy(directory, firstFake);
+    let responseId = "";
+    let calls: CompletionBody["choices"][number]["message"]["tool_calls"];
+    try {
+      const initial = (await (
+        await postChatCompletion(firstServer.origin, {
+          model: "m",
+          tools: [
+            { type: "function", function: { name: "first", parameters: {} } },
+            { type: "function", function: { name: "second", parameters: {} } },
+          ],
+          messages: [{ role: "user", content: "tools" }],
+        })
+      ).json()) as CompletionBody;
+      responseId = initial.id;
+      calls = initial.choices[0]!.message.tool_calls;
+    } finally {
+      await firstServer.proxy.close();
+    }
+
+    const resumedFake = new ToolAppServer(false);
+    resumedFake.replayAndRequestNewToolOnContinuation = true;
+    const resumedServer = await startProxy(directory, resumedFake);
+    try {
+      const response = await postChatCompletion(resumedServer.origin, {
+        model: "m",
+        tools: [
+          { type: "function", function: { name: "first", parameters: {} } },
+          { type: "function", function: { name: "second", parameters: {} } },
+        ],
+        previous_response_id: responseId,
+        messages: toolTranscript(calls),
+      });
+      assert.equal(response.status, 502);
+      assert.equal(
+        await responseErrorCode(response),
+        "dynamic_tool_batch_boundary_unavailable",
+      );
+    } finally {
+      await resumedServer.proxy.close();
+    }
+  }, "codex-tool-raw-resume-");
 });
 
 test("completed continuations survive restart, supersede old responses, and reject a resume race", async () => {

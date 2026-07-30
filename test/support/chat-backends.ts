@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -8,6 +8,7 @@ import {
 } from "../../src/app-server/app-server.js";
 import { ensureAuthenticated } from "../../src/app-server/auth.js";
 import type { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
+import { installResponsesLiteOverride } from "../../src/app-server/responses-lite-override.js";
 import type { Logger } from "../../src/core/logger.js";
 import type { ProxyServer } from "../../src/http/server.js";
 import {
@@ -15,7 +16,7 @@ import {
   type PolicyRequirements,
 } from "../../src/core/policy.js";
 import {
-  CONTRACT_TOOL_KEYS,
+  CONTRACT_TOOL_BATCHES,
   OBSERVATION_COMMAND,
   OBSERVATION_FIXTURE,
   type ChatContractBackend,
@@ -74,13 +75,62 @@ async function startLiveChatBackendOnce(
 ): Promise<ChatContractBackend> {
   let appServer: AppServer | undefined;
   try {
-    appServer = await startAppServer({
-      codexPath: process.env.CODEX_PATH ?? "codex",
-      root: environment.root,
-      startupTimeoutMs: 30_000,
-      shutdownTimeoutMs: 10_000,
-      log: silentLogger,
-    });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      appServer = await startAppServer({
+        codexPath: process.env.CODEX_PATH ?? "codex",
+        codexHome: environment.codexHome,
+        seedAuthFrom: process.env.CODEX_HOME ?? join(homedir(), ".codex"),
+        seedAuthMode: "always",
+        root: environment.root,
+        startupTimeoutMs: 30_000,
+        shutdownTimeoutMs: 10_000,
+        log: silentLogger,
+      });
+      const interactive = !process.env.CI && Boolean(process.stderr.isTTY);
+      await ensureAuthenticated({
+        rpc: appServer.rpc,
+        log: silentLogger,
+        timeoutMs: 120_000,
+        interactive,
+        // Headless CI must never disclose a device-code URL or one-time code.
+        terminal: interactive
+          ? (message) => process.stderr.write(message)
+          : () => {},
+      });
+      if (appServer.responsesLiteOverrideApplied) break;
+
+      let override = await installResponsesLiteOverride(
+        environment.codexHome,
+        silentLogger,
+      );
+      if (override.status === "missing-cache") {
+        // Catalog listing can force a first-run metadata refresh but never
+        // starts a model turn, so it does not consume the live-call budget.
+        await appServer.rpc.request(
+          "model/list",
+          { cursor: null, limit: 1, includeHidden: true },
+          AbortSignal.timeout(30_000),
+        );
+        override = await installResponsesLiteOverride(
+          environment.codexHome,
+          silentLogger,
+        );
+      }
+      if (override.status === "missing-cache")
+        throw new Error(
+          "live contract could not prepare the Responses Lite model-catalog override",
+        );
+      await appServer.stop();
+      appServer = undefined;
+      if (attempt === 1)
+        throw new Error(
+          "live contract replacement app-server did not load the Responses Lite override",
+        );
+    }
+    if (appServer === undefined || !appServer.responsesLiteOverrideApplied)
+      throw new Error(
+        "live contract started without the Responses Lite model-catalog override",
+      );
     assertLivePolicyPrerequisites(appServer.requirements);
     // Report only the dynamic-tool dispatch offset; token-usage notifications
     // are asserted through HTTP output and stay off stdout.
@@ -95,17 +145,6 @@ async function startLiveChatBackendOnce(
         console.info(
           `[live] item/tool/call at +${Date.now() - turnStartedAt} ms after turn/start`,
         );
-    });
-    const interactive = !process.env.CI && Boolean(process.stderr.isTTY);
-    await ensureAuthenticated({
-      rpc: appServer.rpc,
-      log: silentLogger,
-      timeoutMs: 120_000,
-      interactive,
-      // Headless CI must never disclose a device-code URL or one-time code.
-      terminal: interactive
-        ? (message) => process.stderr.write(message)
-        : () => {},
     });
     return await startProxy(
       appServer.rpc,
@@ -128,6 +167,7 @@ interface ContractEnvironment {
   base: string;
   root: string;
   stateDir: string;
+  codexHome: string;
   observationToken: string;
 }
 
@@ -137,6 +177,7 @@ async function createContractEnvironment(): Promise<ContractEnvironment> {
   try {
     const root = join(base, "root");
     const stateDir = join(base, "state");
+    const codexHome = join(base, "codex-home");
     await mkdir(root, { mode: 0o700 });
     await mkdir(stateDir, { mode: 0o700 });
     const canonicalRoot = await realpath(root);
@@ -150,6 +191,7 @@ async function createContractEnvironment(): Promise<ContractEnvironment> {
       base,
       root: canonicalRoot,
       stateDir,
+      codexHome,
       observationToken,
     };
   } catch (error) {
@@ -296,6 +338,10 @@ function createScriptedTransport(
       const params = message.params ?? {};
       if (message.method === "thread/start") {
         const threadId = `thr_contract_${++nextThread}`;
+        if (params.experimentalRawEvents !== true)
+          throw new Error(
+            "contract thread did not opt into raw response events",
+          );
         if (
           Array.isArray(params.environments) &&
           params.environments.length === 0
@@ -367,6 +413,43 @@ function createScriptedTransport(
           }),
         );
         active.set(turnId, { threadId });
+        // Emit every request in one batch synchronously so the proxy observes
+        // the same parallel callback shape expected from live app-server.
+        const sendToolBatch = (batchIndex: number): void => {
+          const batch = CONTRACT_TOOL_BATCHES[batchIndex];
+          if (batch === undefined)
+            throw new Error("contract requested an unknown tool batch");
+          toolTurns.set(turnId, threadId);
+          for (const [callIndex, call] of batch.entries()) {
+            const requestId = ++nextServerRequest;
+            pendingTools.set(requestId, { threadId, turnId });
+            send(
+              protocolServerRequest({
+                id: requestId,
+                method: "item/tool/call",
+                params: {
+                  threadId,
+                  turnId,
+                  callId: `call_contract_lookup_${batchIndex + 1}_${callIndex + 1}`,
+                  namespace: null,
+                  tool: call.name,
+                  arguments: { key: call.key },
+                },
+              }),
+            );
+          }
+          send(
+            protocolNotification({
+              method: "rawResponse/completed",
+              params: {
+                threadId,
+                turnId,
+                responseId: `raw_contract_${turnId}_${batchIndex}`,
+                usage: null,
+              },
+            }),
+          );
+        };
         if (prompt.includes("contract-disabled-sandbox")) {
           if (
             !environmentDisabledThreads.has(threadId) ||
@@ -408,23 +491,7 @@ function createScriptedTransport(
             }),
           );
         if (prompt.includes("contract_lookup")) {
-          const requestId = ++nextServerRequest;
-          pendingTools.set(requestId, { threadId, turnId });
-          toolTurns.set(turnId, threadId);
-          send(
-            protocolServerRequest({
-              id: requestId,
-              method: "item/tool/call",
-              params: {
-                threadId,
-                turnId,
-                callId: "call_contract_lookup_1",
-                namespace: null,
-                tool: "contract_lookup",
-                arguments: { key: CONTRACT_TOOL_KEYS[0] },
-              },
-            }),
-          );
+          sendToolBatch(0);
           return;
         }
         if (input.length === 0) {
@@ -432,41 +499,68 @@ function createScriptedTransport(
           // function_call/function_call_output pairs are the model input.
           const pairs = injected.get(threadId) as
             Array<Record<string, unknown>> | undefined;
-          const callId =
-            typeof pairs?.[0]?.call_id === "string"
-              ? pairs[0].call_id
-              : undefined;
-          const match = /^call_contract_lookup_(\d+)$/.exec(callId ?? "");
           if (
-            pairs?.length !== 2 ||
-            pairs[0]?.type !== "function_call" ||
-            pairs[1]?.type !== "function_call_output" ||
-            pairs[1]?.call_id !== callId ||
-            match === null
+            pairs === undefined ||
+            pairs.length === 0 ||
+            pairs.length % 2 !== 0
           )
             throw new Error(
-              "tool results were not injected as a complete call/output pair",
+              "tool results were not injected as complete call/output pairs",
             );
-          const completedRound = Number(match[1]);
-          const nextKey = CONTRACT_TOOL_KEYS[completedRound];
-          if (nextKey !== undefined) {
-            const requestId = ++nextServerRequest;
-            pendingTools.set(requestId, { threadId, turnId });
-            toolTurns.set(turnId, threadId);
-            send(
-              protocolServerRequest({
-                id: requestId,
-                method: "item/tool/call",
-                params: {
-                  threadId,
-                  turnId,
-                  callId: `call_contract_lookup_${completedRound + 1}`,
-                  namespace: null,
-                  tool: "contract_lookup",
-                  arguments: { key: nextKey },
-                },
-              }),
+          let completedBatchIndex: number | undefined;
+          const observedCalls: Array<{ name: string; key: string }> = [];
+          for (let pairIndex = 0; pairIndex < pairs.length; pairIndex += 2) {
+            const call = pairs[pairIndex]!;
+            const output = pairs[pairIndex + 1]!;
+            const callId =
+              typeof call.call_id === "string" ? call.call_id : undefined;
+            const match = /^call_contract_lookup_(\d+)_(\d+)$/.exec(
+              callId ?? "",
             );
+            const batchIndex =
+              match === null ? undefined : Number(match[1]) - 1;
+            const callIndex = match === null ? undefined : Number(match[2]) - 1;
+            if (
+              call.type !== "function_call" ||
+              output.type !== "function_call_output" ||
+              output.call_id !== callId ||
+              batchIndex === undefined ||
+              callIndex !== pairIndex / 2 ||
+              (completedBatchIndex !== undefined &&
+                completedBatchIndex !== batchIndex) ||
+              typeof call.name !== "string" ||
+              typeof call.arguments !== "string"
+            )
+              throw new Error(
+                "tool results were not injected as complete call/output pairs",
+              );
+            completedBatchIndex = batchIndex;
+            const parsedArguments = JSON.parse(call.arguments) as {
+              key?: unknown;
+            };
+            if (typeof parsedArguments.key !== "string")
+              throw new Error("injected contract tool call omitted its key");
+            observedCalls.push({
+              name: call.name,
+              key: parsedArguments.key,
+            });
+          }
+          const completedBatch = CONTRACT_TOOL_BATCHES[completedBatchIndex!];
+          if (
+            completedBatch === undefined ||
+            observedCalls.length !== completedBatch.length ||
+            observedCalls.some(
+              (call, index) =>
+                call.name !== completedBatch[index]?.name ||
+                call.key !== completedBatch[index]?.key,
+            )
+          )
+            throw new Error(
+              "injected contract tool batch did not preserve call order",
+            );
+          const nextBatch = CONTRACT_TOOL_BATCHES[completedBatchIndex! + 1];
+          if (nextBatch !== undefined) {
+            sendToolBatch(completedBatchIndex! + 1);
             return;
           }
           send(

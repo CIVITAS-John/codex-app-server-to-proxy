@@ -13,6 +13,8 @@
   "item/reasoning/textDelta",
   "item/started",
   "item/tool/call",
+  "rawResponse/completed",
+  "rawResponseItem/completed",
   "serverRequest/resolved",
   "thread/status/changed",
   "thread/tokenUsage/updated",

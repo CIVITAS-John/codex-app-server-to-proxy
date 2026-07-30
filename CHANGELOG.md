@@ -4,8 +4,13 @@ All notable user-facing changes are recorded here. This project follows semantic
 
 ## Unreleased
 
+### Changed
+
+- Proxy-owned Codex startup temporarily clones `models_cache.json` to a separate `models.no-responses-lite.json` catalog, forces `use_responses_lite: false` for every model, and selects it through a marked `model_catalog_json` block. A cache created during first-run setup causes one private app-server restart before readiness; the Codex-owned cache is never edited. The opt-in live contract now requires two independent client tool calls in one batch and refuses to make a model call unless its ephemeral proxy-style Codex home loaded this override.
+
 ### Fixed
 
+- Parallel client-tool callbacks are now collected through the correlated `rawResponse/completed` event before the Codex turn is interrupted. Every fresh thread opts into raw events, and the former timer-based quiet period is gone, so callbacks from one upstream response form one exact `tool_calls` batch even when app-server dispatches them on different event-loop turns. Codex 0.145 cannot opt a newly resumed post-restart subscription into raw events; if such a thread issues another dynamic tool, the proxy fails fast with `dynamic_tool_batch_boundary_unavailable` instead of guessing a partial batch.
 - A request that replays completed earlier tool rounds and then starts a new turn — a full transcript resent without `previous_response_id`, as clients that restore a saved conversation do — is accepted again instead of failing with `Historical tool results require previous_response_id`. Each earlier assistant tool-call batch is injected into the fresh thread in its declared order, paired only with its immediately following `role: "tool"` outputs, so the model sees the tool round it actually ran. Unanswered calls and outputs no immediately preceding assistant batch requested are dropped and reported once per request as `unpaired_history_tool_items_dropped`; recognized Codex activity is omitted without being classified as unpaired client history.
 
 ## 0.1.0-rc.13 — July 29, 2026

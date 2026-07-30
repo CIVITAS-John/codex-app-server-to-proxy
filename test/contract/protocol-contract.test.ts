@@ -273,7 +273,7 @@ test("contract documents the implemented Stage 05 compatibility mappings", async
   );
   assert.match(
     contract,
-    /Supplies `model`, `ephemeral: false`, and `dynamicTools`/,
+    /Supplies `model`, `ephemeral: false`, `experimentalRawEvents: true`, and `dynamicTools`/,
   );
   assert.match(contract, /HTTP 503 before headers/);
   assert.match(contract, /closes without `\[DONE\]`/);

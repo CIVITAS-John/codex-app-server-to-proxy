@@ -30,6 +30,7 @@ import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { redact } from "../core/redact.js";
 import { listenForAbort, withDeadline } from "../core/abort.js";
+import { installResponsesLiteOverride } from "./responses-lite-override.js";
 
 /** Identifies this proxy to app-server during initialization. */
 export const CLIENT_NAME = "codex-openai-proxy";
@@ -115,6 +116,8 @@ export interface AppServer {
   child: ChildProcessWithoutNullStreams;
   /** Whether this startup installed credentials from seedAuthFrom. */
   authSeeded: boolean;
+  /** Whether this process loaded the proxy's Responses Lite catalog override. */
+  responsesLiteOverrideApplied: boolean;
   stop(): Promise<void>;
 }
 
@@ -144,9 +147,15 @@ export async function startAppServer(
   const invocation = resolveCodexInvocation(options.codexPath);
   let env = process.env;
   let authSeeded = false;
+  let responsesLiteOverrideApplied = false;
   if (options.codexHome !== undefined) {
     // Auth material lands here, so keep the directory owner-only.
     await mkdir(options.codexHome, { recursive: true, mode: 0o700 });
+    const override = await installResponsesLiteOverride(
+      options.codexHome,
+      options.log,
+    );
+    responsesLiteOverrideApplied = override.status === "applied";
     if (options.seedAuthFrom !== undefined)
       authSeeded = await seedAuthCredentials(
         options.seedAuthFrom,
@@ -224,6 +233,7 @@ export async function startAppServer(
     requirements,
     child,
     authSeeded,
+    responsesLiteOverrideApplied,
     async stop() {
       await stop();
     },

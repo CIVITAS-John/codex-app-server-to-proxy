@@ -41,6 +41,12 @@ Notes:
 - Treat printed authorization URLs and device codes as credentials — don't paste them into issues or logs.
 - The proxy's login lives in its Codex home; deleting `~/.codex-openai-proxy/codex-home` signs the proxy out without touching the Codex CLI's own `~/.codex` session.
 
+### Temporary Responses Lite override
+
+For the pinned Codex `0.145.0` runtime, proxy startup installs a temporary [model catalog override](https://developers.openai.com/codex/config-reference/#configtoml) in the selected Codex home. It copies `models_cache.json` to `models.no-responses-lite.json`, sets `use_responses_lite` to `false` on every model entry, and adds a marked top-level `model_catalog_json` block to `config.toml`. It never edits the refreshable cache directly.
+
+If a new Codex home creates its first model cache during initialization, that bootstrap app-server remains private; the proxy installs the override and restarts app-server once before reporting ready. The generated catalog intentionally freezes the cached model metadata while this workaround is active, and it replaces any prior top-level `model_catalog_json` value in the selected Codex home. The opt-in live contract requires one model turn to issue two independent client tool calls in the same batch, directly checking the parallel-tool behavior this regular Responses framing is intended to restore. This temporary compatibility override should be removed when the pinned runtime no longer needs regular Responses request framing.
+
 ## Use an OpenAI client
 
 Point any OpenAI-compatible client at `http://127.0.0.1:8787/v1`. No API key is required; use any placeholder if your library demands one.
@@ -227,6 +233,7 @@ npm uninstall codex-openai-proxy
 ```
 
 - Continuation state lives under `~/.codex-openai-proxy` (one namespace per `--root`), or your custom `--state-dir`. The proxy's Codex home — including its ChatGPT login and Codex caches — lives at `~/.codex-openai-proxy/codex-home`, or your custom `--codex-home`. Uninstalling deletes neither.
+- The temporary `models.no-responses-lite.json` catalog and its marked `config.toml` block also remain in the selected Codex home after uninstall. Remove both together only while every proxy using that home is stopped.
 - Stop every proxy using a root before deleting its namespace. Deleting state invalidates its `previous_response_id` values but does not touch Codex's threads; deleting `codex-home` also signs the proxy out (the next startup re-seeds from `~/.codex` when a login exists there unless `--sync-auth never` is set). A recovered login can update an existing older Codex CLI `auth.json` under the guarded conditions in [Authentication](#authentication).
 
 ## Documentation

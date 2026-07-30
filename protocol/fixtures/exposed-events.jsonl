@@ -9,6 +9,8 @@
 {"method":"item/fileChange/outputDelta","params":{"threadId":"thr_fixture","turnId":"turn_fixture","itemId":"item_patch","delta":"updated file"}}
 {"method":"item/fileChange/patchUpdated","params":{"threadId":"thr_fixture","turnId":"turn_fixture","itemId":"item_patch","changes":[{"path":"fixture.txt","kind":{"type":"update","move_path":null},"diff":"@@ fixture @@"}]}}
 {"method":"item/mcpToolCall/progress","params":{"threadId":"thr_fixture","turnId":"turn_fixture","itemId":"item_mcp","message":"running"}}
+{"method":"rawResponseItem/completed","params":{"threadId":"thr_fixture","turnId":"turn_fixture","item":{"type":"other"}}}
+{"method":"rawResponse/completed","params":{"threadId":"thr_fixture","turnId":"turn_fixture","responseId":"resp_fixture","usage":null}}
 {"method":"thread/tokenUsage/updated","params":{"threadId":"thr_fixture","turnId":"turn_fixture","tokenUsage":{"total":{"totalTokens":15,"inputTokens":10,"cachedInputTokens":2,"cacheWriteInputTokens":0,"outputTokens":5,"reasoningOutputTokens":1},"last":{"totalTokens":15,"inputTokens":10,"cachedInputTokens":2,"cacheWriteInputTokens":0,"outputTokens":5,"reasoningOutputTokens":1},"modelContextWindow":128000}}}
 {"method":"turn/completed","params":{"threadId":"thr_fixture","turn":{"id":"turn_fixture","items":[],"itemsView":"full","status":"completed","error":null,"startedAt":null,"completedAt":null,"durationMs":null}}}
 {"method":"thread/status/changed","params":{"threadId":"thr_fixture","status":{"type":"idle"}}}

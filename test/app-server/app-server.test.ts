@@ -22,6 +22,7 @@ import {
   writeBackAuthCredentials,
 } from "../../src/app-server/app-server.js";
 import { createLogger } from "../../src/core/logger.js";
+import { RESPONSES_LITE_OVERRIDE_CATALOG_FILENAME } from "../../src/app-server/responses-lite-override.js";
 import { fakeCodexScript } from "../support/fake-codex.js";
 import { silentLogger } from "../support/logger.js";
 import { waitForFile, waitForFileText } from "../support/poll.js";
@@ -479,6 +480,70 @@ let initialized = false;`,
 );
 
 testWithPosixExecutable(
+  "app-server installs the Responses Lite override before spawning Codex",
+  async () => {
+    await withTempDir(async (directory) => {
+      const executable = join(directory, "codex");
+      const codexHome = join(directory, "codex-home");
+      const capture = join(directory, "capture.txt");
+      await mkdir(codexHome, { recursive: true });
+      await writeFile(
+        join(codexHome, "models_cache.json"),
+        JSON.stringify({
+          fetched_at: "fixture",
+          models: [
+            { slug: "gpt-5.6-sol", use_responses_lite: true },
+            { slug: "gpt-5.4", use_responses_lite: false },
+          ],
+        }),
+        "utf8",
+      );
+      await writeFile(
+        executable,
+        fakeCodexScript({
+          version: PINNED_CODEX_VERSION,
+          setup: `const fs = require("node:fs");
+const path = require("node:path");
+const home = process.env.CODEX_HOME;
+const config = fs.readFileSync(path.join(home, "config.toml"), "utf8");
+const catalog = JSON.parse(fs.readFileSync(path.join(home, ${JSON.stringify(
+            RESPONSES_LITE_OVERRIDE_CATALOG_FILENAME,
+          )}), "utf8"));
+fs.writeFileSync(${JSON.stringify(
+            capture,
+          )}, JSON.stringify({ config, models: catalog.models }));`,
+        }),
+        "utf8",
+      );
+      await chmod(executable, 0o755);
+
+      const app = await startAppServer({
+        codexPath: executable,
+        codexHome,
+        root: directory,
+        startupTimeoutMs: 1_000,
+        shutdownTimeoutMs: 100,
+        log: silentLogger,
+      });
+      try {
+        assert.equal(app.responsesLiteOverrideApplied, true);
+        const captured = JSON.parse(await readFile(capture, "utf8")) as {
+          config: string;
+          models: Array<Record<string, unknown>>;
+        };
+        assert.ok(captured.config.includes("model_catalog_json"));
+        assert.deepEqual(
+          captured.models.map((model) => model.use_responses_lite),
+          [false, false],
+        );
+      } finally {
+        await app.stop();
+      }
+    }, "app-server-responses-lite-override-test-");
+  },
+);
+
+testWithPosixExecutable(
   "app-server spawns Codex with the isolated CODEX_HOME created up front",
   async () => {
     await withTempDir(async (directory) => {
@@ -508,6 +573,7 @@ testWithPosixExecutable(
         log: silentLogger,
       });
       try {
+        assert.equal(app.responsesLiteOverrideApplied, false);
         assert.equal(await readFile(capture, "utf8"), codexHome);
         const homeStat = await stat(codexHome);
         assert.ok(homeStat.isDirectory());

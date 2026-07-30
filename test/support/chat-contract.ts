@@ -7,8 +7,18 @@ export const CONTRACT_MODEL = "gpt-5.6-luna";
 /** Hard model-turn guard with one retry above the normal eleven live calls. */
 export const MAX_LIVE_MODEL_CALLS = 12;
 
-/** Ordered lookup keys used to force three live tool-result continuations. */
-export const CONTRACT_TOOL_KEYS = ["cedar", "birch", "maple"] as const;
+/**
+ * Ordered tool batches used to require one parallel pair followed by two
+ * serial calls across three live tool-result continuations.
+ */
+export const CONTRACT_TOOL_BATCHES = [
+  [
+    { name: "contract_lookup", key: "cedar" },
+    { name: "contract_lookup_secondary", key: "spruce" },
+  ],
+  [{ name: "contract_lookup", key: "birch" }],
+  [{ name: "contract_lookup", key: "maple" }],
+] as const;
 
 /** Safe root-relative file read by the live built-in command scenario. */
 export const OBSERVATION_FIXTURE = ".codex-contract-observation";
@@ -314,17 +324,32 @@ export function registerChatContract(
       }, 130_000);
 
     if (scenarios.has("dynamic-tool-restart"))
-      test("continues three full-history tool results and resumes after restart", async () => {
+      test("issues parallel tools, continues three result batches, and resumes after restart", async () => {
         const callsBefore = backend!.modelCalls();
         const tools = [
           {
             type: "function",
             function: {
               name: "contract_lookup",
-              description: "Looks up the fixed live-contract test value.",
+              description:
+                "Looks up one fixed live-contract value. Independent lookups can run in parallel.",
               parameters: {
                 type: "object",
                 properties: { key: { type: "string" } },
+                required: ["key"],
+                additionalProperties: false,
+              },
+            },
+          },
+          {
+            type: "function",
+            function: {
+              name: "contract_lookup_secondary",
+              description:
+                "Performs the independent spruce lookup. Call it alongside the primary cedar lookup.",
+              parameters: {
+                type: "object",
+                properties: { key: { type: "string", enum: ["spruce"] } },
                 required: ["key"],
                 additionalProperties: false,
               },
@@ -335,7 +360,7 @@ export function registerChatContract(
           {
             role: "user",
             content:
-              "Call contract_lookup exactly once with key cedar. After each result, follow its instruction to make the next lookup. Do not answer until the final result tells you to.",
+              "In the same turn, call contract_lookup with key cedar and call contract_lookup_secondary with key spruce. These are two distinct independent tools, so issue both calls in parallel before waiting for either result. After receiving every result, follow its instruction. Do not answer until the final result tells you to.",
           },
         ];
         const firstStarted = Date.now();
@@ -352,27 +377,48 @@ export function registerChatContract(
           "dynamic-tool completion 1",
         );
         let completedBody: ToolCompletion | undefined;
-        for (const [roundIndex, key] of CONTRACT_TOOL_KEYS.entries()) {
+        for (const [
+          roundIndex,
+          expectedKeys,
+        ] of CONTRACT_TOOL_BATCHES.entries()) {
           const assistant = callBody.choices?.[0]?.message;
-          const call = assistant?.tool_calls?.[0];
+          const calls = assistant?.tool_calls ?? [];
           assert.match(callBody.id ?? "", /^chatcmpl_codex_/);
           assert.equal(callBody.choices?.[0]?.finish_reason, "tool_calls");
           assert.equal(assistant?.role, "assistant");
-          assert.equal(assistant?.tool_calls?.length, 1);
-          assert.ok(call?.id);
-          assert.ok(
-            call?.type === "function",
-            "dynamic tool call used an unsupported type",
+          assert.equal(
+            calls.length,
+            expectedKeys.length,
+            roundIndex === 0
+              ? "regular Responses framing did not issue both independent tool calls in parallel"
+              : `dynamic-tool batch ${roundIndex + 1} had an unexpected size`,
           );
-          assert.ok(
-            call?.function.name === "contract_lookup",
-            "dynamic tool name did not match the contract fixture",
+          const actualCalls = calls.map((call, callIndex) => {
+            assert.ok(call.id);
+            assert.equal(
+              call.type,
+              "function",
+              "dynamic tool call used an unsupported type",
+            );
+            const callArguments = parseJson<Record<string, unknown>>(
+              call.function.arguments,
+              `dynamic-tool arguments ${roundIndex + 1}.${callIndex + 1}`,
+            );
+            assert.equal(typeof callArguments.key, "string");
+            return {
+              name: call.function.name,
+              key: callArguments.key as string,
+            };
+          });
+          assert.deepEqual(
+            [...actualCalls].sort((left, right) =>
+              left.name.localeCompare(right.name),
+            ),
+            [...expectedKeys].sort((left, right) =>
+              left.name.localeCompare(right.name),
+            ),
+            `dynamic-tool batch ${roundIndex + 1} used unexpected calls`,
           );
-          const callArguments = parseJson<Record<string, unknown>>(
-            call?.function.arguments ?? "",
-            `dynamic-tool arguments ${roundIndex + 1}`,
-          );
-          assert.deepEqual(callArguments, { key });
           const callUsage = callBody.usage;
           assert.ok(
             callUsage,
@@ -394,15 +440,18 @@ export function registerChatContract(
             content: assistant?.content ?? null,
             tool_calls: assistant!.tool_calls,
           });
-          const nextKey = CONTRACT_TOOL_KEYS[roundIndex + 1];
-          transcript.push({
-            role: "tool",
-            tool_call_id: call!.id,
-            content:
-              nextKey === undefined
-                ? "The third lookup succeeded. Reply exactly with contract-tool-ok."
-                : `The lookup succeeded. Now call contract_lookup exactly once with key ${nextKey}. Do not answer yet.`,
-          });
+          const nextBatch = CONTRACT_TOOL_BATCHES[roundIndex + 1];
+          for (const [callIndex, call] of calls.entries())
+            transcript.push({
+              role: "tool",
+              tool_call_id: call.id,
+              content:
+                callIndex < calls.length - 1
+                  ? "This independent lookup succeeded. Wait for the other result before taking another action."
+                  : nextBatch === undefined
+                    ? "The final lookup succeeded. Reply exactly with contract-tool-ok."
+                    : `Every lookup in this batch succeeded. Now call ${nextBatch[0].name} exactly once with key ${nextBatch[0].key}. Do not answer yet.`,
+            });
 
           const resultStarted = Date.now();
           const resultResponse = await chat({
@@ -420,7 +469,7 @@ export function registerChatContract(
             resultRaw,
             `tool-result completion ${roundIndex + 1}`,
           );
-          if (nextKey !== undefined) {
+          if (nextBatch !== undefined) {
             assert.equal(
               resultBody.choices?.[0]?.finish_reason,
               "tool_calls",

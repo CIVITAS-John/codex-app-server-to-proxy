@@ -161,6 +161,7 @@ export interface ScriptedToolCall {
 
 /** Usage ordering selected by one scripted dynamic-tool batch. */
 export interface SuspendWithToolsOptions {
+  completeRawResponse?: boolean;
   reasoningOutputTokens?: number;
   priorRequests?: number;
   usageOrder?: ToolUsageWireOrder;
@@ -178,6 +179,7 @@ export function suspendWithTools(
   turnId: string,
   calls: readonly ScriptedToolCall[],
   {
+    completeRawResponse = true,
     reasoningOutputTokens = 0,
     priorRequests = 0,
     usageOrder = "never",
@@ -205,6 +207,26 @@ export function suspendWithTools(
         },
       }),
     );
+  if (completeRawResponse) completeRawResponseBatch(send, threadId, turnId);
+}
+
+/** Emits the authoritative end of one upstream Responses completion. */
+export function completeRawResponseBatch(
+  send: FakeTransportSend,
+  threadId: string,
+  turnId: string,
+): void {
+  send(
+    protocolNotification({
+      method: "rawResponse/completed",
+      params: {
+        threadId,
+        turnId,
+        responseId: `raw_${turnId}`,
+        usage: null,
+      },
+    }),
+  );
 }
 
 /** Usage emission selected by one scripted turn interruption. */

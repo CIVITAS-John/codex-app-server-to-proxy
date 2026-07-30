@@ -21,6 +21,7 @@ import {
   type AppServer,
 } from "../app-server/app-server.js";
 import { ensureAuthenticated } from "../app-server/auth.js";
+import { installResponsesLiteOverride } from "../app-server/responses-lite-override.js";
 import { abortableDelay } from "../core/abort.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -188,68 +189,87 @@ class AppServerSupervisor {
       this.#options.syncAuth === "never"
         ? undefined
         : (process.env.CODEX_HOME ?? join(homedir(), ".codex"));
-    const next = await startAppServer({
-      codexPath: this.#options.codexPath,
-      codexHome: this.#options.codexHome,
-      // A user-provided proxy-only login must remain untouched when opted out.
-      seedAuthFrom: seedSource,
-      seedAuthMode:
-        this.#options.syncAuth === "never" ? undefined : this.#options.syncAuth,
-      root: this.#options.root,
-      startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS,
-      shutdownTimeoutMs: this.#options.shutdownTimeoutMs,
-      log: this.#log,
-      diagnosticLogging: this.#options.logLevel === "debug",
-      signal: this.#lifecycle.signal,
-    });
-    this.#starting = next;
-    let exited = false;
-    next.child.once("exit", () => {
-      exited = true;
-      if (!this.#lifecycle.signal.aborted && this.#active === next) {
-        this.#active = undefined;
-        this.#proxy.setReady(false);
-        this.#proxy.setTransport(undefined);
-        void this.#recover();
-      }
-    });
-    try {
-      const { recoveredLogin } = await ensureAuthenticated({
-        rpc: next.rpc,
+    // A first-run app-server can create models_cache.json during setup. Keep
+    // that unpatched child private and restart it once with the new catalog
+    // before the proxy becomes ready.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const next = await startAppServer({
+        codexPath: this.#options.codexPath,
+        codexHome: this.#options.codexHome,
+        // A user-provided proxy-only login must remain untouched when opted out.
+        seedAuthFrom: seedSource,
+        seedAuthMode:
+          this.#options.syncAuth === "never"
+            ? undefined
+            : this.#options.syncAuth,
+        root: this.#options.root,
+        startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS,
+        shutdownTimeoutMs: this.#options.shutdownTimeoutMs,
         log: this.#log,
-        timeoutMs: DEFAULT_STARTUP_TIMEOUT_MS,
-        interactive: Boolean(process.stderr.isTTY),
-        terminal: (message) => process.stderr.write(message),
+        diagnosticLogging: this.#options.logLevel === "debug",
         signal: this.#lifecycle.signal,
       });
-      if (
-        recoveredLogin &&
-        next.authSeeded &&
-        this.#options.syncAuth === "always" &&
-        seedSource !== undefined &&
-        !this.#lifecycle.signal.aborted &&
-        !exited
-      )
-        await writeBackAuthCredentials(
-          this.#options.codexHome,
-          seedSource,
-          this.#log,
-        );
-    } catch (error) {
-      await this.#stopPartial(next);
-      if (this.#starting === next) this.#starting = undefined;
-      throw error;
+      this.#starting = next;
+      let exited = false;
+      next.child.once("exit", () => {
+        exited = true;
+        if (!this.#lifecycle.signal.aborted && this.#active === next) {
+          this.#active = undefined;
+          this.#proxy.setReady(false);
+          this.#proxy.setTransport(undefined);
+          void this.#recover();
+        }
+      });
+      try {
+        const { recoveredLogin } = await ensureAuthenticated({
+          rpc: next.rpc,
+          log: this.#log,
+          timeoutMs: DEFAULT_STARTUP_TIMEOUT_MS,
+          interactive: Boolean(process.stderr.isTTY),
+          terminal: (message) => process.stderr.write(message),
+          signal: this.#lifecycle.signal,
+        });
+        if (
+          recoveredLogin &&
+          next.authSeeded &&
+          this.#options.syncAuth === "always" &&
+          seedSource !== undefined &&
+          !this.#lifecycle.signal.aborted &&
+          !exited
+        )
+          await writeBackAuthCredentials(
+            this.#options.codexHome,
+            seedSource,
+            this.#log,
+          );
+        if (this.#lifecycle.signal.aborted || exited)
+          throw (
+            this.#lifecycle.signal.reason ??
+            new Error("app-server exited during startup")
+          );
+
+        if (!next.responsesLiteOverrideApplied && attempt === 0) {
+          const override = await installResponsesLiteOverride(
+            this.#options.codexHome,
+            this.#log,
+          );
+          if (override.status === "applied") {
+            // model_catalog_json is startup-only, so the bootstrap child must
+            // exit before a replacement can load the generated catalog.
+            await next.stop();
+            if (this.#starting === next) this.#starting = undefined;
+            continue;
+          }
+        }
+      } catch (error) {
+        await this.#stopPartial(next);
+        if (this.#starting === next) this.#starting = undefined;
+        throw error;
+      }
+      this.#starting = undefined;
+      return next;
     }
-    if (this.#lifecycle.signal.aborted || exited) {
-      await this.#stopPartial(next);
-      if (this.#starting === next) this.#starting = undefined;
-      throw (
-        this.#lifecycle.signal.reason ??
-        new Error("app-server exited during startup")
-      );
-    }
-    this.#starting = undefined;
-    return next;
+    throw new Error("Responses Lite override restart did not settle.");
   }
 
   /** Atomically promotes one initialized child into the live proxy transport. */
