@@ -44,6 +44,13 @@ export interface ChatMessage {
   content: string | null;
   toolCallId?: string;
   toolCalls?: Array<{ id: string; name: string; arguments: string }>;
+  /**
+   * Call IDs this assistant message answered with its own `tool_results`, so
+   * Codex activity app-server owns stays distinguishable from a client call
+   * still awaiting a `role: "tool"` result. The results themselves are
+   * deliberately not retained.
+   */
+  internalToolCallIds?: string[];
 }
 
 /** Returns the terminal contiguous block of client-supplied tool results. */
@@ -110,18 +117,10 @@ export function validateRequest(
   const messages = body.messages.map((entry, index) =>
     validateMessage(entry, index),
   );
+  // Only the terminal block can resolve a continuation. Tool messages before it
+  // are completed earlier rounds that `toHistoryItems` replays into a fresh
+  // thread, so a full transcript needs no continuation ID to be accepted.
   const terminalToolResults = terminalToolResultBlock(messages);
-  // This shape is not an implicit continuation: letting it fall through would
-  // inject unsupported historical tool roles into a fresh Codex thread.
-  if (
-    !body.previous_response_id &&
-    !terminalToolResults.length &&
-    messages.some((message) => message.role === "tool")
-  )
-    invalid(
-      "Historical tool results require previous_response_id.",
-      "previous_response_id",
-    );
   if (
     !body.previous_response_id &&
     terminalToolResults.length &&
@@ -274,6 +273,7 @@ function validateMessage(value: unknown, index: number): ChatMessage {
       "Null assistant content requires at least one tool call.",
       `${param}.content`,
     );
+  let internalToolCallIds: string[] | undefined;
   if (message.tool_results !== undefined) {
     if (
       message.role !== "assistant" ||
@@ -285,6 +285,7 @@ function validateMessage(value: unknown, index: number): ChatMessage {
         `${param}.tool_results`,
       );
     const callsById = new Map(toolCalls?.map((call) => [call.id, call]));
+    internalToolCallIds = [];
     message.tool_results.forEach((raw, resultIndex) => {
       const result = record(raw);
       const fn = record(result?.function);
@@ -304,9 +305,11 @@ function validateMessage(value: unknown, index: number): ChatMessage {
           "Each tool result must match a complete assistant tool call.",
           `${param}.tool_results.${resultIndex}`,
         );
+      internalToolCallIds!.push(call.id);
     });
     // These self-correlating results describe Codex activity that app-server
-    // already executed. Validation deliberately does not retain them.
+    // already executed. Only the correlation is retained, so history replay can
+    // tell the activity apart from a client call; the results themselves are not.
   }
   if (message.role === "tool" && typeof message.tool_call_id !== "string")
     invalid("A tool message requires tool_call_id.", `${param}.tool_call_id`);
@@ -317,6 +320,7 @@ function validateMessage(value: unknown, index: number): ChatMessage {
       ? { toolCallId: message.tool_call_id }
       : {}),
     ...(toolCalls ? { toolCalls } : {}),
+    ...(internalToolCallIds?.length ? { internalToolCallIds } : {}),
   };
 }
 
@@ -357,12 +361,12 @@ function validateTools(
   });
 }
 
-/** Maps prior messages to raw Responses API history without flattening roles. */
-export function toHistoryItem(
+/** Maps one prior message to raw Responses API history without flattening roles. */
+function toHistoryItem(
   message: ChatMessage,
 ): Record<string, unknown> | undefined {
-  // A tool-only assistant response has no model-visible text to inject. Its
-  // calls and results describe activity app-server already owns.
+  // A tool-only assistant response has no model-visible text to inject; its
+  // calls are represented by the pairs `toHistoryItems` builds around it.
   if (message.content === null) return undefined;
   return {
     type: "message",
@@ -374,6 +378,77 @@ export function toHistoryItem(
       },
     ],
   };
+}
+
+/** One replayed history mapping plus the tool items it could not represent. */
+export interface HistoryItems {
+  items: Array<Record<string, unknown>>;
+  /** Replayed assistant tool calls no client result answered. */
+  unansweredCalls: number;
+  /** Replayed tool results no preceding assistant message requested. */
+  orphanResults: number;
+}
+
+/**
+ * Maps a replayed transcript to raw Responses API history, pairing each earlier
+ * assistant tool-call batch with its immediately following client-result block
+ * so a completed tool round survives into a fresh thread. A `role: "tool"`
+ * history message is not a Responses item, and app-server silently ignores a
+ * `function_call_output` without its `function_call`, so only complete pairs are
+ * injected in assistant-declared call order. An unanswered call would leave the
+ * thread describing work that never finished, and an orphan result has no call
+ * to attach to. Both are counted so the caller can report the loss instead of
+ * injecting a misleading transcript.
+ */
+export function toHistoryItems(messages: readonly ChatMessage[]): HistoryItems {
+  const items: Array<Record<string, unknown>> = [];
+  let unansweredCalls = 0;
+  let orphanResults = 0;
+  let index = 0;
+  while (index < messages.length) {
+    const message = messages[index]!;
+    index += 1;
+    if (message.role === "tool") {
+      orphanResults += 1;
+      continue;
+    }
+    const text = toHistoryItem(message);
+    if (text) items.push(text);
+    const internal = new Set(message.internalToolCallIds);
+    // Activity this message already answered itself is app-server's, and the
+    // fresh thread owns its own: replaying it under Codex's internal tool names
+    // would describe work this thread never performed.
+    const calls = (message.toolCalls ?? []).filter(
+      (call) => !internal.has(call.id),
+    );
+    if (!calls.length) continue;
+    const callIds = new Set(calls.map((call) => call.id));
+    const results = new Map<string, string>();
+    // Consume this assistant message's whole result block so those tool roles
+    // cannot be reconsidered by a later batch with a repeated call ID.
+    while (messages[index]?.role === "tool") {
+      const callId = messages[index]!.toolCallId!;
+      if (!callIds.has(callId) || results.has(callId)) orphanResults += 1;
+      else results.set(callId, messages[index]!.content!);
+      index += 1;
+    }
+    for (const call of calls) {
+      const output = results.get(call.id);
+      if (output === undefined) {
+        unansweredCalls += 1;
+        continue;
+      }
+      items.push(
+        toFunctionCallItem({
+          callId: call.id,
+          name: call.name,
+          arguments: call.arguments,
+        }),
+        toFunctionCallOutputItem(call.id, output),
+      );
+    }
+  }
+  return { items, unansweredCalls, orphanResults };
 }
 
 /** Builds the Responses API function_call item for one recorded dynamic call. */

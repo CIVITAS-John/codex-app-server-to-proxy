@@ -6,6 +6,12 @@ All notable user-facing changes are recorded here. This project follows semantic
 
 ### Fixed
 
+- A request that replays completed earlier tool rounds and then starts a new turn — a full transcript resent without `previous_response_id`, as clients that restore a saved conversation do — is accepted again instead of failing with `Historical tool results require previous_response_id`. Each earlier assistant tool-call batch is injected into the fresh thread in its declared order, paired only with its immediately following `role: "tool"` outputs, so the model sees the tool round it actually ran. Unanswered calls and outputs no immediately preceding assistant batch requested are dropped and reported once per request as `unpaired_history_tool_items_dropped`; recognized Codex activity is omitted without being classified as unpaired client history.
+
+## 0.1.0-rc.13 — July 29, 2026
+
+### Fixed
+
 - Late dynamic-tool callbacks from an intentionally interrupted turn are now ignored even while the same thread is running its continuation, eliminating false `Dynamic tool correlation mismatch` warnings and request failures. The expected app-server cancellation diagnostic produced by that interrupt is also omitted from proxy logs, and the opt-in live contract now proves the behavior across three consecutive full-history tool-result requests.
 
 ## 0.1.0-rc.12 — July 29, 2026

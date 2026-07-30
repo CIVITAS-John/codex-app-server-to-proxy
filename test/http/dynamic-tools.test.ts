@@ -751,36 +751,226 @@ test("third full-history tool continuation correlates only its terminal result b
   }
 });
 
-test("historical tool results without a continuation ID stay out of fresh-thread history", async () => {
-  await withTempDir(async (directory) => {
-    const fake = new ToolAppServer();
+/** Replays one transcript into a fresh thread and reports what it received. */
+async function replayFreshThread(
+  messages: Array<Record<string, unknown>>,
+): Promise<{
+  injected: Array<Record<string, unknown>>;
+  turnInputs: unknown[][];
+}> {
+  return await withTempDir(async (directory) => {
+    const fake = new ToolAppServer(false);
     const { origin, proxy } = await startProxy(directory, fake);
     try {
       const response = await postChatCompletion(origin, {
         model: "m",
-        messages: [
-          {
-            role: "assistant",
-            content: null,
-            tool_calls: [
-              {
-                id: "call_old",
-                type: "function",
-                function: { name: "first", arguments: "{}" },
-              },
-            ],
-          },
-          { role: "tool", tool_call_id: "call_old", content: "old result" },
-          { role: "user", content: "continue" },
-        ],
+        messages,
       });
-      assert.equal(response.status, 400);
-      assert.equal(await responseErrorCode(response), "invalid_request");
-      assert.equal(fake.methods.length, 0);
+      assert.equal(response.status, 200);
+      return { injected: fake.injected, turnInputs: fake.turnInputs };
     } finally {
       await proxy.close();
     }
-  }, "codex-historical-tool-results-");
+  }, "codex-history-replay-");
+}
+
+test("a completed historical tool round replays into fresh-thread history", async () => {
+  const replay = await replayFreshThread([
+    { role: "user", content: "use tools" },
+    {
+      role: "assistant",
+      content: "calling out",
+      tool_calls: [
+        {
+          id: "call_old",
+          type: "function",
+          function: { name: "first", arguments: '{"a":1}' },
+        },
+      ],
+    },
+    { role: "tool", tool_call_id: "call_old", content: "old result" },
+    { role: "user", content: "continue" },
+  ]);
+  // The earlier round is history, not a continuation: it is injected as the
+  // complete pair app-server needs, and the trailing user message is input.
+  assert.deepEqual(replay.injected, [
+    {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "use tools" }],
+    },
+    {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "calling out" }],
+    },
+    {
+      type: "function_call",
+      name: "first",
+      arguments: '{"a":1}',
+      call_id: "call_old",
+    },
+    {
+      type: "function_call_output",
+      call_id: "call_old",
+      output: "old result",
+    },
+  ]);
+  assert.deepEqual(replay.turnInputs, [
+    [{ type: "text", text: "continue", text_elements: [] }],
+  ]);
+});
+
+test("historical parallel tool replay preserves assistant call order", async () => {
+  const replay = await replayFreshThread([
+    {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        {
+          id: "call_b",
+          type: "function",
+          function: { name: "second", arguments: '{"order":"b"}' },
+        },
+        {
+          id: "call_a",
+          type: "function",
+          function: { name: "first", arguments: '{"order":"a"}' },
+        },
+      ],
+    },
+    // Client results may arrive out of order, but replayed calls retain
+    // the authoritative order of the assistant's tool-call batch.
+    { role: "tool", tool_call_id: "call_a", content: "result a" },
+    { role: "tool", tool_call_id: "call_b", content: "result b" },
+    { role: "user", content: "continue" },
+  ]);
+  assert.deepEqual(replay.injected, [
+    {
+      type: "function_call",
+      name: "second",
+      arguments: '{"order":"b"}',
+      call_id: "call_b",
+    },
+    {
+      type: "function_call_output",
+      call_id: "call_b",
+      output: "result b",
+    },
+    {
+      type: "function_call",
+      name: "first",
+      arguments: '{"order":"a"}',
+      call_id: "call_a",
+    },
+    {
+      type: "function_call_output",
+      call_id: "call_a",
+      output: "result a",
+    },
+  ]);
+});
+
+test("a later historical batch cannot answer an earlier incomplete batch", async () => {
+  const replay = await replayFreshThread([
+    {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        {
+          id: "call_reused",
+          type: "function",
+          function: { name: "first", arguments: '{"round":1}' },
+        },
+      ],
+    },
+    {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        {
+          id: "call_reused",
+          type: "function",
+          function: { name: "second", arguments: '{"round":2}' },
+        },
+      ],
+    },
+    { role: "tool", tool_call_id: "call_reused", content: "round two" },
+    { role: "user", content: "continue" },
+  ]);
+  // The result belongs only to its immediately preceding assistant batch;
+  // the incomplete earlier declaration is dropped instead of fabricated.
+  assert.deepEqual(replay.injected, [
+    {
+      type: "function_call",
+      name: "second",
+      arguments: '{"round":2}',
+      call_id: "call_reused",
+    },
+    {
+      type: "function_call_output",
+      call_id: "call_reused",
+      output: "round two",
+    },
+  ]);
+});
+
+test("unpairable historical tool items stay out of fresh-thread history", async () => {
+  const replay = await replayFreshThread([
+    // An unanswered call would describe work the thread never finished,
+    // and app-server ignores an output whose call it never received.
+    {
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        {
+          id: "call_unanswered",
+          type: "function",
+          function: { name: "first", arguments: "{}" },
+        },
+      ],
+    },
+    { role: "tool", tool_call_id: "call_orphan", content: "orphan" },
+    { role: "user", content: "continue" },
+  ]);
+  assert.deepEqual(replay.injected, []);
+  assert.deepEqual(replay.turnInputs, [
+    [{ type: "text", text: "continue", text_elements: [] }],
+  ]);
+});
+
+test("replayed internal activity stays out of fresh-thread history", async () => {
+  const replay = await replayFreshThread([
+    {
+      role: "assistant",
+      content: "ran a command",
+      tool_calls: [
+        {
+          id: "internal_command",
+          type: "function",
+          function: { name: "commandExecution", arguments: "{}" },
+        },
+      ],
+      // Self-correlated results mark app-server-owned activity, which the
+      // fresh thread must not replay under Codex's internal tool names.
+      tool_results: [
+        {
+          id: "internal_command",
+          type: "function",
+          function: { name: "commandExecution", arguments: "{}" },
+          result: { status: "completed" },
+        },
+      ],
+    },
+    { role: "user", content: "continue" },
+  ]);
+  assert.deepEqual(replay.injected, [
+    {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "ran a command" }],
+    },
+  ]);
 });
 
 test("verbatim mixed internal and dynamic calls resolve only the pending batch", async () => {

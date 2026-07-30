@@ -30,7 +30,7 @@ import {
 import {
   toFunctionCallItem,
   toFunctionCallOutputItem,
-  toHistoryItem,
+  toHistoryItems,
   terminalToolResultBlock,
   validateToolResults,
   type ChatRequest,
@@ -849,18 +849,23 @@ async function startFreshThread(
   acquireThread(handle, options, onToolRequest);
   // Only a trailing user message becomes new turn input. Any other trailing
   // message joins the injected history and the empty-input turn asks the model
-  // to continue from it. Tool messages never reach this fresh-thread path:
-  // they always resolve to a continuation or fail before execution.
+  // to continue from it. A terminal tool-result block never reaches this
+  // fresh-thread path: it always resolves to a continuation or fails before
+  // execution, so every tool message here is a completed earlier round.
   const last = request.messages.at(-1)!;
   const history =
     last.role === "user" ? request.messages.slice(0, -1) : request.messages;
-  const prior = history
-    .map(toHistoryItem)
-    .filter((item): item is Record<string, unknown> => item !== undefined);
-  if (prior.length)
+  const prior = toHistoryItems(history);
+  if (prior.unansweredCalls || prior.orphanResults)
+    options.log("warn", "unpaired_history_tool_items_dropped", {
+      request_id: options.requestId,
+      unanswered_calls: prior.unansweredCalls,
+      orphan_results: prior.orphanResults,
+    });
+  if (prior.items.length)
     await options.rpc.request(
       "thread/inject_items",
-      { threadId: handle.threadId, items: prior },
+      { threadId: handle.threadId, items: prior.items },
       options.signal,
     );
   await startTurn(request, options, handle);
