@@ -249,16 +249,52 @@ test("HTTP failures use OpenAI-shaped JSON and never leak warnings", async () =>
 
 test("body limit applies to declared and streamed bodies", async () => {
   await withServer({ bodyLimitBytes: 8 }, async (origin) => {
-    for (const body of [JSON.stringify({ value: "too long" }), "123456789"]) {
-      const response = await fetch(`${origin}/v1/chat/completions`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body,
-      });
-      assert.equal(response.status, 413);
-      const result = (await response.json()) as { error: { code: string } };
-      assert.equal(result.error.code, "body_too_large");
-    }
+    const declared = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: "too long" }),
+    });
+    assert.equal(declared.status, 413);
+    assert.equal(
+      ((await declared.json()) as { error: { code: string } }).error.code,
+      "body_too_large",
+    );
+
+    const url = new URL(origin);
+    const streamed = await new Promise<{
+      status: number | undefined;
+      body: string;
+    }>((resolve, reject) => {
+      const request = http.request(
+        {
+          hostname: url.hostname,
+          port: url.port,
+          path: "/v1/chat/completions",
+          method: "POST",
+          headers: { "content-type": "application/json" },
+        },
+        (response) => {
+          let body = "";
+          response.setEncoding("utf8");
+          response.on("data", (chunk: string) => {
+            body += chunk;
+          });
+          response.once("end", () =>
+            resolve({ status: response.statusCode, body }),
+          );
+        },
+      );
+      request.once("error", reject);
+      // Omitting Content-Length makes Node use chunked transfer encoding, so
+      // the server can enforce the limit only while consuming the body.
+      request.write("123456789");
+      request.end();
+    });
+    assert.equal(streamed.status, 413);
+    assert.equal(
+      (JSON.parse(streamed.body) as { error: { code: string } }).error.code,
+      "body_too_large",
+    );
   });
 });
 

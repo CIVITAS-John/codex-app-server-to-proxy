@@ -7,7 +7,6 @@ import {
 } from "node:http";
 import type { Socket } from "node:net";
 import { HttpError, writeError, writeJson } from "./errors.js";
-import { listenForAbort } from "../core/abort.js";
 import type { ServeOptions } from "../core/config.js";
 import type { Logger } from "../core/logger.js";
 import type { JsonRpcTransport } from "../app-server/json-rpc.js";
@@ -365,42 +364,51 @@ async function readJsonBody(
 ): Promise<unknown> {
   const declared = Number(request.headers["content-length"]);
   if (Number.isFinite(declared) && declared > limit) throw bodyTooLargeError();
-  const chunks: Buffer[] = [];
-  const read = (async (): Promise<void> => {
+  const chunks = await new Promise<Buffer[]>((resolve, reject) => {
+    const result: Buffer[] = [];
     let size = 0;
-    for await (const raw of request) {
-      const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(String(raw));
+    const cleanup = (): void => {
+      request.off("data", onData);
+      request.off("end", onEnd);
+      request.off("error", onError);
+      signal.removeEventListener("abort", onAbort);
+    };
+    const fail = (error: unknown): void => {
+      cleanup();
+      // Pausing instead of destroying preserves the socket long enough for the
+      // route to return its OpenAI-shaped body-limit or timeout response.
+      request.pause();
+      reject(error);
+    };
+    const onData = (raw: Buffer): void => {
+      const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
       size += chunk.length;
-      if (size > limit) throw bodyTooLargeError();
-      chunks.push(chunk);
-    }
-  })();
-  // The losing side of the race below still settles with nobody awaiting it.
-  read.catch(() => undefined);
-  let disposeAbort = (): void => undefined;
-  try {
-    // Abort rejects the read without destroying the request, so a timed-out or
-    // disconnected client can still be answered on the still-open response.
-    await Promise.race([
-      read,
-      new Promise<never>((_, reject) => {
-        disposeAbort = listenForAbort(signal, (aborted) =>
-          reject(aborted.reason),
-        );
-      }),
-    ]);
-  } catch (error) {
-    if (error instanceof HttpError) throw error;
-    if (signal.aborted) throw signal.reason;
-    throw new HttpError(
-      400,
-      "The request body could not be read.",
-      "invalid_request_error",
-      "invalid_body",
-    );
-  } finally {
-    disposeAbort();
-  }
+      if (size > limit) {
+        fail(bodyTooLargeError());
+        return;
+      }
+      result.push(chunk);
+    };
+    const onEnd = (): void => {
+      cleanup();
+      resolve(result);
+    };
+    const onError = (): void =>
+      fail(
+        new HttpError(
+          400,
+          "The request body could not be read.",
+          "invalid_request_error",
+          "invalid_body",
+        ),
+      );
+    const onAbort = (): void => fail(signal.reason);
+    request.on("data", onData);
+    request.once("end", onEnd);
+    request.once("error", onError);
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
   try {
     return JSON.parse(Buffer.concat(chunks).toString("utf8"));
   } catch {
