@@ -256,7 +256,9 @@ test("auth write-back failures are best-effort and logged plainly", async () => 
     );
     assert.equal(failure?.level, "warn");
     assert.equal(typeof failure?.code, "string");
-    assert.equal(String(failure?.error).includes(targetHome), true);
+    assert.equal(failure?.source, join(sourceHome, "auth.json"));
+    assert.equal(failure?.target, join(targetHome, "auth.json"));
+    assert.equal(typeof failure?.error, "string");
   }, "app-server-auth-write-back-failure-test-");
 });
 
@@ -862,7 +864,9 @@ testWithPosixExecutable(
         );
         assert.equal(failure?.level, "warn");
         assert.equal(typeof failure?.code, "string");
-        assert.equal(String(failure?.error).includes(sourceHome), true);
+        assert.equal(failure?.source, join(sourceHome, "auth.json"));
+        assert.equal(failure?.target, join(codexHome, "auth.json"));
+        assert.equal(typeof failure?.error, "string");
         assert.equal(
           entries.some(
             (entry) => entry.event === "codex_auth_seed_failed_detail",

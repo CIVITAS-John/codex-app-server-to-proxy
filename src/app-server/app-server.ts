@@ -312,6 +312,9 @@ async function seedAuthCredentials(
     if (code === "ENOENT" || code === "EEXIST") return false;
     // Warn rather than fail: startup falls through to a normal login.
     log("warn", "codex_auth_seed_failed", {
+      // Some filesystem errors omit paths on Unix, so retain operation context.
+      source,
+      target,
       code: typeof code === "string" ? code : "UNKNOWN",
       error: error instanceof Error ? error.message : String(error),
     });
@@ -358,6 +361,9 @@ export async function writeBackAuthCredentials(
     if (code === "ENOENT") return;
     // Warn rather than fail: the child's own login is already usable.
     log("warn", "codex_auth_write_back_failed", {
+      // Some filesystem errors omit paths on Unix, so retain operation context.
+      source,
+      target,
       code: typeof code === "string" ? code : "UNKNOWN",
       error: error instanceof Error ? error.message : String(error),
     });

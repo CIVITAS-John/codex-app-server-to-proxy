@@ -2,7 +2,7 @@
 
 All notable user-facing changes are recorded here. This project follows semantic versioning once a version is published.
 
-## Unreleased
+## 0.1.0-rc.15 — July 30, 2026
 
 ### Changed
 
