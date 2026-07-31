@@ -123,7 +123,7 @@ test("CLI recovery uses the documented bounded retry schedule", () => {
   assert.equal(usage.includes("<root>/.codex-openai-proxy"), false);
   // Every configurable limit must be discoverable from the help output.
   assert.match(usage, /--request-timeout <duration>/);
-  assert.match(usage, /--sync-auth <always\|if-missing\|never>/);
+  assert.match(usage, /--sync-auth <always\|never>/);
   // Removed deadlines must not resurface in help: dynamic tool calls end
   // their turn immediately, so no tool or usage wait remains to configure.
   assert.equal(usage.includes("--tool-timeout"), false);
@@ -208,7 +208,7 @@ test("CLI reports a bind-time port conflict before starting app-server", async (
   }, "codex-proxy-port-test-");
 });
 
-test("CLI redacts configured paths from initial startup failures", async () => {
+test("CLI logs configured paths plainly in initial startup failures", async () => {
   await withTempDir(async (directory) => {
     const missingCodex = join(directory, "secret-client", "missing-codex");
     const child = spawn(
@@ -234,9 +234,13 @@ test("CLI redacts configured paths from initial startup failures", async () => {
     const [code] = await once(child, "exit");
     assert.equal(code, 1);
     assert.match(stderr, /startup_failed/);
-    assert.match(stderr, /\[REDACTED_PATH\]/);
-    assert.equal(stderr.includes(missingCodex), false);
-  }, "codex-proxy-redact-test-");
+    const failure = stderr
+      .trim()
+      .split(/\r?\n/u)
+      .map((line) => JSON.parse(line) as { event?: string; error?: string })
+      .find((entry) => entry.event === "startup_failed");
+    assert.equal(failure?.error?.includes(missingCodex), true);
+  }, "codex-proxy-plaintext-log-test-");
 });
 
 testWithPosixExecutable(
@@ -453,18 +457,6 @@ testWithPosixExecutable(
         initialTarget: "target",
         expected: "source",
         syncAuth: undefined,
-      },
-      {
-        name: "if-missing-existing",
-        initialTarget: "target",
-        expected: "target",
-        syncAuth: "if-missing",
-      },
-      {
-        name: "if-missing-empty",
-        initialTarget: undefined,
-        expected: "source",
-        syncAuth: "if-missing",
       },
       {
         name: "never",

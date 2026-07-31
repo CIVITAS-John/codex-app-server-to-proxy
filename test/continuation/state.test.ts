@@ -60,7 +60,6 @@ test("atomic mappings survive reload and supersede older thread responses", asyn
     const reloaded = new ResponseStore(directory);
     assert.equal(reloaded.get("response_1")?.state, "superseded");
     assert.equal(reloaded.get("response_2")?.state, "ready");
-    assert.equal(reloaded.get("response_2")?.reasoningEffortBound, true);
     assert.equal(reloaded.get("response_2")?.usageTotal?.totalTokens, 15);
     const disk = JSON.parse(
       await readFile(join(directory, "continuations.json"), "utf8"),
@@ -73,28 +72,24 @@ test("atomic mappings survive reload and supersede older thread responses", asyn
   }, "codex-proxy-state-");
 });
 
-test("restart tombstones only pending records that lack call metadata", async () => {
+test("restart drops pending records that lack call metadata", async () => {
   await withTempDir(async (directory) => {
     const store = new ResponseStore(directory);
     store.put({
-      responseId: "response_legacy",
+      responseId: "response_incomplete",
       threadId: "thread_1",
       state: "pending_tool",
-      callIds: ["call_1"],
       ...binding,
     });
     store.put({
       responseId: "response_durable",
       threadId: "thread_2",
       state: "pending_tool",
-      callIds: ["call_2"],
       pendingCalls: [{ callId: "call_2", name: "lookup", arguments: "{}" }],
       ...binding,
     });
     const reloaded = new ResponseStore(directory);
-    const tombstone = reloaded.get("response_legacy");
-    assert.equal(tombstone?.state, "expired");
-    assert.deepEqual(tombstone?.callIds, ["call_1"]);
+    assert.equal(reloaded.get("response_incomplete"), undefined);
     // A record carrying its call metadata is fully durable and stays pending.
     assert.equal(reloaded.get("response_durable")?.state, "pending_tool");
   }, "codex-proxy-state-");
@@ -139,6 +134,7 @@ test("state loading rejects records that cannot drive continuation", async () =>
     { ...valid, threadId: 5 },
     { ...valid, state: "half_written" },
     { ...valid, expiresAt: "soon" },
+    { ...valid, state: "pending_tool" },
     {
       ...valid,
       usageTotal: {
@@ -160,7 +156,6 @@ test("state loading rejects records that cannot drive continuation", async () =>
     },
     {
       ...valid,
-      callIds: ["call_1"],
       pendingCalls: [{ callId: "call_1", name: "lookup" }],
     },
     { ...valid, pendingCalls: [{ callId: "", name: "l", arguments: "{}" }] },
@@ -578,15 +573,13 @@ test("pending records with call metadata survive restart for implicit selection"
   }, "codex-proxy-state-");
 });
 
-test("legacy pending records without call metadata expire on load", async () => {
+test("pending records without call metadata are dropped on load", async () => {
   await withTempDir(async (directory) => {
     const store = new ResponseStore(directory);
-    // Written the way pre-metadata releases wrote suspensions: call IDs only.
     store.put({
-      responseId: "response_legacy",
+      responseId: "response_incomplete",
       threadId: "thread_1",
       state: "pending_tool",
-      callIds: ["call_1"],
       ...binding,
     });
     const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
@@ -595,13 +588,13 @@ test("legacy pending records without call metadata expire on load", async () => 
       rpc,
     );
 
-    assert.equal(restarted.store.get("response_legacy")?.state, "expired");
+    assert.equal(restarted.store.get("response_incomplete"), undefined);
     assert.throws(
       () => restarted.findPendingResponse(["call_1"]),
       (error: unknown) =>
         error instanceof HttpError &&
-        error.status === 410 &&
-        error.code === "expired_tool_continuation",
+        error.status === 404 &&
+        error.code === "unknown_tool_call_id",
     );
     rpc.close();
   }, "codex-proxy-state-");
@@ -619,7 +612,9 @@ test("implicit tool continuation rejects ambiguous expired tombstones", async ()
         threadId,
         state: "expired",
         ...binding,
-        callIds: ["call_shared"],
+        pendingCalls: [
+          { callId: "call_shared", name: "lookup", arguments: "{}" },
+        ],
       });
     const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
     const coordinator = new ContinuationCoordinator(store, rpc);

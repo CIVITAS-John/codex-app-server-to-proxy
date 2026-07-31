@@ -91,7 +91,6 @@ async function startLiveChatBackendOnce(
         codexPath: process.env.CODEX_PATH ?? "codex",
         codexHome: environment.codexHome,
         seedAuthFrom: process.env.CODEX_HOME ?? join(homedir(), ".codex"),
-        seedAuthMode: "always",
         root: environment.root,
         startupTimeoutMs: 30_000,
         shutdownTimeoutMs: 10_000,

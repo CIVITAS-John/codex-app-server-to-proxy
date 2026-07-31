@@ -921,6 +921,48 @@ test("normalizes interleaved text, reasoning, internal items, tools, usage, and 
   );
 });
 
+test("tool lifecycle output is emitted without truncation", () => {
+  const normalizer = new EventNormalizer();
+  const content = "o".repeat(70 * 1024);
+  const message = "m".repeat(10 * 1024);
+  const patch = { text: "p".repeat(70 * 1024) };
+  normalizer.normalize("item/started", {
+    threadId: "thread",
+    turnId: "turn",
+    item: {
+      type: "commandExecution",
+      id: "command",
+      command: "pwd",
+      status: "inProgress",
+    },
+  });
+
+  const progress = normalizer.normalize("item/commandExecution/outputDelta", {
+    threadId: "thread",
+    turnId: "turn",
+    itemId: "command",
+    delta: content,
+    message,
+    patch,
+  })[0]?.delta?.tool_results?.[0]?.result;
+  assert.equal(progress?.content, content);
+  assert.equal(progress?.message, message);
+  assert.deepEqual(progress?.patch, patch);
+
+  const completed = normalizer.normalize("item/completed", {
+    threadId: "thread",
+    turnId: "turn",
+    item: {
+      type: "commandExecution",
+      id: "command",
+      command: "pwd",
+      status: "completed",
+      aggregatedOutput: content,
+    },
+  })[0]?.delta?.tool_results?.[0]?.result;
+  assert.equal(completed?.content, content);
+});
+
 test("hides replayed dynamic lifecycle items without changing continuation finish reason", () => {
   /** Builds a generated dynamic-tool lifecycle notification for this turn. */
   const replayedDynamicTool = (method: "item/started" | "item/completed") => {
@@ -2262,7 +2304,7 @@ test("client disconnect interrupts an active app-server turn", async () => {
   });
 });
 
-test("unknown app-server events produce one transport-scoped safe diagnostic", async () => {
+test("unknown app-server events produce one transport-scoped plain diagnostic", async () => {
   await withTempDir(async (directory) => {
     const secret = `${await realpath(".")} https://secret.example/token=abc`;
     const entries: Array<Record<string, unknown>> = [];
@@ -2298,9 +2340,9 @@ test("unknown app-server events produce one transport-scoped safe diagnostic", a
       (entry) => entry.event === "unknown_app_server_event",
     );
     assert.equal(diagnostics.length, 1);
-    assert.match(String(diagnostics[0]?.method_fingerprint), /^[a-f0-9]{16}$/);
+    assert.equal(diagnostics[0]?.method, "future/diagnostic");
     assert.equal(diagnostics[0]?.params_type, "object");
-    assert.deepEqual(diagnostics[0]?.field_fingerprints, ["9c0211c51d04574f"]);
+    assert.deepEqual(diagnostics[0]?.fields, ["detail"]);
     assert.equal("request_id" in diagnostics[0]!, false);
     assert.equal(JSON.stringify(entries).includes(secret), false);
   }, "codex-unknown-event-");

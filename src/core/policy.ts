@@ -193,7 +193,7 @@ export function validateRequestPolicy(value: unknown): RequestPolicy {
   };
 }
 
-/** Parses the relevant portion of configRequirements/read strictly. */
+/** Parses managed requirements while skipping unsupported allowlist entries. */
 export function parsePolicyRequirements(value: unknown): PolicyRequirements {
   const response = record(value);
   if (!response || !("requirements" in response))
@@ -207,7 +207,6 @@ export function parsePolicyRequirements(value: unknown): PolicyRequirements {
       requirements.allowedApprovalPolicies,
       APPROVAL_POLICY_ORDER,
       "allowedApprovalPolicies",
-      true,
     ),
     allowedApprovalsReviewers: stringAllowlist(
       requirements.allowedApprovalsReviewers,
@@ -415,23 +414,24 @@ function requireAllowed<T extends string>(
     );
 }
 
-/** Parses a nullable managed string allowlist and rejects malformed entries. */
+/**
+ * Parses a nullable managed string allowlist and skips unsupported entries.
+ * Skipping only narrows the allowlist, so a managed value this proxy cannot
+ * represent — a newer mode, or a structured granular approval policy — is
+ * refused by `requireAllowed` rather than approximated.
+ */
 function stringAllowlist<T extends string>(
   value: unknown,
   supported: readonly T[],
   name: string,
-  allowGranular = false,
 ): T[] | null {
   if (value === null || value === undefined) return null;
   if (!Array.isArray(value))
     throw new Error(`configRequirements/read returned malformed ${name}.`);
   const result: T[] = [];
-  for (const entry of value) {
-    if (allowGranular && isGranularApproval(entry)) continue;
-    if (typeof entry !== "string" || !includesString(supported, entry))
-      throw new Error(`configRequirements/read returned malformed ${name}.`);
-    result.push(entry);
-  }
+  for (const entry of value)
+    if (typeof entry === "string" && includesString(supported, entry))
+      result.push(entry);
   return result;
 }
 
@@ -455,27 +455,4 @@ function includesString<T extends string>(
   value: string,
 ): value is T {
   return values.some((candidate) => candidate === value);
-}
-
-/** Recognizes the generated granular approval-policy shape for safe omission. */
-function isGranularApproval(value: unknown): boolean {
-  const outer = record(value);
-  const granular = record(outer?.granular);
-  if (
-    !outer ||
-    !granular ||
-    Object.keys(outer).some((key) => key !== "granular")
-  )
-    return false;
-  const required = ["sandbox_approval", "rules", "mcp_elicitations"];
-  const optional = ["skill_approval", "request_permissions"];
-  const accepted = [...required, ...optional];
-  return (
-    Object.keys(granular).every((key) => accepted.includes(key)) &&
-    required.every((key) => typeof granular[key] === "boolean") &&
-    optional.every(
-      (key) =>
-        granular[key] === undefined || typeof granular[key] === "boolean",
-    )
-  );
 }

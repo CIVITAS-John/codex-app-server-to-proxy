@@ -280,12 +280,12 @@ test("model, reasoning, cwd, tool, and policy binding mismatches fail before thr
   }
 });
 
-test("a pre-upgrade record accepts one ambiguous reasoning-effort continuation", async () => {
+test("a record without reasoning effort rejects an explicit effort", async () => {
   await withTempDir(async (directory) => {
     const configuredRoot = join(directory, "workspace");
     await mkdir(configuredRoot, { recursive: true });
     const root = await realpath(configuredRoot);
-    const responseId = "response_legacy_reasoning";
+    const responseId = "response_omitted_reasoning";
     await writeFile(
       join(directory, "continuations.json"),
       JSON.stringify({
@@ -308,38 +308,26 @@ test("a pre-upgrade record accepts one ambiguous reasoning-effort continuation",
     const fake = new ContinuationAppServer();
     const running = await startProxy(directory, fake);
     try {
-      const continued = await postChatCompletion(running.origin, {
+      const response = await postChatCompletion(running.origin, {
         model: "m",
         reasoning_effort: "high",
         previous_response_id: responseId,
         messages: [{ role: "user", content: "continue" }],
       });
-      assert.equal(continued.status, 200, await continued.clone().text());
-      const body = (await continued.json()) as { id: string };
-      assert.deepEqual(fake.methods, [
-        "thread/read",
-        "thread/resume",
-        "turn/start",
-      ]);
-
-      const rebound = new ResponseStore(directory).get(body.id);
-      assert.equal(rebound?.reasoningEffort, "high");
-      assert.equal(rebound?.reasoningEffortBound, true);
-
-      const omitted = await post(running.origin, body.id);
-      assert.equal(omitted.status, 409);
+      assert.equal(response.status, 409, await response.clone().text());
       assert.equal(
-        await responseErrorCode(omitted),
+        await responseErrorCode(response),
         "continuation_reasoning_effort_mismatch",
       );
+      assert.deepEqual(fake.methods, []);
     } finally {
       await running.proxy.close();
     }
-  }, "codex-continuation-legacy-reasoning-");
+  }, "codex-continuation-omitted-reasoning-");
 });
 
 test("terminal mappings fail as JSON before streaming headers or thread work", async () => {
-  for (const state of ["expired", "superseded", "corrupt"] as const) {
+  for (const state of ["expired", "superseded"] as const) {
     await withTempDir(async (directory) => {
       const fake = new ContinuationAppServer();
       const responseId = `response_${state}`;
@@ -360,10 +348,7 @@ test("terminal mappings fail as JSON before streaming headers or thread work", a
           undefined,
           true,
         );
-        assert.equal(
-          response.status,
-          state === "expired" ? 410 : state === "superseded" ? 409 : 500,
-        );
+        assert.equal(response.status, state === "expired" ? 410 : 409);
         assert.equal(
           response.headers.get("content-type"),
           "application/json; charset=utf-8",
@@ -372,9 +357,7 @@ test("terminal mappings fail as JSON before streaming headers or thread work", a
           await responseErrorCode(response),
           state === "expired"
             ? "expired_previous_response_id"
-            : state === "superseded"
-              ? "superseded_previous_response_id"
-              : "corrupt_response_state",
+            : "superseded_previous_response_id",
         );
         assert.deepEqual(fake.methods, []);
       } finally {

@@ -37,8 +37,8 @@ This repository builds `codex-openai-proxy`, a localhost-only TypeScript CLI tha
 - Tests must cover partial JSON-RPC frames, interleaved notifications, SSE backpressure, disconnects, duplicate tool results, process exit, and malformed inputs.
 - Live tests must be opt-in through explicit selection of the dedicated live configuration, run serially, cap output, and use only `gpt-5.6-luna`.
 - Never run a live test as part of the default `test` script or pull-request CI.
-- Redact login URLs, tokens, filesystem paths, prompts, and tool arguments from snapshots and logs where they could contain sensitive data.
-    - A first-run authorization URL may be written once to the interactive terminal as a login fallback, but must not enter structured logs, captured diagnostics, or persisted state.
+- Treat logs at every level as sensitive plaintext: they may contain login URLs, tokens, filesystem paths, prompts, and tool arguments.
+    - Do not check runtime log captures into snapshots, fixtures, diagnostics, or other persisted repository artifacts; use synthetic placeholders instead.
 
 ## Completion standard
 

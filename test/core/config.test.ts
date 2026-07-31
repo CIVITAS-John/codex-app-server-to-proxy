@@ -74,8 +74,8 @@ test("sync-auth validation defaults to always and accepts supported modes", () =
       syncAuth,
     );
   assert.throws(
-    () => parseServeOptions(["--sync-auth", "sometimes"]),
-    /--sync-auth must be always, if-missing, or never\./,
+    () => parseServeOptions(["--sync-auth", "if-missing"]),
+    /--sync-auth must be always or never\./,
   );
 });
 

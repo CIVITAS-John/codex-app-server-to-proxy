@@ -190,7 +190,7 @@ async function startAndWaitForLogin(
                 `Open this URL to sign in to ChatGPT:\n${login.authUrl}\n`,
               );
               options.log("warn", "browser_launch_failed", {
-                login_url: "[REDACTED]",
+                login_url: login.authUrl,
               });
             } else options.log("info", "browser_launch_succeeded");
           } else {
@@ -198,8 +198,8 @@ async function startAndWaitForLogin(
               `Open ${login.verificationUrl} and enter code ${login.userCode}.\n`,
             );
             options.log("info", "device_code_login_started", {
-              verification_url: "[REDACTED]",
-              user_code: "[REDACTED]",
+              verification_url: login.verificationUrl,
+              user_code: login.userCode,
             });
           }
           await completion;

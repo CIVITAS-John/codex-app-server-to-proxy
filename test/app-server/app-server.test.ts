@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import {
   chmod,
   mkdir,
@@ -39,8 +40,6 @@ test("stderr logging drops fragmented expected cancellation diagnostics only", (
   const stderr = new PassThrough();
   const entries: Array<Record<string, unknown>> = [];
   attachAppServerStderrLogging(stderr, {
-    root: process.cwd(),
-    diagnosticLogging: true,
     log: createLogger("debug", (entry) => entries.push(entry)),
   });
 
@@ -62,17 +61,16 @@ test("stderr logging drops fragmented expected cancellation diagnostics only", (
   );
 });
 
-test("stderr logging keeps diagnostics that only embed the expected record", () => {
+test("stderr logging suppresses every decoration of the expected record", () => {
   const stderr = new PassThrough();
   const entries: Array<Record<string, unknown>> = [];
   attachAppServerStderrLogging(stderr, {
-    root: process.cwd(),
-    diagnosticLogging: true,
     log: createLogger("debug", (entry) => entries.push(entry)),
   });
 
-  // A tool name or argument reaching app-server stderr must not suppress its
-  // own line by quoting the expected record, either mid-line or as a suffix.
+  // Interrupting a tool turn cancels one request per captured call, so the
+  // reporting module and line decoration are app-server implementation detail
+  // that must not resurface this expected result as a proxy warning.
   stderr.end(
     [
       "ERROR codex_core::tools::router: error=dynamic tool call was cancelled before receiving a response while draining",
@@ -85,10 +83,27 @@ test("stderr logging keeps diagnostics that only embed the expected record", () 
     entries
       .filter((entry) => entry.event === "app_server_stderr")
       .map((entry) => entry.message),
-    [
-      "ERROR codex_core::tools::router: error=dynamic tool call was cancelled before receiving a response while draining",
-      "ERROR codex_core::tools::registry: tool=codex_core::tools::router: error=dynamic tool call was cancelled before receiving a response",
-    ],
+    [],
+  );
+});
+
+test("stderr logging emits a final line that never received a newline", async () => {
+  const stderr = new PassThrough();
+  const entries: Array<Record<string, unknown>> = [];
+  attachAppServerStderrLogging(stderr, {
+    log: createLogger("debug", (entry) => entries.push(entry)),
+  });
+
+  // A child killed mid-write leaves an unterminated line; the reader flushes
+  // it once the stream ends rather than dropping it.
+  stderr.end("terminated mid-write");
+  await once(stderr, "end");
+
+  assert.deepEqual(
+    entries
+      .filter((entry) => entry.event === "app_server_stderr")
+      .map((entry) => entry.message),
+    ["terminated mid-write"],
   );
 });
 
@@ -212,7 +227,7 @@ test("auth write-back is a no-op when source and target homes match", async () =
   }, "app-server-auth-write-back-self-test-");
 });
 
-test("auth write-back failures are best-effort and path-free", async () => {
+test("auth write-back failures are best-effort and logged plainly", async () => {
   await withTempDir(async (directory) => {
     const sourceHome = join(directory, "private-source-home");
     const targetHome = join(directory, "private-target-home");
@@ -241,8 +256,7 @@ test("auth write-back failures are best-effort and path-free", async () => {
     );
     assert.equal(failure?.level, "warn");
     assert.equal(typeof failure?.code, "string");
-    assert.equal(JSON.stringify(failure).includes(sourceHome), false);
-    assert.equal(JSON.stringify(failure).includes(targetHome), false);
+    assert.equal(String(failure?.error).includes(targetHome), true);
   }, "app-server-auth-write-back-failure-test-");
 });
 
@@ -393,7 +407,6 @@ let initialized = false;`,
         startupTimeoutMs: 1_000,
         shutdownTimeoutMs: 100,
         log: createLogger("debug", (entry) => logs.push(JSON.stringify(entry))),
-        diagnosticLogging: true,
       });
       try {
         assert.deepEqual(app.requirements, {
@@ -463,7 +476,7 @@ let initialized = false;`,
           .filter((entry) => entry.event === "app_server_stderr");
         assert.equal(stderrLogs.length, 1);
         assert.equal(stderrLogs[0]?.level, "warn");
-        assert.equal(stderrLogs[0]?.message, "[REDACTED_HOME]/private-file");
+        assert.equal(stderrLogs[0]?.message, `${homedir()}/private-file`);
         assert.equal(
           logs.some((entry) => entry.includes("app_server_stderr_detail")),
           false,
@@ -583,7 +596,7 @@ testWithPosixExecutable(
 );
 
 testWithPosixExecutable(
-  "app-server seeds a fresh Codex home with existing auth credentials",
+  "app-server seeds from a source home and skips updates without one",
   async () => {
     await withTempDir(async (directory) => {
       const executable = join(directory, "codex");
@@ -621,13 +634,17 @@ testWithPosixExecutable(
       } finally {
         await app.stop();
       }
-      // The conservative library default is the historical seed-once behavior.
       await writeFile(
         join(sourceHome, "auth.json"),
         '{"fixture":"rotated"}',
         "utf8",
       );
-      const second = await startAppServer(startOptions);
+      // An absent source is how the CLI encodes `--sync-auth never`, so a
+      // rotated source must not reach an opted-out proxy-only login.
+      const second = await startAppServer({
+        ...startOptions,
+        seedAuthFrom: undefined,
+      });
       try {
         assert.equal(
           await readFile(join(codexHome, "auth.json"), "utf8"),
@@ -664,7 +681,6 @@ testWithPosixExecutable(
         codexPath: executable,
         codexHome,
         seedAuthFrom: sourceHome,
-        seedAuthMode: "always",
         root: directory,
         startupTimeoutMs: 1_000,
         shutdownTimeoutMs: 100,
@@ -710,7 +726,6 @@ testWithPosixExecutable(
         codexPath: executable,
         codexHome,
         seedAuthFrom: sourceHome,
-        seedAuthMode: "always",
         root: directory,
         startupTimeoutMs: 1_000,
         shutdownTimeoutMs: 100,
@@ -759,7 +774,6 @@ testWithPosixExecutable(
         codexPath: executable,
         codexHome,
         seedAuthFrom: sourceHome,
-        seedAuthMode: "always",
         root: directory,
         startupTimeoutMs: 1_000,
         shutdownTimeoutMs: 100,
@@ -797,7 +811,6 @@ testWithPosixExecutable(
         codexPath: executable,
         codexHome,
         seedAuthFrom: join(directory, "missing-home"),
-        seedAuthMode: "always",
         root: directory,
         startupTimeoutMs: 1_000,
         shutdownTimeoutMs: 100,
@@ -820,7 +833,7 @@ testWithPosixExecutable(
 );
 
 testWithPosixExecutable(
-  "auth-seed failures remain path-free and do not block startup",
+  "auth-seed failures are logged plainly and do not block startup",
   async () => {
     await withTempDir(async (directory) => {
       const executable = join(directory, "codex");
@@ -838,7 +851,6 @@ testWithPosixExecutable(
         codexPath: executable,
         codexHome,
         seedAuthFrom: sourceHome,
-        seedAuthMode: "always",
         root: directory,
         startupTimeoutMs: 1_000,
         shutdownTimeoutMs: 100,
@@ -850,8 +862,7 @@ testWithPosixExecutable(
         );
         assert.equal(failure?.level, "warn");
         assert.equal(typeof failure?.code, "string");
-        assert.equal(JSON.stringify(entries).includes(sourceHome), false);
-        assert.equal(JSON.stringify(entries).includes(codexHome), false);
+        assert.equal(String(failure?.error).includes(sourceHome), true);
         assert.equal(
           entries.some(
             (entry) => entry.event === "codex_auth_seed_failed_detail",

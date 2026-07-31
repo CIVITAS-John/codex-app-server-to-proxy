@@ -204,7 +204,7 @@ test("authentication observes completion delivered with the start response", asy
   });
 });
 
-test("failed browser launch prints the URL only to the terminal sink", async () => {
+test("failed browser launch prints and plainly logs the URL", async () => {
   const terminal: string[] = [];
   const logs: string[] = [];
   await ensureAuthenticated({
@@ -216,20 +216,35 @@ test("failed browser launch prints the URL only to the terminal sink", async () 
     launch: async () => false,
   });
   assert.match(terminal.join(""), /token=secret/);
-  assert.doesNotMatch(logs.join(""), /token=secret|example\.invalid/);
+  assert.match(
+    logs.join(""),
+    /https:\/\/example\.invalid\/oauth\?token=secret/,
+  );
 });
 
 test("headless auth uses device code and login failures reject", async () => {
   const terminal: string[] = [];
+  const logs: Record<string, unknown>[] = [];
   const result = await ensureAuthenticated({
     rpc: fakeRpc("device"),
-    log: silentLogger,
+    log: createLogger("debug", (entry) => logs.push(entry)),
     timeoutMs: 100,
     interactive: false,
     terminal: (value) => terminal.push(value),
   });
   assert.deepEqual(result, { recoveredLogin: false });
   assert.match(terminal.join(""), /SAFE-CODE/);
+  assert.deepEqual(
+    logs.find((entry) => entry.event === "device_code_login_started"),
+    {
+      time: logs.find((entry) => entry.event === "device_code_login_started")
+        ?.time,
+      level: "info",
+      event: "device_code_login_started",
+      verification_url: "https://example.invalid/device",
+      user_code: "SAFE-CODE",
+    },
+  );
   await assert.rejects(
     ensureAuthenticated({
       rpc: fakeRpc("failure"),

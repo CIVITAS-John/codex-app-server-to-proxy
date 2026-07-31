@@ -397,7 +397,7 @@ test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
   },
 );
 
-test("requirements parsing treats null as unrestricted and rejects malformed data", () => {
+test("requirements parsing treats null as unrestricted and skips unknown entries", () => {
   assert.deepEqual(
     parsePolicyRequirements({ requirements: null }),
     UNRESTRICTED_POLICY_REQUIREMENTS,
@@ -450,6 +450,32 @@ test("requirements parsing treats null as unrestricted and rejects malformed dat
       allowedWebSearchModes: ["disabled", "indexed"],
     },
   );
+  assert.deepEqual(
+    parsePolicyRequirements({
+      requirements: {
+        allowedApprovalPolicies: [
+          "future-policy",
+          7,
+          { granular: null, future_field: true },
+          { granular: undefined },
+          "never",
+        ],
+        allowedApprovalsReviewers: [
+          "future-reviewer",
+          false,
+          "guardian_subagent",
+        ],
+        allowedSandboxModes: ["disabled", {}, "workspace-write"],
+        allowedWebSearchModes: ["future-mode", null, "live"],
+      },
+    }),
+    {
+      allowedApprovalPolicies: ["never"],
+      allowedApprovalsReviewers: ["guardian_subagent"],
+      allowedSandboxModes: ["workspace-write"],
+      allowedWebSearchModes: ["live"],
+    },
+  );
   for (const malformed of [
     null,
     {},
@@ -458,13 +484,8 @@ test("requirements parsing treats null as unrestricted and rejects malformed dat
       requirements: {
         allowedApprovalPolicies: null,
         allowedApprovalsReviewers: null,
-        allowedSandboxModes: ["unknown"],
+        allowedSandboxModes: "read-only",
         allowedWebSearchModes: null,
-      },
-    },
-    {
-      requirements: {
-        allowedSandboxModes: ["disabled"],
       },
     },
   ])

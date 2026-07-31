@@ -1,5 +1,4 @@
 import type { LogLevel } from "./config.js";
-import { redact } from "./redact.js";
 
 /** Numeric severity ordering used for log filtering. */
 const priorities: Record<LogLevel, number> = {
@@ -12,13 +11,7 @@ const priorities: Record<LogLevel, number> = {
 /** Receives one structured log entry. */
 export type LogWriter = (entry: Record<string, unknown>) => void;
 
-/** Paths that default-visible failure summaries must mask. */
-export interface RedactionContext {
-  root: string;
-  sensitivePaths: readonly string[];
-}
-
-/** Structured logger with failure reporting bound to one redaction context. */
+/** Structured logger with plain failure reporting. */
 export interface Logger {
   (entryLevel: LogLevel, event: string, fields?: Record<string, unknown>): void;
   failure(event: string, fields: Record<string, unknown>, error: unknown): void;
@@ -38,7 +31,6 @@ export function writeStartupError(error: unknown): void {
 export function createLogger(
   level: LogLevel,
   write: LogWriter = defaultWriter,
-  redaction: RedactionContext = { root: "", sensitivePaths: [] },
 ): Logger {
   const log = ((
     entryLevel: LogLevel,
@@ -59,11 +51,7 @@ export function createLogger(
     error: unknown,
   ): void => {
     const message = error instanceof Error ? error.message : String(error);
-    log("error", event, {
-      ...fields,
-      error: redact(message, redaction.root, redaction.sensitivePaths),
-    });
-    log("debug", `${event}_detail`, { ...fields, error: message });
+    log("error", event, { ...fields, error: message });
   };
   return log;
 }

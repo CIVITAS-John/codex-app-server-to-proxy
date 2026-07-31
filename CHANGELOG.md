@@ -8,6 +8,10 @@ All notable user-facing changes are recorded here. This project follows semantic
 
 - Pins `@openai/codex` to exactly `0.146.0` (previously `0.145.0`), refreshes the experimental app-server TypeScript and JSON Schema contract, and requires `--codex-path` overrides to report the new version.
 - Proxy-owned Codex startup temporarily clones `models_cache.json` to a separate `models.no-responses-lite.json` catalog, forces `use_responses_lite: false` for every model, and removes `tool_mode` from originally-Lite models that advertise native parallel-tool support so declared client functions use direct Responses calls. It selects the clone through a marked `model_catalog_json` block. A cache created during first-run setup causes one private app-server restart before readiness; the Codex-owned cache is never edited. The opt-in live contract now requires two independent client tool calls in one batch and refuses to make a model call unless its ephemeral proxy-style Codex home loaded this override.
+- **Breaking:** `--sync-auth if-missing` was removed. `--sync-auth` now accepts only `always` (the default newest-wins synchronization) or `never`.
+- **Breaking:** The unreleased schema-version-0 continuation store now accepts only the current record shape. Compatibility-only reasoning bindings, duplicate call-ID storage, the legacy pending-record transition, and the unused `corrupt` record state were removed; older prerelease records missing current required data are dropped on load and can produce a one-time continuation error.
+- Structured logs are now plaintext at every level and may contain paths, login URLs, tokens, prompts, tool data, or child stderr. Treat log captures as sensitive.
+- Unknown managed-policy allowlist entries are skipped, duplicate dynamic-tool call IDs are deduplicated, and exposed internal tool-result values are no longer truncated. The typed `protocol/fixtures/exposed-events.ts` source is now the sole exposed-event corpus.
 
 ### Fixed
 

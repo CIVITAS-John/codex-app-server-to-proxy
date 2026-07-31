@@ -700,13 +700,6 @@ function captureToolBatch(
         event.type === "dynamic_tool",
     )
     .map((event) => event.call);
-  const rawCalls = captured
-    .filter(
-      (event): event is Extract<IngressEvent, { type: "raw_dynamic_tool" }> =>
-        event.type === "raw_dynamic_tool" &&
-        matchesTurn(event.params, handle.threadId, handle.turnId),
-    )
-    .map((event) => event.call);
   if (
     calls.some(
       (call) =>
@@ -719,34 +712,6 @@ function captureToolBatch(
         message: "Dynamic tool correlation mismatch",
       });
     throw new Error("Dynamic tool request did not match the active turn.");
-  }
-  const callbackCalls = calls.map(toStoredToolCall);
-  const invalidRawIds =
-    new Set(rawCalls.map((call) => call.callId)).size !== rawCalls.length;
-  const invalidCallbackIds =
-    new Set(callbackCalls.map((call) => call.callId)).size !==
-    callbackCalls.length;
-  const rawById = new Map(rawCalls.map((call) => [call.callId, call]));
-  const conflictingCallback = callbackCalls.some((call) => {
-    const raw = rawById.get(call.callId);
-    return raw !== undefined && raw.name !== call.name;
-  });
-  if (invalidRawIds || invalidCallbackIds || conflictingCallback) {
-    for (const call of calls)
-      try {
-        options.rpc.respondError(call.request.id, {
-          code: -32602,
-          message: "Dynamic tool call IDs must be unique",
-        });
-      } catch {
-        // A closed transport has already made the request unanswerable.
-      }
-    throw new HttpError(
-      502,
-      "The app-server returned duplicate dynamic tool call IDs.",
-      "server_error",
-      "invalid_dynamic_tool_batch",
-    );
   }
   const stored: StoredToolCall[] = [];
   const seen = new Set<string>();
@@ -816,12 +781,7 @@ async function resumeContinuation(
   if (!stored) continuationFailure(404, "unknown_previous_response_id");
   if (stored.model !== binding.model)
     continuationFailure(409, "continuation_model_mismatch");
-  // Grandfather schema-version-0 records that predate effort binding.
-  if (
-    (stored.reasoningEffortBound === true ||
-      stored.reasoningEffort !== undefined) &&
-    stored.reasoningEffort !== binding.reasoningEffort
-  )
+  if (stored.reasoningEffort !== binding.reasoningEffort)
     continuationFailure(409, "continuation_reasoning_effort_mismatch");
   if (stored.cwd !== binding.cwd)
     continuationFailure(409, "continuation_cwd_mismatch");
@@ -835,16 +795,14 @@ async function resumeContinuation(
   const { terminalToolResults } = request;
   if (
     stored.state === "expired" &&
-    stored.callIds?.length &&
+    stored.pendingCalls?.length &&
     terminalToolResults.length
   )
     continuationFailure(410, "expired_tool_continuation");
   if (stored.state === "pending_tool") {
     if (!terminalToolResults.length)
       continuationFailure(409, "tool_results_required");
-    const pending = stored.pendingCalls;
-    // The loader tombstones legacy records without call metadata.
-    if (!pending?.length) continuationFailure(410, "expired_tool_continuation");
+    const pending = stored.pendingCalls!;
     const results = validateToolResults(
       request.messages,
       terminalToolResults,
@@ -886,8 +844,6 @@ async function resumeContinuation(
     continuationFailure(410, "expired_previous_response_id");
   if (stored.state === "superseded")
     continuationFailure(409, "superseded_previous_response_id");
-  if (stored.state !== "ready")
-    continuationFailure(500, "corrupt_response_state");
   if (terminalToolResults.length)
     continuationFailure(409, "tool_results_without_pending_call");
   acquireThread(handle, options, onToolRequest);

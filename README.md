@@ -35,10 +35,10 @@ Notes:
 
 - Completions return `app_server_not_ready` and `/ready` returns 503 until login finishes.
 - The login deadline is fixed at 5 minutes.
-- `--sync-auth if-missing` restores the earlier copy-once behavior. `--sync-auth never` leaves the proxy's Codex home untouched, including when the source has newer credentials.
-- The proxy writes a recovered login back to the main Codex home only after startup proved a pulled credential unusable and fresh recovery login succeeded. It uses a best-effort strictly-newer guard and atomic replacement for an existing older `auth.json`; `if-missing` and `never` never write back, and the proxy never creates the target.
+- `--sync-auth never` leaves the proxy's Codex home untouched, including when the source has newer credentials. The only other mode is the default, `always`.
+- The proxy writes a recovered login back to the main Codex home only after startup proved a pulled credential unusable and fresh recovery login succeeded. It uses a best-effort strictly-newer guard and atomic replacement for an existing older `auth.json`; `never` does not write back, and the proxy never creates the target.
 - ChatGPT refresh tokens are single-use. Sharing one login between the Codex CLI and proxy means either side can invalidate the other's stored refresh token. For heavy simultaneous use, choose `--sync-auth never` and complete a proxy-only login.
-- Treat printed authorization URLs and device codes as credentials — don't paste them into issues or logs.
+- Treat authorization URLs and device codes as credentials. Plaintext proxy logs may contain them, so keep log captures local and never paste them into issues without reviewing the full contents.
 - The proxy's login lives in its Codex home; deleting `~/.codex-openai-proxy/codex-home` signs the proxy out without touching the Codex CLI's own `~/.codex` session.
 
 ### Temporary Responses Lite override
@@ -192,13 +192,13 @@ The JSON Schema ships with the package at `protocol/schemas/x-codex.schema.json`
 
 When Codex reports exact usage for the turn, responses include standard `prompt_tokens`, `completion_tokens`, and `total_tokens`, plus cached-input and reasoning-token detail when available. When no complete record exists, `usage` is omitted — never estimated.
 
-One response can span several Codex model requests, for example when internal tools run before the answer. Usage covers every request the response reported, not only the last one, so reasoning tokens still account for reasoning summaries streamed earlier in the same response. The continuation mapping retains the exact cumulative total at each response boundary; a prerelease mapping that lacks that snapshot safely reports only app-server's exact last-request usage once. A response that ends in `finish_reason: "tool_calls"` ends its Codex turn immediately, which flushes that turn's exact usage, so it reports the work up to the call and the continuation counts from there. Those tokens are never dropped, never estimated, and never counted twice — this includes reasoning tokens on a tool call that is the final desired result and is never continued.
+One response can span several Codex model requests, for example when internal tools run before the answer. Usage covers every request the response reported, not only the last one, so reasoning tokens still account for reasoning summaries streamed earlier in the same response. The continuation mapping retains the exact cumulative total at each response boundary. A response that ends in `finish_reason: "tool_calls"` ends its Codex turn immediately, which flushes that turn's exact usage, so it reports the work up to the call and the continuation counts from there. Those tokens are never dropped, never estimated, and never counted twice — this includes reasoning tokens on a tool call that is the final desired result and is never continued.
 
 ## Safety and limits
 
 - The listener accepts loopback only (`127.0.0.1`, `::1`, `localhost`); non-loopback `Host` authorities and any request with an `Origin` header are rejected.
 - There is no local bearer-token check, so any process running as your user can call the proxy. See the [security model](https://github.com/CIVITAS-John/codex-app-server-to-proxy/blob/main/docs/security.md).
-- Structured JSON logs go to stderr. Default logs omit paths and command details; `--log-level debug` may reveal them, so review debug output before sharing.
+- Structured JSON logs go to stderr in plaintext and are not redacted. Any level may contain filesystem paths, login URLs, tokens, prompts, child stderr, or tool details; treat every log capture as sensitive.
 
 Default limits (all configurable via CLI flags):
 
@@ -222,7 +222,7 @@ The request deadline aborts downstream work and closes any response that is stil
 | `--codex-path` override rejected | The override must report exactly `codex-cli 0.146.0` (the version bundled with this package); remove the flag to use the bundled executable      |
 | Policy request denied            | Managed requirements disallow the value; the proxy never silently weakens policy                                                                 |
 
-For deeper diagnosis, temporarily add `--log-level debug` — but treat its output as sensitive.
+For deeper diagnosis, temporarily add `--log-level debug`. All log levels are sensitive; debug adds more diagnostic detail.
 
 ## Uninstall and cleanup
 

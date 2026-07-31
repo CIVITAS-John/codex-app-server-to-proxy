@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { JsonRpcTransport } from "../app-server/json-rpc.js";
 import { record } from "../core/canonical.js";
 import type { Logger } from "../core/logger.js";
@@ -33,7 +32,7 @@ export interface NormalizedToolCall {
   function: NormalizedFunction;
 }
 
-/** Bounded lifecycle data attached to one normalized tool result. */
+/** Lifecycle data attached to one normalized tool result. */
 export interface NormalizedToolResultData {
   status: string;
   content?: unknown;
@@ -487,7 +486,7 @@ function internalToolResult(
     function: call.function,
     result: {
       status: typeof item.status === "string" ? item.status : "completed",
-      ...(result !== undefined ? { content: boundValue(result) } : {}),
+      ...(result !== undefined ? { content: result } : {}),
       ...(item.exitCode !== undefined ? { exit_code: item.exitCode } : {}),
       ...(item.error !== undefined
         ? { error: normalizeError(item.error) }
@@ -496,21 +495,16 @@ function internalToolResult(
   };
 }
 
-/** Maps correlated item deltas to a bounded in-progress tool result. */
+/** Maps correlated item deltas to an in-progress tool result. */
 function progressToolResult(
   method: string,
   params: Record<string, unknown>,
   call: NormalizedToolCall,
 ): NormalizedToolResult {
   const subtype = method.slice("item/".length).split("/")[1] ?? "update";
-  const output =
-    typeof params.delta === "string"
-      ? params.delta.slice(0, 64 * 1024)
-      : undefined;
+  const output = typeof params.delta === "string" ? params.delta : undefined;
   const message =
-    typeof params.message === "string"
-      ? params.message.slice(0, 8 * 1024)
-      : undefined;
+    typeof params.message === "string" ? params.message : undefined;
   return {
     id: String(params.itemId),
     type: "function",
@@ -521,18 +515,9 @@ function progressToolResult(
       ...(typeof params.stream === "string" ? { stream: params.stream } : {}),
       ...(output !== undefined ? { content: output } : {}),
       ...(message !== undefined ? { message } : {}),
-      ...(params.patch !== undefined
-        ? { patch: boundValue(params.patch) }
-        : {}),
+      ...(params.patch !== undefined ? { patch: params.patch } : {}),
     },
   };
-}
-
-/** Bounds structured tool payloads without changing primitive values. */
-function boundValue(value: unknown): unknown {
-  if (typeof value === "string") return value.slice(0, 64 * 1024);
-  const encoded = JSON.stringify(value);
-  return encoded.length <= 64 * 1024 ? value : encoded.slice(0, 64 * 1024);
 }
 
 /** Reduces an app-server error to its documented structured public fields. */
@@ -583,7 +568,7 @@ function toUsage(value: Record<string, unknown>): Usage | undefined {
   return result;
 }
 
-/** Records safe structural metadata once per unexposed method and transport. */
+/** Records plain structural metadata once per unexposed method and transport. */
 export function diagnoseUnexposedNotification(
   method: string,
   params: unknown,
@@ -601,20 +586,15 @@ export function diagnoseUnexposedNotification(
   const value = record(params);
   const keys = value ? Object.keys(value) : [];
   log("debug", "unknown_app_server_event", {
-    method_fingerprint: diagnosticFingerprint(method),
+    method,
     params_type: Array.isArray(params)
       ? "array"
       : params === null
         ? "null"
         : typeof params,
     field_count: keys.length,
-    field_fingerprints: keys.slice(0, 32).map(diagnosticFingerprint).sort(),
+    fields: keys,
   });
-}
-
-/** Hashes an untrusted diagnostic name without retaining its sensitive value. */
-function diagnosticFingerprint(value: string): string {
-  return createHash("sha256").update(value).digest("hex").slice(0, 16);
 }
 
 /** Rejects notifications already established as belonging to another turn. */

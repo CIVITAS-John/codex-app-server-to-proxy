@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, vi } from "vitest";
 import { ResponseStore } from "../../src/continuation/state.js";
@@ -1610,7 +1610,7 @@ test("a failed interrupt rejects the response and makes its batch non-replayable
   }, "codex-tool-interrupt-fail-");
 });
 
-test("duplicate app-server tool call IDs fail before persistence or exposure", async () => {
+test("duplicate app-server tool call IDs are deduplicated by first arrival", async () => {
   await withTempDir(async (directory) => {
     const fake = new ToolAppServer(
       true,
@@ -1630,16 +1630,23 @@ test("duplicate app-server tool call IDs fail before persistence or exposure", a
         ],
         messages: [{ role: "user", content: "tools" }],
       });
-      assert.equal(response.status, 502);
-      assert.equal(
-        await responseErrorCode(response),
-        "invalid_dynamic_tool_batch",
-      );
-      assert.deepEqual(fake.rejections, [
-        { id: 902, code: -32602 },
-        { id: 901, code: -32602 },
+      assert.equal(response.status, 200, await response.clone().text());
+      const body = (await response.json()) as CompletionBody;
+      assert.deepEqual(body.choices[0]!.message.tool_calls, [
+        {
+          id: "call_b",
+          function: { name: "second", arguments: '{"fragment":"b"}' },
+          type: "function",
+        },
       ]);
-      assert.equal(existsSync(join(directory, "continuations.json")), false);
+      assert.deepEqual(fake.rejections, []);
+      const pending = persistedRecords(directory).find(
+        (record) => record.responseId === body.id,
+      );
+      assert.deepEqual(pending?.pendingCalls, [
+        { callId: "call_b", name: "second", arguments: '{"fragment":"b"}' },
+      ]);
+      assert.equal("callIds" in (pending ?? {}), false);
     } finally {
       await proxy.close();
     }

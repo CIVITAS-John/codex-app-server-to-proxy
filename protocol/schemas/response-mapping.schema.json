@@ -20,25 +20,19 @@
       "properties": {
         "responseId": { "type": "string", "minLength": 1 },
         "threadId": { "type": "string", "minLength": 1 },
-        "state": { "enum": ["ready", "pending_tool", "expired", "superseded", "corrupt"] },
+        "state": { "enum": ["ready", "pending_tool", "expired", "superseded"] },
         "model": { "type": "string", "minLength": 1 },
         "reasoningEffort": { "type": "string", "minLength": 1 },
-        "reasoningEffortBound": { "const": true },
         "cwd": { "type": "string", "minLength": 1 },
         "toolsHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
         "policyHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
         "createdAt": { "type": "number" },
         "expiresAt": { "type": "number" },
-        "callIds": {
-          "type": "array",
-          "uniqueItems": true,
-          "items": { "type": "string" }
-        },
         "pendingCalls": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "$comment": "pendingCalls.callId values must be unique and exactly match callIds; runtime validation enforces this cross-field invariant.",
+          "$comment": "pendingCalls.callId values must be unique; runtime validation enforces this invariant.",
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -62,7 +56,16 @@
             "totalTokens": { "type": "number", "minimum": 0 }
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "state": { "const": "pending_tool" } },
+            "required": ["state"]
+          },
+          "then": { "required": ["pendingCalls"] }
+        }
+      ]
     }
   }
 }

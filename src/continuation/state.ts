@@ -44,16 +44,11 @@ export interface StoredToolCall {
 
 /** One opaque response-to-thread record persisted by the proxy. */
 export interface ResponseRecord extends ThreadBinding {
-  /** Marks records written after reasoning effort became an exact binding. */
-  reasoningEffortBound?: true;
   responseId: string;
   threadId: string;
-  // `corrupt` is a fail-closed persisted sentinel retained for compatibility and
-  // future corruption marking even though current writes do not assign it.
-  state: "ready" | "pending_tool" | "expired" | "superseded" | "corrupt";
+  state: "ready" | "pending_tool" | "expired" | "superseded";
   createdAt: number;
   expiresAt: number;
-  callIds?: string[];
   /**
    * Full call metadata for a `pending_tool` record. The continuation rebuilds
    * the `function_call`/`function_call_output` pairs it injects from this, so
@@ -95,8 +90,6 @@ export class ResponseStore {
     const now = Date.now();
     const stored = {
       ...record,
-      // Absence identifies ambiguous records written by pre-upgrade releases.
-      reasoningEffortBound: true as const,
       createdAt: now,
       expiresAt: now + this.retentionMs,
     };
@@ -140,11 +133,13 @@ export class ResponseStore {
   /** Finds durable records containing every requested dynamic-tool call ID. */
   findByCallIds(callIds: readonly string[]): ResponseRecord[] {
     const requested = new Set(callIds);
-    return [...this.#records.values()].filter(
-      (record) =>
-        record.callIds !== undefined &&
-        [...requested].every((id) => record.callIds!.includes(id)),
-    );
+    return [...this.#records.values()].filter((record) => {
+      const stored = record.pendingCalls?.map((call) => call.callId);
+      return (
+        stored !== undefined &&
+        [...requested].every((id) => stored.includes(id))
+      );
+    });
   }
 
   /** Loads valid records and quarantines an unreadable store logically as empty. */
@@ -163,12 +158,6 @@ export class ResponseStore {
       for (const record of records)
         if (isResponseRecord(record))
           this.#records.set(record.responseId, { ...record });
-      // Legacy pending records predate persisted call metadata and relied on a
-      // process-local responder, so only their safe tombstone can survive.
-      // Records carrying pendingCalls are fully durable and load unchanged.
-      for (const record of this.#records.values())
-        if (record.state === "pending_tool" && !record.pendingCalls?.length)
-          record.state = "expired";
       this.#prune(Date.now());
       this.#save();
     } catch {
@@ -404,7 +393,6 @@ export class ContinuationCoordinator {
       threadId,
       state: "pending_tool",
       ...binding,
-      callIds,
       pendingCalls: calls,
     });
   }
@@ -509,7 +497,6 @@ const VALID_RECORD_STATES = new Set([
   "pending_tool",
   "expired",
   "superseded",
-  "corrupt",
 ]);
 
 /**
@@ -540,12 +527,13 @@ function isResponseRecord(value: unknown): value is ResponseRecord {
     Number.isFinite(record.expiresAt) &&
     (record.usageTotal === undefined ||
       tokenUsageCounters(record.usageTotal) !== undefined) &&
-    (record.callIds === undefined ||
-      (Array.isArray(record.callIds) &&
-        record.callIds.every((id) => typeof id === "string"))) &&
     (record.pendingCalls === undefined ||
       (Array.isArray(record.pendingCalls) &&
-        record.pendingCalls.every(isStoredToolCall)))
+        record.pendingCalls.length > 0 &&
+        record.pendingCalls.every(isStoredToolCall) &&
+        new Set(record.pendingCalls.map((call) => call.callId)).size ===
+          record.pendingCalls.length)) &&
+    (record.state !== "pending_tool" || record.pendingCalls !== undefined)
   );
 }
 

@@ -56,7 +56,7 @@ export const LOG_LEVELS = ["debug", "info", "warn", "error"] as const;
 export type LogLevel = (typeof LOG_LEVELS)[number];
 
 /** Supported credential synchronization modes. */
-export const SYNC_AUTH_MODES = ["always", "if-missing", "never"] as const;
+export const SYNC_AUTH_MODES = ["always", "never"] as const;
 
 /** A supported credential synchronization mode. */
 export type SyncAuthMode = (typeof SYNC_AUTH_MODES)[number];
@@ -135,7 +135,9 @@ function oneOf<T extends string>(
     const choices =
       allowed.length < 2
         ? (last ?? "a supported value")
-        : `${allowed.slice(0, -1).join(", ")}, or ${last}`;
+        : allowed.length === 2
+          ? `${allowed[0]} or ${last}`
+          : `${allowed.slice(0, -1).join(", ")}, or ${last}`;
     throw new Error(`${name} must be ${choices}.`);
   }
   return selected;

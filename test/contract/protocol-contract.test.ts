@@ -85,35 +85,14 @@ test("generated artifacts pin the exact experimental Codex version", async () =>
   );
 });
 
-test("every claimed exposed app-server event has a synthetic fixture", async () => {
-  const claimed = (await readJson(
-    "protocol/fixtures/exposed-events.json",
-  )) as string[];
-  const lines = (
-    await readFile(
-      new URL("protocol/fixtures/exposed-events.jsonl", root),
-      "utf8",
-    )
-  )
-    .trim()
-    .split("\n");
-  const fixtures = lines.map(
-    (line) => JSON.parse(line) as { method: string; id?: unknown },
-  );
-  const fixtureMethods = fixtures.map((fixture) => fixture.method);
-  assert.deepEqual(
-    fixtures,
-    exposedEvents,
-    "JSONL corpus drifted from its generated-protocol-typed source",
-  );
-  assert.equal(new Set(claimed).size, claimed.length, "duplicate event claim");
+test("every exposed app-server event has one typed synthetic fixture", () => {
+  const fixtureMethods = exposedEvents.map((fixture) => fixture.method);
   assert.equal(
     new Set(fixtureMethods).size,
     fixtureMethods.length,
     "duplicate event fixture",
   );
-  assert.deepEqual([...fixtureMethods].sort(), [...claimed].sort());
-  const fixtureNotifications = fixtures
+  const fixtureNotifications = exposedEvents
     .filter((fixture) => !("id" in fixture))
     .map((fixture) => fixture.method);
   assert.deepEqual(
@@ -135,9 +114,9 @@ test("continuation schema examples agree with the production store reader", asyn
         properties: {
           responseId: { minLength: number };
           reasoningEffort: { type: string; minLength: number };
-          reasoningEffortBound: { const: boolean };
+          state: { enum: string[] };
           toolsHash: { pattern: string };
-          callIds: { uniqueItems: boolean };
+          pendingCalls: { minItems: number };
           usageTotal: {
             additionalProperties: boolean;
             required: string[];
@@ -152,9 +131,14 @@ test("continuation schema examples agree with the production store reader", asyn
   assert.equal(recordSchema.properties.responseId.minLength, 1);
   assert.equal(recordSchema.properties.reasoningEffort.type, "string");
   assert.equal(recordSchema.properties.reasoningEffort.minLength, 1);
-  assert.equal(recordSchema.properties.reasoningEffortBound.const, true);
+  assert.deepEqual(recordSchema.properties.state.enum, [
+    "ready",
+    "pending_tool",
+    "expired",
+    "superseded",
+  ]);
   assert.equal(recordSchema.properties.toolsHash.pattern, "^[a-f0-9]{64}$");
-  assert.equal(recordSchema.properties.callIds.uniqueItems, true);
+  assert.equal(recordSchema.properties.pendingCalls.minItems, 1);
   assert.equal(recordSchema.properties.usageTotal.additionalProperties, false);
   assert.deepEqual(recordSchema.properties.usageTotal.required.sort(), [
     "cachedInputTokens",
@@ -174,7 +158,6 @@ test("continuation schema examples agree with the production store reader", asyn
     policyHash: "b".repeat(64),
     createdAt: 1,
     expiresAt: Date.now() + 60_000,
-    callIds: ["call_1", "call_2"],
     usageTotal: {
       inputTokens: 10,
       cachedInputTokens: 2,
@@ -186,7 +169,7 @@ test("continuation schema examples agree with the production store reader", asyn
   assert.deepEqual(
     [...recordSchema.required].sort(),
     Object.keys(accepted)
-      .filter((key) => key !== "callIds" && key !== "usageTotal")
+      .filter((key) => key !== "usageTotal")
       .sort(),
   );
   assert.equal(
@@ -198,7 +181,6 @@ test("continuation schema examples agree with the production store reader", asyn
       await loadContinuationFixture({
         ...accepted,
         reasoningEffort: "high",
-        reasoningEffortBound: true,
       })
     )?.reasoningEffort,
     "high",
@@ -228,6 +210,7 @@ test("continuation schema examples agree with the production store reader", asyn
     { ...accepted, threadId: 5 },
     { ...accepted, createdAt: null },
     { ...accepted, state: "half_written" },
+    { ...accepted, state: "pending_tool" },
     { ...accepted, usageTotal: { inputTokens: 1, outputTokens: 1 } },
     // Injected call metadata must be complete to rebuild the Responses pair.
     {

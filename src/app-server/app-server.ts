@@ -4,11 +4,10 @@ import {
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
 import { once } from "node:events";
-import { constants } from "node:fs";
+import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
 import {
   chmod,
-  copyFile,
   mkdir,
   readFile,
   rename,
@@ -28,7 +27,6 @@ import {
 } from "../core/policy.js";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
-import { redact } from "../core/redact.js";
 import { listenForAbort, withDeadline } from "../core/abort.js";
 import { installResponsesLiteOverride } from "./responses-lite-override.js";
 
@@ -46,18 +44,13 @@ export const CLIENT_VERSION = (
 ).version;
 
 /**
- * Harmless app-server diagnostic produced by intentional tool-turn interrupts,
- * as emitted by the pinned Codex runtime. The record is anchored to a leading
- * token boundary and the end of its line so tool names and arguments that reach
- * app-server stderr cannot suppress an unrelated diagnostic by embedding this
- * text. A future runtime that reworded or extended the record simply stops
- * matching, which restores the redundant warning rather than hiding anything.
+ * Harmless app-server diagnostic produced by intentional tool-turn interrupts.
+ * Every dynamic-tool turn ends this way, once per captured call, so matching
+ * the message alone keeps the false alarm suppressed whichever module reports
+ * it and however the line is decorated.
  */
 const CANCELLED_DYNAMIC_TOOL_DIAGNOSTIC =
-  /(?:^|\s)codex_core::tools::router: error=dynamic tool call was cancelled before receiving a response$/;
-
-/** Maximum unterminated stderr text retained while waiting for a line boundary. */
-const MAX_APP_SERVER_STDERR_BUFFER = 8_192;
+  "dynamic tool call was cancelled before receiving a response";
 
 /** Package metadata that owns the runtime and generated protocol version. */
 interface CodexPackageMetadata {
@@ -126,15 +119,15 @@ export interface StartAppServerOptions {
   codexPath: string;
   /** Codex home for the child; isolates its caches and auth from ~/.codex. */
   codexHome?: string | undefined;
-  /** Existing Codex home whose login may seed or refresh codexHome. */
+  /**
+   * Existing Codex home whose login newest-wins refreshes codexHome. An absent
+   * source is how an opted-out proxy-only login stays untouched.
+   */
   seedAuthFrom?: string | undefined;
-  /** Selects conservative seed-once or newest-wins auth credential seeding. */
-  seedAuthMode?: "always" | "if-missing" | undefined;
   root: string;
   startupTimeoutMs: number;
   shutdownTimeoutMs: number;
   log: Logger;
-  diagnosticLogging?: boolean;
   spawnProcess?: typeof spawn;
   signal?: AbortSignal;
 }
@@ -160,7 +153,6 @@ export async function startAppServer(
       authSeeded = await seedAuthCredentials(
         options.seedAuthFrom,
         options.codexHome,
-        options.seedAuthMode ?? "if-missing",
         options.log,
       );
     env = { ...process.env, CODEX_HOME: options.codexHome };
@@ -243,54 +235,15 @@ export async function startAppServer(
   };
 }
 
-/** Attaches bounded line-aware logging to app-server's diagnostic stream. */
+/** Attaches plain line-aware logging to app-server's diagnostic stream. */
 export function attachAppServerStderrLogging(
   stderr: Readable,
-  options: {
-    log: Logger;
-    root: string;
-    diagnosticLogging?: boolean | undefined;
-  },
+  options: { log: Logger },
 ): void {
-  let buffered = "";
-  const emit = (chunk: string): void => {
-    const diagnostic = filterExpectedAppServerStderr(chunk);
-    if (diagnostic === "") return;
-    options.log("warn", "app_server_stderr", {
-      message: options.diagnosticLogging
-        ? redact(diagnostic, options.root).slice(0, 2_000)
-        : "[REDACTED_DIAGNOSTIC]",
-    });
-  };
-  const drain = (flush: boolean): void => {
-    let newline;
-    while ((newline = buffered.indexOf("\n")) >= 0) {
-      emit(buffered.slice(0, newline));
-      buffered = buffered.slice(newline + 1);
-    }
-    while (buffered.length > MAX_APP_SERVER_STDERR_BUFFER) {
-      emit(buffered.slice(0, MAX_APP_SERVER_STDERR_BUFFER));
-      buffered = buffered.slice(MAX_APP_SERVER_STDERR_BUFFER);
-    }
-    if (flush && buffered !== "") {
-      emit(buffered);
-      buffered = "";
-    }
-  };
-  stderr.setEncoding("utf8").on("data", (chunk: string) => {
-    buffered += chunk;
-    drain(false);
+  createInterface(stderr).on("line", (line) => {
+    if (line.includes(CANCELLED_DYNAMIC_TOOL_DIAGNOSTIC)) return;
+    options.log("warn", "app_server_stderr", { message: line });
   });
-  stderr.once("end", () => drain(true));
-}
-
-/** Removes expected interrupt diagnostics while retaining neighboring lines. */
-function filterExpectedAppServerStderr(chunk: string): string {
-  return chunk
-    .split(/\r?\n/)
-    .filter((line) => !CANCELLED_DYNAMIC_TOOL_DIAGNOSTIC.test(line.trimEnd()))
-    .join("\n")
-    .trim();
 }
 
 /** Reads optional managed constraints without hiding malformed responses. */
@@ -327,47 +280,40 @@ async function readConfigRequirements(
 async function seedAuthCredentials(
   sourceHome: string,
   targetHome: string,
-  mode: "always" | "if-missing",
   log: Logger,
 ): Promise<boolean> {
   const source = join(sourceHome, "auth.json");
   const target = join(targetHome, "auth.json");
   if (source === target) return false;
   try {
-    if (mode === "if-missing") {
-      // EXCL keeps a concurrently-written login from being clobbered.
-      await copyFile(source, target, constants.COPYFILE_EXCL);
-      await chmod(target, 0o600);
-    } else {
-      const sourceStat = await stat(source);
-      let targetMtimeMs = -Infinity;
-      try {
-        targetMtimeMs = (await stat(target)).mtimeMs;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
-      if (sourceStat.mtimeMs <= targetMtimeMs) return false;
+    const sourceStat = await stat(source);
+    let targetMtimeMs = -Infinity;
+    try {
+      targetMtimeMs = (await stat(target)).mtimeMs;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (sourceStat.mtimeMs <= targetMtimeMs) return false;
 
-      const temporary = `${target}.${process.pid}.tmp`;
-      try {
-        // Write and secure a private sibling before atomically replacing auth.
-        await writeFile(temporary, await readFile(source), { mode: 0o600 });
-        await chmod(temporary, 0o600);
-        await rename(temporary, target);
-      } catch (error) {
-        await rm(temporary, { force: true }).catch(() => undefined);
-        throw error;
-      }
+    const temporary = `${target}.${process.pid}.tmp`;
+    try {
+      // Write and secure a private sibling before atomically replacing auth.
+      await writeFile(temporary, await readFile(source), { mode: 0o600 });
+      await chmod(temporary, 0o600);
+      await rename(temporary, target);
+    } catch (error) {
+      await rm(temporary, { force: true }).catch(() => undefined);
+      throw error;
     }
     log("info", "codex_auth_seeded");
     return true;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "EEXIST") return false;
-    // The source can be an arbitrary CODEX_HOME outside every configured
-    // redaction root. Keep this best-effort failure path-free by construction.
+    // Warn rather than fail: startup falls through to a normal login.
     log("warn", "codex_auth_seed_failed", {
       code: typeof code === "string" ? code : "UNKNOWN",
+      error: error instanceof Error ? error.message : String(error),
     });
     return false;
   }
@@ -410,9 +356,10 @@ export async function writeBackAuthCredentials(
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT") return;
-    // The homes can be outside configured redaction roots, so failures stay path-free.
+    // Warn rather than fail: the child's own login is already usable.
     log("warn", "codex_auth_write_back_failed", {
       code: typeof code === "string" ? code : "UNKNOWN",
+      error: error instanceof Error ? error.message : String(error),
     });
   }
 }

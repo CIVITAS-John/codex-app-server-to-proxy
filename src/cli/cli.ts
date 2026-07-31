@@ -4,14 +4,9 @@ import {
   DEFAULT_STATE_DIR_DESCRIPTION,
   parseServeOptions,
   resolveServeOptions,
-  type ParsedServeOptions,
   type ServeOptions,
 } from "../core/config.js";
-import {
-  createLogger,
-  type Logger,
-  type RedactionContext,
-} from "../core/logger.js";
+import { createLogger, type Logger } from "../core/logger.js";
 import { createProxyServer, type ProxyServer } from "../http/server.js";
 import {
   CLIENT_VERSION,
@@ -43,7 +38,7 @@ Options:
   --codex-path <path>           Override the package-owned Codex executable
   --codex-home <directory>      Codex home for the spawned app-server
                                 (default: ${DEFAULT_CODEX_HOME_DESCRIPTION})
-  --sync-auth <always|if-missing|never>
+  --sync-auth <always|never>
                                 Synchronize credentials from the main Codex home (default: always)
   --implicit-tool-continuation <true|false>
                                 Resolve tool results by tool_call_id (default: true)
@@ -67,32 +62,15 @@ export async function run(argv: readonly string[]): Promise<number> {
   if (argv[0] !== "serve")
     throw new Error(`Unknown command: ${argv[0]}\n\n${usage}`);
   const parsed = parseServeOptions(argv.slice(1));
-  let log = createLogger(parsed.logLevel, undefined, redactionContext(parsed));
+  let log = createLogger(parsed.logLevel);
   try {
     const options = await resolveServeOptions(parsed);
-    log = createLogger(options.logLevel, undefined, redactionContext(options));
+    log = createLogger(options.logLevel);
     return await runServer(options, log);
   } catch (error) {
     log.failure("startup_failed", {}, error);
     return 1;
   }
-}
-
-/** Derives one redaction context from parsed or finalized configuration. */
-function redactionContext(
-  options: Pick<
-    ParsedServeOptions,
-    "root" | "codexPath" | "stateDir" | "codexHome"
-  >,
-): RedactionContext {
-  return {
-    root: options.root,
-    sensitivePaths: [
-      options.stateDir,
-      options.codexPath,
-      options.codexHome,
-    ].filter((path): path is string => path !== undefined),
-  };
 }
 
 /** Installs one-shot process signal handlers and returns an idempotent disposer. */
@@ -177,6 +155,8 @@ class AppServerSupervisor {
 
   /** Starts and authenticates one child without exposing a partial transport. */
   async #initialize(): Promise<AppServer> {
+    // A user-provided proxy-only login must remain untouched when opted out,
+    // which an absent source already encodes for both seeding and write-back.
     const seedSource =
       this.#options.syncAuth === "never"
         ? undefined
@@ -188,19 +168,11 @@ class AppServerSupervisor {
       const next = await startAppServer({
         codexPath: this.#options.codexPath,
         codexHome: this.#options.codexHome,
-        // A user-provided proxy-only login must remain untouched when opted
-        // out, which an absent source already encodes.
         seedAuthFrom: seedSource,
-        seedAuthMode:
-          this.#options.syncAuth === "never"
-            ? undefined
-            : this.#options.syncAuth,
-
         root: this.#options.root,
         startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS,
         shutdownTimeoutMs: this.#options.shutdownTimeoutMs,
         log: this.#log,
-        diagnosticLogging: this.#options.logLevel === "debug",
         signal: this.#lifecycle.signal,
       });
       this.#starting = next;
@@ -226,7 +198,6 @@ class AppServerSupervisor {
         if (
           recoveredLogin &&
           next.authSeeded &&
-          this.#options.syncAuth === "always" &&
           seedSource !== undefined &&
           !this.#lifecycle.signal.aborted &&
           !exited
