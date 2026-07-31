@@ -1,15 +1,13 @@
-import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   lstatSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
   renameSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import type {
   JsonRpcTransport,
   ServerRequest,
@@ -18,23 +16,14 @@ import {
   toolCorrelationErrorForStatus,
   type HttpError,
 } from "../http/errors.js";
-import {
-  bindingHash,
-  canonicalJson,
-  record as asRecord,
-} from "../core/canonical.js";
+import { record as asRecord } from "../core/canonical.js";
 import {
   tokenUsageCounters,
   type TokenUsageCounters,
 } from "../core/token-usage.js";
 
-export { bindingHash, canonicalJson };
-
 /** Current on-disk continuation-store schema for the unreleased format. */
 const SCHEMA_VERSION = 0;
-
-/** Maximum interrupted turn IDs retained to recognize late tool callbacks. */
-export const MAX_INTERRUPTED_TOOL_TURNS = 4_096;
 
 /** Context that must remain identical over a Codex thread's lifetime. */
 export interface ThreadBinding {
@@ -83,49 +72,21 @@ export class ResponseStore {
   constructor(
     directory: string,
     private readonly retentionMs = 30 * 24 * 60 * 60_000,
-    private readonly temporaryPath: (
-      statePath: string,
-    ) => string = defaultTemporaryPath,
   ) {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     hardenStatePath(directory, "directory");
     this.#path = join(directory, "continuations.json");
     hardenExistingStateFile(this.#path);
-    this.#sweepStaleTemporaries(directory);
     this.#load();
   }
 
-  /** Removes temporaries stranded by a crash between write and atomic rename. */
-  #sweepStaleTemporaries(directory: string): void {
-    const prefix = `${basename(this.#path)}.`;
-    let entries: string[];
-    try {
-      entries = readdirSync(directory);
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (!entry.startsWith(prefix) || !entry.endsWith(".tmp")) continue;
-      try {
-        unlinkSync(join(directory, entry));
-      } catch {
-        // A concurrent writer may still hold this temporary; leave it in place.
-      }
-    }
-  }
-
-  /** Retrieves a record after applying expiry and newest-response rules. */
+  /** Retrieves a record with retention expiry applied to the returned view. */
   get(responseId: string): ResponseRecord | undefined {
     const record = this.#records.get(responseId);
-    if (
-      record &&
-      record.expiresAt <= Date.now() &&
-      record.state !== "expired"
-    ) {
-      this.#mutateAndSave(() => {
-        record.state = "expired";
-      });
-    }
+    // Retention expiry is derived, so a read never writes. The persisted
+    // `expired` state remains the durable pre-injection replay tombstone.
+    if (record && record.state !== "expired" && record.expiresAt <= Date.now())
+      return { ...record, state: "expired" };
     return record;
   }
 
@@ -139,20 +100,19 @@ export class ResponseStore {
       createdAt: now,
       expiresAt: now + this.retentionMs,
     };
-    this.#mutateAndSave(() => {
-      // Superseding pending_tool here is defense in depth behind the durable
-      // pre-injection replay guard: no completed continuation may leave an
-      // older pending record selectable for the same thread.
-      for (const prior of this.#records.values()) {
-        if (
-          prior.threadId === record.threadId &&
-          (prior.state === "ready" || prior.state === "pending_tool")
-        )
-          prior.state = "superseded";
-      }
-      this.#records.set(stored.responseId, stored);
-      this.#prune(now);
-    });
+    // Superseding pending_tool here is defense in depth behind the durable
+    // pre-injection replay guard: no completed continuation may leave an
+    // older pending record selectable for the same thread.
+    for (const prior of this.#records.values()) {
+      if (
+        prior.threadId === record.threadId &&
+        (prior.state === "ready" || prior.state === "pending_tool")
+      )
+        prior.state = "superseded";
+    }
+    this.#records.set(stored.responseId, stored);
+    this.#prune(now);
+    this.#save();
     return stored;
   }
 
@@ -163,15 +123,9 @@ export class ResponseStore {
   ): ResponseRecord | undefined {
     const current = this.#records.get(responseId);
     if (!current) return undefined;
-    const updated = {
-      ...current,
-      ...patch,
-      responseId: current.responseId,
-      threadId: current.threadId,
-    };
-    this.#mutateAndSave(() => {
-      this.#records.set(responseId, updated);
-    });
+    const updated = { ...current, ...patch };
+    this.#records.set(responseId, updated);
+    this.#save();
     return updated;
   }
 
@@ -230,7 +184,7 @@ export class ResponseStore {
 
   /** Replaces the state file atomically so abrupt termination preserves the old file. */
   #save(): void {
-    const temporary = this.temporaryPath(this.#path);
+    const temporary = `${this.#path}.tmp`;
     try {
       writeFileSync(
         temporary,
@@ -238,58 +192,30 @@ export class ResponseStore {
           version: SCHEMA_VERSION,
           records: [...this.#records.values()],
         }),
-        {
-          encoding: "utf8",
-          mode: 0o600,
-          flag: "wx",
-        },
+        { encoding: "utf8", mode: 0o600 },
       );
       renameSync(temporary, this.#path);
     } catch (error) {
       try {
         unlinkSync(temporary);
       } catch {
-        // The write may have failed before creating its private temporary file.
+        // The write may have failed before creating its temporary file.
       }
       throw error;
     }
   }
-
-  /** Commits a mutation durably or restores the exact prior in-memory view. */
-  #mutateAndSave(mutate: () => void): void {
-    const snapshot = new Map(
-      [...this.#records].map(([id, record]) => [id, { ...record }]),
-    );
-    try {
-      mutate();
-      this.#save();
-    } catch (error) {
-      this.#records.clear();
-      for (const [id, record] of snapshot) this.#records.set(id, record);
-      throw error;
-    }
-  }
-}
-
-/** Creates an unpredictable same-directory path for one atomic state write. */
-function defaultTemporaryPath(statePath: string): string {
-  return `${statePath}.${process.pid}.${randomUUID()}.tmp`;
 }
 
 /** Tightens and validates the state directory on platforms with POSIX modes. */
 function hardenStatePath(path: string, kind: "directory" | "file"): void {
-  const before = lstatSync(path);
+  const stats = lstatSync(path);
   if (
-    before.isSymbolicLink() ||
-    (kind === "directory" ? !before.isDirectory() : !before.isFile())
+    stats.isSymbolicLink() ||
+    (kind === "directory" ? !stats.isDirectory() : !stats.isFile())
   )
     throw new Error(`Continuation state ${kind} must be a regular ${kind}.`);
   if (process.platform === "win32") return;
   chmodSync(path, kind === "directory" ? 0o700 : 0o600);
-  const after = lstatSync(path);
-  const unsafe = kind === "directory" ? 0o077 : 0o177;
-  if ((after.mode & unsafe) !== 0)
-    throw new Error(`Continuation state ${kind} permissions are too broad.`);
 }
 
 /** Secures an existing state file without creating an empty replacement. */
@@ -425,18 +351,13 @@ export class ContinuationCoordinator {
    * Remembers a cancelled turn so its late dynamic callbacks stay unanswered.
    * This relies on app-server never reusing a turn identifier within one
    * thread and transport generation: a repeated identifier would silently
-   * discard the live calls of the turn that reused it. Re-adding refreshes
-   * insertion order so the bound evicts the least recently interrupted turn.
+   * discard the live calls of the turn that reused it. The set is cleared on
+   * every transport replacement, and each entry costs one interrupted tool
+   * turn to create, so it needs no eviction bound.
    */
   markTurnInterrupted(threadId: string, turnId: string): void {
     if (this.#disposed) return;
-    const key = interruptedToolTurnKey(threadId, turnId);
-    this.#interruptedToolTurns.delete(key);
-    this.#interruptedToolTurns.add(key);
-    for (const oldest of this.#interruptedToolTurns) {
-      if (this.#interruptedToolTurns.size <= MAX_INTERRUPTED_TOOL_TURNS) break;
-      this.#interruptedToolTurns.delete(oldest);
-    }
+    this.#interruptedToolTurns.add(interruptedToolTurnKey(threadId, turnId));
   }
 
   /** Atomically claims a thread and installs its dynamic-tool owner. */
@@ -582,95 +503,61 @@ function interruptedToolTurnKey(threadId: string, turnId: string): string {
   return JSON.stringify([threadId, turnId]);
 }
 
-/** Validates every persisted field before a record can influence continuation. */
+/** Persisted lifecycle states a loaded record may declare. */
+const VALID_RECORD_STATES = new Set([
+  "ready",
+  "pending_tool",
+  "expired",
+  "superseded",
+  "corrupt",
+]);
+
+/**
+ * Checks the shape of one loaded record. This process is the file's only
+ * writer, so the check is deliberately shallow: it confirms the fields
+ * continuation actually reads, and validates `usageTotal` and `pendingCalls`
+ * because those feed token arithmetic and injected thread history. Unknown
+ * fields are preserved rather than rejected so a record written by a newer
+ * version stays loadable.
+ */
 function isResponseRecord(value: unknown): value is ResponseRecord {
   const record = asRecord(value);
-  if (!record) return false;
-  const allowedKeys = new Set([
-    "responseId",
-    "threadId",
-    "state",
-    "model",
-    "reasoningEffort",
-    "reasoningEffortBound",
-    "cwd",
-    "toolsHash",
-    "policyHash",
-    "createdAt",
-    "expiresAt",
-    "callIds",
-    "pendingCalls",
-    "usageTotal",
-  ]);
-  const validStates = new Set([
-    "ready",
-    "pending_tool",
-    "expired",
-    "superseded",
-    "corrupt",
-  ]);
-  const validHash = (hash: unknown): hash is string =>
-    typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash);
-  const callIds = record.callIds;
-  const pendingCalls = record.pendingCalls;
-  const isStoredToolCall = (value: unknown): value is StoredToolCall => {
-    const call = asRecord(value);
-    return (
-      call !== undefined &&
-      Object.keys(call).every((key) =>
-        ["callId", "name", "arguments"].includes(key),
-      ) &&
-      typeof call.callId === "string" &&
-      call.callId.length > 0 &&
-      typeof call.name === "string" &&
-      call.name.length > 0 &&
-      typeof call.arguments === "string"
-    );
-  };
-  // pendingCalls must agree with callIds so the implicit call-ID lookup and
-  // the injected pairs can never disagree about which calls are pending.
-  const pendingCallsValid =
-    pendingCalls === undefined ||
-    (Array.isArray(pendingCalls) &&
-      pendingCalls.length > 0 &&
-      pendingCalls.every((call) => isStoredToolCall(call)) &&
-      Array.isArray(callIds) &&
-      pendingCalls.length === callIds.length &&
-      new Set(pendingCalls.map((call) => (call as StoredToolCall).callId))
-        .size === pendingCalls.length &&
-      pendingCalls.every((call) =>
-        (callIds as string[]).includes((call as StoredToolCall).callId),
-      ));
   return (
-    pendingCallsValid &&
-    Object.keys(record).every((key) => allowedKeys.has(key)) &&
+    record !== undefined &&
     typeof record.responseId === "string" &&
     record.responseId.length > 0 &&
     typeof record.threadId === "string" &&
     record.threadId.length > 0 &&
     typeof record.model === "string" &&
-    record.model.length > 0 &&
-    (record.reasoningEffort === undefined ||
-      (typeof record.reasoningEffort === "string" &&
-        record.reasoningEffort.length > 0)) &&
-    (record.reasoningEffortBound === undefined ||
-      record.reasoningEffortBound === true) &&
-    (record.usageTotal === undefined ||
-      tokenUsageCounters(record.usageTotal) !== undefined) &&
     typeof record.cwd === "string" &&
-    record.cwd.length > 0 &&
-    validHash(record.toolsHash) &&
-    validHash(record.policyHash) &&
+    typeof record.toolsHash === "string" &&
+    typeof record.policyHash === "string" &&
     typeof record.state === "string" &&
-    validStates.has(record.state) &&
+    VALID_RECORD_STATES.has(record.state) &&
     typeof record.createdAt === "number" &&
     Number.isFinite(record.createdAt) &&
     typeof record.expiresAt === "number" &&
     Number.isFinite(record.expiresAt) &&
-    (callIds === undefined ||
-      (Array.isArray(callIds) &&
-        callIds.every((id) => typeof id === "string") &&
-        new Set(callIds).size === callIds.length))
+    (record.usageTotal === undefined ||
+      tokenUsageCounters(record.usageTotal) !== undefined) &&
+    (record.callIds === undefined ||
+      (Array.isArray(record.callIds) &&
+        record.callIds.every((id) => typeof id === "string"))) &&
+    (record.pendingCalls === undefined ||
+      (Array.isArray(record.pendingCalls) &&
+        record.pendingCalls.every(isStoredToolCall)))
+  );
+}
+
+/** Checks one persisted dynamic call, which a continuation injects verbatim. */
+function isStoredToolCall(value: unknown): value is StoredToolCall {
+  const call = asRecord(value);
+  return (
+    call !== undefined &&
+    typeof call.callId === "string" &&
+    call.callId.length > 0 &&
+    typeof call.name === "string" &&
+    typeof call.arguments === "string"
   );
 }
 

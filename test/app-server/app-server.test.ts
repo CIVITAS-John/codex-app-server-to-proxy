@@ -176,30 +176,26 @@ test("auth write-back retains a target with the same credential mtime", async ()
   }, "app-server-auth-write-back-equal-mtime-test-");
 });
 
-test("auth write-back leaves a colliding temporary file untouched", async () => {
+test("auth write-back replaces a temporary stranded by an earlier crash", async () => {
   await withTempDir(async (directory) => {
     const sourceHome = join(directory, "source-home");
     const targetHome = join(directory, "target-home");
     const sourceAuth = join(sourceHome, "auth.json");
     const targetAuth = join(targetHome, "auth.json");
+    // The temporary name is scoped to this process, so anything already there
+    // is this proxy's own crash debris rather than a concurrent writer.
     const temporary = `${targetAuth}.${process.pid}.tmp`;
     await mkdir(sourceHome, { recursive: true });
     await mkdir(targetHome, { recursive: true });
     await writeFile(sourceAuth, '{"fixture":"recovered"}', "utf8");
     await writeFile(targetAuth, '{"fixture":"target"}', "utf8");
     await utimes(targetAuth, new Date(1_000), new Date(1_000));
-    await writeFile(temporary, '{"fixture":"foreign"}', "utf8");
-    const entries: Array<Record<string, unknown>> = [];
+    await writeFile(temporary, '{"fixture":"stale"}', "utf8");
 
-    await writeBackAuthCredentials(
-      sourceHome,
-      targetHome,
-      createLogger("debug", (entry) => entries.push(entry)),
-    );
+    await writeBackAuthCredentials(sourceHome, targetHome, silentLogger);
 
-    assert.equal(await readFile(targetAuth, "utf8"), '{"fixture":"target"}');
-    assert.equal(await readFile(temporary, "utf8"), '{"fixture":"foreign"}');
-    assert.equal(entries.length, 0);
+    assert.equal(await readFile(targetAuth, "utf8"), '{"fixture":"recovered"}');
+    await assert.rejects(readFile(temporary, "utf8"));
   }, "app-server-auth-write-back-temp-collision-test-");
 });
 

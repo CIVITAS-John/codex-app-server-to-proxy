@@ -1,5 +1,4 @@
-import { randomUUID } from "node:crypto";
-import { chmod, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Logger } from "../core/logger.js";
 
@@ -58,19 +57,13 @@ async function writePrivateFileIfChanged(
   content: string,
 ): Promise<boolean> {
   const current = await readOptionalText(path);
-  if (current === content) {
-    await chmod(path, 0o600);
-    return false;
-  }
+  // Skipping an identical write keeps ordinary restarts from rewriting the
+  // user's config.toml and from logging an install that did not happen.
+  if (current === content) return false;
 
-  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  const temporary = `${path}.tmp`;
   try {
-    await writeFile(temporary, content, {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
-    });
-    await chmod(temporary, 0o600);
+    await writeFile(temporary, content, { encoding: "utf8", mode: 0o600 });
     await rename(temporary, path);
     return true;
   } finally {

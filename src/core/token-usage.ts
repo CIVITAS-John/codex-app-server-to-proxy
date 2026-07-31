@@ -10,7 +10,7 @@ export interface TokenUsageCounters {
 }
 
 /** Counter names required before cumulative usage may be attributed. */
-export const TOKEN_USAGE_COUNTERS = [
+const TOKEN_USAGE_COUNTERS = [
   "inputTokens",
   "cachedInputTokens",
   "outputTokens",

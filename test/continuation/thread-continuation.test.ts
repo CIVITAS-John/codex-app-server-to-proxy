@@ -6,7 +6,8 @@ import { createInterface } from "node:readline";
 import { test } from "vitest";
 import { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
 import type { ProxyServer } from "../../src/http/server.js";
-import { bindingHash, ResponseStore } from "../../src/continuation/state.js";
+import { ResponseStore } from "../../src/continuation/state.js";
+import { bindingHash } from "../../src/core/canonical.js";
 import { policyBindingHash } from "../../src/core/policy.js";
 import {
   protocolNotification,
@@ -18,6 +19,7 @@ import {
   protocolTurn,
 } from "../support/protocol-fixtures.js";
 import {
+  parseSseChunks,
   postChatCompletion,
   responseErrorCode,
   startProxyWithTransport,
@@ -511,14 +513,7 @@ test("streaming dynamic tools use standard argument deltas and interrupt at the 
         }),
       });
       assert.equal(response.status, 200);
-      const frames = (await response.text())
-        .split("\n\n")
-        .filter(Boolean)
-        .map((frame) => frame.slice("data: ".length));
-      assert.equal(frames.at(-1), "[DONE]");
-      const chunks = frames
-        .slice(0, -1)
-        .map((frame) => JSON.parse(frame) as Record<string, unknown>);
+      const chunks = parseSseChunks(await response.text());
       const choices = chunks.map(
         (chunk) =>
           (

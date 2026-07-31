@@ -85,7 +85,7 @@ test("a synchronous output write failure removes its pending request", async () 
   output.write = (): boolean => {
     throw new Error("synchronous write failure");
   };
-  const rpc = new JsonRpcTransport(new PassThrough(), output, 1);
+  const rpc = new JsonRpcTransport(new PassThrough(), output);
 
   await assert.rejects(rpc.request("first", {}), /synchronous write failure/);
   await assert.rejects(rpc.request("second", {}), /synchronous write failure/);

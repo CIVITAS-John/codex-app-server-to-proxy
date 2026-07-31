@@ -141,8 +141,9 @@ jobs:
           fi
           echo "::error::Unable to verify ${PACKAGE_NAME}@${VERSION} on npm because of a registry, network, or authentication failure."
           exit 1
-      - name: Run offline release gate on the bumped tree
-        run: npm run check
+      # The `offline` matrix already ran the full gate on this exact sha. The
+      # bump changes only the version field, which the packed-artifact test
+      # below exercises directly.
       - name: Test and retain the packed npm CLI
         id: packed
         shell: bash

@@ -33,7 +33,7 @@ import { listenForAbort, withDeadline } from "../core/abort.js";
 import { installResponsesLiteOverride } from "./responses-lite-override.js";
 
 /** Identifies this proxy to app-server during initialization. */
-export const CLIENT_NAME = "codex-openai-proxy";
+const CLIENT_NAME = "codex-openai-proxy";
 
 /** Minimal proxy package metadata used in public version diagnostics. */
 interface ProxyPackageMetadata {
@@ -165,14 +165,19 @@ export async function startAppServer(
       );
     env = { ...process.env, CODEX_HOME: options.codexHome };
   }
-  await verifyCodex(
-    invocation,
-    options.root,
-    options.startupTimeoutMs,
-    spawnProcess,
-    env,
-    options.signal,
-  );
+  // The default path resolves the binary inside the exact @openai/codex
+  // dependency that also defines PINNED_CODEX_VERSION, so probing it would
+  // only confirm that a package matches its own package.json. Verify the
+  // explicit override, which can name any executable on the system.
+  if (options.codexPath !== "codex")
+    await verifyCodex(
+      invocation,
+      options.root,
+      options.startupTimeoutMs,
+      spawnProcess,
+      env,
+      options.signal,
+    );
   if (options.signal?.aborted) throw abortReason(options.signal);
   const child = spawnProcess(
     invocation.command,
@@ -234,9 +239,7 @@ export async function startAppServer(
     child,
     authSeeded,
     responsesLiteOverrideApplied,
-    async stop() {
-      await stop();
-    },
+    stop,
   };
 }
 
@@ -348,10 +351,7 @@ async function seedAuthCredentials(
       const temporary = `${target}.${process.pid}.tmp`;
       try {
         // Write and secure a private sibling before atomically replacing auth.
-        await writeFile(temporary, await readFile(source), {
-          mode: 0o600,
-          flag: "wx",
-        });
+        await writeFile(temporary, await readFile(source), { mode: 0o600 });
         await chmod(temporary, 0o600);
         await rename(temporary, target);
       } catch (error) {
@@ -395,39 +395,11 @@ export async function writeBackAuthCredentials(
 
     const temporary = `${target}.${process.pid}.tmp`;
     const credentials = await readFile(source);
-    try {
-      // Write and secure a private sibling before atomically replacing auth.
-      await writeFile(temporary, credentials, {
-        mode: 0o600,
-        flag: "wx",
-      });
-    } catch (error) {
-      // An exclusive-create collision belongs to another invocation.
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
-      // A failed write may still have created a partial file that we own.
-      await rm(temporary, { force: true }).catch(() => undefined);
-      throw error;
-    }
     let replaced = false;
     try {
+      // Write and secure a private sibling before atomically replacing auth.
+      await writeFile(temporary, credentials, { mode: 0o600 });
       await chmod(temporary, 0o600);
-      let currentTargetStat;
-      try {
-        // Recheck immediately before replacement so a concurrent update wins.
-        currentTargetStat = await stat(target);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-        throw error;
-      }
-      if (
-        currentTargetStat.dev !== targetStat.dev ||
-        currentTargetStat.ino !== targetStat.ino ||
-        currentTargetStat.size !== targetStat.size ||
-        currentTargetStat.mtimeMs !== targetStat.mtimeMs ||
-        currentTargetStat.ctimeMs !== targetStat.ctimeMs ||
-        currentTargetStat.mtimeMs >= sourceStat.mtimeMs
-      )
-        return;
       await rename(temporary, target);
       replaced = true;
     } finally {

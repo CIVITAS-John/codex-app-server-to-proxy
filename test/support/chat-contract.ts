@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { afterAll, beforeAll, describe, test } from "vitest";
+import { parseSseFrames } from "./http.js";
 
 /** Model fixed by the repository's live-test cost policy. */
 export const CONTRACT_MODEL = "gpt-5.6-luna";
@@ -906,10 +907,7 @@ interface StreamChunk {
 
 /** Parses a complete OpenAI-style SSE response and checks its terminal marker. */
 function parseSse(value: string): StreamChunk[] {
-  const frames = value
-    .split("\n\n")
-    .filter(Boolean)
-    .map((frame) => frame.slice(6));
+  const frames = parseSseFrames(value);
   assert.ok(
     frames.at(-1) === "[DONE]",
     "SSE stream omitted its terminal marker",

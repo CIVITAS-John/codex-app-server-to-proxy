@@ -23,12 +23,12 @@ const REASONING_EFFORTS = [
 /** A validated Chat Completions reasoning-effort value. */
 export type ChatReasoningEffort = (typeof REASONING_EFFORTS)[number];
 
-/** Fast membership lookup derived from the public reasoning-effort values. */
-const REASONING_EFFORT_SET: ReadonlySet<string> = new Set(REASONING_EFFORTS);
-
 /** Narrows an unknown value to one supported reasoning effort. */
 function isReasoningEffort(value: unknown): value is ChatReasoningEffort {
-  return typeof value === "string" && REASONING_EFFORT_SET.has(value);
+  return (
+    typeof value === "string" &&
+    (REASONING_EFFORTS as readonly string[]).includes(value)
+  );
 }
 
 /**
@@ -54,7 +54,7 @@ export interface ChatMessage {
 }
 
 /** Returns the terminal contiguous block of client-supplied tool results. */
-export function terminalToolResultBlock(
+function terminalToolResultBlock(
   messages: readonly ChatMessage[],
 ): ChatMessage[] {
   let first = messages.length;
@@ -67,6 +67,12 @@ export interface ChatRequest {
   model: string;
   reasoningEffort?: ChatReasoningEffort;
   messages: ChatMessage[];
+  /**
+   * The terminal contiguous `role: "tool"` block, derived once during
+   * validation. Continuation lookup, resume, and result correlation all read
+   * this single view rather than re-deriving it from `messages`.
+   */
+  terminalToolResults: ChatMessage[];
   stream: boolean;
   includeUsage: boolean;
   dynamicTools: Array<Record<string, unknown>>;
@@ -172,6 +178,7 @@ export function validateRequest(
     model: body.model as string,
     ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
     messages,
+    terminalToolResults,
     stream: body.stream === true,
     includeUsage,
     dynamicTools,
@@ -478,9 +485,9 @@ export function toFunctionCallOutputItem(
 /** Validates a complete, single-use result set for a pending tool batch. */
 export function validateToolResults(
   messages: ChatMessage[],
+  toolResults: ChatMessage[],
   pending: StoredToolCall[],
 ): Map<string, string> {
-  const toolResults = terminalToolResultBlock(messages);
   const assistant = messages[messages.length - toolResults.length - 1];
   if (!assistant?.toolCalls)
     invalid("The assistant tool-call message is required.", "messages");

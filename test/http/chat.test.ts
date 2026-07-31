@@ -8,9 +8,8 @@ import { test } from "vitest";
 import {
   EventNormalizer,
   HANDLED_NOTIFICATION_METHODS,
-  normalizeNotification,
   type Usage,
-} from "../../src/http/chat.js";
+} from "../../src/http/chat-normalize.js";
 import { createLogger } from "../../src/core/logger.js";
 import type { ProxyServer } from "../../src/http/server.js";
 import {
@@ -27,7 +26,11 @@ import {
   type PolicyRequirements,
 } from "../../src/core/policy.js";
 import type { TokenUsageBreakdown } from "../../protocol/generated/typescript/v2/TokenUsageBreakdown.js";
-import { startProxyWithTransport } from "../support/http.js";
+import {
+  parseSseChunks,
+  parseSseFrames,
+  startProxyWithTransport,
+} from "../support/http.js";
 import { silentLogger } from "../support/logger.js";
 import { withTempDir } from "../support/temp.js";
 import {
@@ -56,12 +59,7 @@ interface StreamedChunk {
 
 /** Decodes one complete SSE body into its chunks, asserting the DONE frame. */
 function streamedChunks(body: string): StreamedChunk[] {
-  const frames = body
-    .split("\n\n")
-    .filter(Boolean)
-    .map((frame) => frame.slice(6));
-  assert.equal(frames.at(-1), "[DONE]");
-  return frames.slice(0, -1).map((frame) => JSON.parse(frame) as StreamedChunk);
+  return parseSseChunks<StreamedChunk>(body);
 }
 
 /** Turn behavior selected by one offline fake app-server. */
@@ -901,7 +899,7 @@ test("normalizes interleaved text, reasoning, internal items, tools, usage, and 
     },
   });
   assert.deepEqual(
-    normalizeNotification(interrupted.method, interrupted.params),
+    new EventNormalizer().normalize(interrupted.method, interrupted.params),
     [{ finishReason: "length" }],
   );
   const error = protocolNotification({
@@ -918,7 +916,7 @@ test("normalizes interleaved text, reasoning, internal items, tools, usage, and 
     },
   });
   assert.equal(
-    normalizeNotification(error.method, error.params)[0]?.error,
+    new EventNormalizer().normalize(error.method, error.params)[0]?.error,
     "failed",
   );
 });
@@ -1232,7 +1230,7 @@ test("raw-response completion is handled as an unexposed boundary", () => {
   // the normalizer deliberately excludes its payload from the HTTP surface.
   assert.equal(HANDLED_NOTIFICATION_METHODS.has("rawResponse/completed"), true);
   assert.deepEqual(
-    normalizeNotification("rawResponse/completed", {
+    new EventNormalizer().normalize("rawResponse/completed", {
       threadId: "thread",
       turnId: "turn",
       responseId: "resp_1",
@@ -1495,14 +1493,7 @@ test("streaming and aggregate responses share content and exact usage", async ()
       streaming.headers.get("content-type"),
       "text/event-stream; charset=utf-8",
     );
-    const frames = (await streaming.text())
-      .split("\n\n")
-      .filter(Boolean)
-      .map((frame) => frame.slice(6));
-    assert.equal(frames.at(-1), "[DONE]");
-    const chunks = frames
-      .slice(0, -1)
-      .map((frame) => JSON.parse(frame) as Record<string, unknown>);
+    const chunks = parseSseChunks(await streaming.text());
     const text = chunks
       .flatMap(
         (chunk) => chunk.choices as Array<{ delta: { content?: string } }>,
@@ -1970,10 +1961,7 @@ test("late streaming failures emit one error and close without DONE", async () =
         }),
       });
       assert.equal(response.status, 200);
-      const frames = (await response.text())
-        .split("\n\n")
-        .filter(Boolean)
-        .map((frame) => frame.slice(6));
+      const frames = parseSseFrames(await response.text());
       assert.equal(frames.includes("[DONE]"), false);
       const errors = frames
         .map((frame) => JSON.parse(frame) as Record<string, unknown>)
@@ -2371,17 +2359,9 @@ test("a paused real SSE client drains bounded frames in order", async () => {
     response.resume();
     await once(response, "end");
 
-    const frames = raw
-      .split("\n\n")
-      .filter(Boolean)
-      .map((frame) => frame.slice(6));
-    assert.equal(frames.at(-1), "[DONE]");
-    const indexes = frames
-      .slice(0, -1)
-      .map(
-        (frame) =>
-          JSON.parse(frame) as { choices?: [{ delta?: { content?: string } }] },
-      )
+    const indexes = parseSseChunks<{
+      choices?: [{ delta?: { content?: string } }];
+    }>(raw)
       .map((frame) => frame.choices?.[0]?.delta?.content)
       .filter((content): content is string => content !== undefined)
       .map((content) => Number(content.slice(0, 3)));

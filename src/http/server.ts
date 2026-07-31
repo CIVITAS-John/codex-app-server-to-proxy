@@ -7,6 +7,7 @@ import {
 } from "node:http";
 import type { Socket } from "node:net";
 import { HttpError, writeError, writeJson } from "./errors.js";
+import { listenForAbort } from "../core/abort.js";
 import type { ServeOptions } from "../core/config.js";
 import type { Logger } from "../core/logger.js";
 import type { JsonRpcTransport } from "../app-server/json-rpc.js";
@@ -26,14 +27,15 @@ export interface ProxyServer {
   listen(): Promise<{ address: string; port: number }>;
   close(): Promise<void>;
   setReady(ready: boolean): void;
-  // Requirements are mandatory whenever a live transport is installed so managed
-  // enforcement can never be silently disabled by an omitted argument; clearing
-  // the transport takes no requirements.
+  /**
+   * Installs or clears the app-server transport. Omitted requirements reset to
+   * unrestricted proxy defaults, which is only meaningful when the transport is
+   * being cleared.
+   */
   setTransport(
-    transport: JsonRpcTransport,
-    requirements: PolicyRequirements,
+    transport: JsonRpcTransport | undefined,
+    requirements?: PolicyRequirements,
   ): void;
-  setTransport(transport: undefined): void;
 }
 
 /** Creates a loopback proxy with bounded concurrency and request lifetimes. */
@@ -104,36 +106,34 @@ export function createProxyServer(
     const finish = (): void => {
       if (finished) return;
       finished = true;
-      request.off("aborted", abortRequest);
       clearTimeout(timer);
       controllers.delete(controller);
       active -= 1;
       logRequest(response.statusCode);
     };
-    const abortRequest = (): void => {
-      controller.abort(new Error("client disconnected"));
-      finish();
-    };
-    request.once("aborted", abortRequest);
     response.once("finish", finish);
     response.once("close", () => {
-      if (!response.writableFinished) abortRequest();
+      // Closing before the response finished is a client disconnect or a
+      // deadline teardown; downstream work must stop either way.
+      if (!response.writableFinished)
+        controller.abort(new Error("client disconnected"));
+      finish();
     });
-    void route(
+    void route({
       request,
       response,
       ready,
-      options.bodyLimitBytes,
-      controller.signal,
+      bodyLimit: options.bodyLimitBytes,
+      signal: controller.signal,
       transport,
       continuations,
-      options.root,
+      root: options.root,
       requirements,
-      options.implicitToolContinuation,
+      implicitToolContinuation: options.implicitToolContinuation,
       log,
       requestId,
       url,
-    ).catch((cause: unknown) => {
+    }).catch((cause: unknown) => {
       const error =
         cause instanceof HttpError
           ? cause
@@ -221,22 +221,39 @@ export function createProxyServer(
   };
 }
 
+/** Everything one routed request needs from the server's current state. */
+interface RouteContext {
+  request: IncomingMessage;
+  response: ServerResponse;
+  ready: boolean;
+  bodyLimit: number;
+  signal: AbortSignal;
+  transport: JsonRpcTransport | undefined;
+  continuations: ContinuationCoordinator | undefined;
+  root: string;
+  requirements: PolicyRequirements;
+  implicitToolContinuation: boolean;
+  log: Logger;
+  requestId: string;
+  url: URL | undefined;
+}
+
 /** Routes the intentionally small public HTTP surface. */
-async function route(
-  request: IncomingMessage,
-  response: ServerResponse,
-  ready: boolean,
-  bodyLimit: number,
-  signal: AbortSignal,
-  transport: JsonRpcTransport | undefined,
-  continuations: ContinuationCoordinator | undefined,
-  root: string,
-  requirements: PolicyRequirements,
-  implicitToolContinuation: boolean,
-  log: Logger,
-  requestId: string,
-  url: URL | undefined,
-): Promise<void> {
+async function route({
+  request,
+  response,
+  ready,
+  bodyLimit,
+  signal,
+  transport,
+  continuations,
+  root,
+  requirements,
+  implicitToolContinuation,
+  log,
+  requestId,
+  url,
+}: RouteContext): Promise<void> {
   if (request.method === "GET" && url?.pathname === "/health") {
     writeJson(response, 200, { status: "ok" });
     return;
@@ -348,49 +365,42 @@ async function readJsonBody(
 ): Promise<unknown> {
   const declared = Number(request.headers["content-length"]);
   if (Number.isFinite(declared) && declared > limit) throw bodyTooLargeError();
-  const chunks = await new Promise<Buffer[]>((resolve, reject) => {
-    const result: Buffer[] = [];
+  const chunks: Buffer[] = [];
+  const read = (async (): Promise<void> => {
     let size = 0;
-    const cleanup = (): void => {
-      request.off("data", onData);
-      request.off("end", onEnd);
-      request.off("error", onError);
-      signal.removeEventListener("abort", onAbort);
-    };
-    const fail = (error: unknown): void => {
-      cleanup();
-      request.pause();
-      reject(error);
-    };
-    const onData = (raw: Buffer): void => {
-      const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+    for await (const raw of request) {
+      const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(String(raw));
       size += chunk.length;
-      if (size > limit) {
-        fail(bodyTooLargeError());
-        return;
-      }
-      result.push(chunk);
-    };
-    const onEnd = (): void => {
-      cleanup();
-      resolve(result);
-    };
-    const onError = (): void =>
-      fail(
-        new HttpError(
-          400,
-          "The request body could not be read.",
-          "invalid_request_error",
-          "invalid_body",
-        ),
-      );
-    const onAbort = (): void => fail(signal.reason);
-    request.on("data", onData);
-    request.once("end", onEnd);
-    request.once("error", onError);
-    signal.addEventListener("abort", onAbort, { once: true });
-    if (signal.aborted) onAbort();
-  });
+      if (size > limit) throw bodyTooLargeError();
+      chunks.push(chunk);
+    }
+  })();
+  // The losing side of the race below still settles with nobody awaiting it.
+  read.catch(() => undefined);
+  let disposeAbort = (): void => undefined;
+  try {
+    // Abort rejects the read without destroying the request, so a timed-out or
+    // disconnected client can still be answered on the still-open response.
+    await Promise.race([
+      read,
+      new Promise<never>((_, reject) => {
+        disposeAbort = listenForAbort(signal, (aborted) =>
+          reject(aborted.reason),
+        );
+      }),
+    ]);
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    if (signal.aborted) throw signal.reason;
+    throw new HttpError(
+      400,
+      "The request body could not be read.",
+      "invalid_request_error",
+      "invalid_body",
+    );
+  } finally {
+    disposeAbort();
+  }
   try {
     return JSON.parse(Buffer.concat(chunks).toString("utf8"));
   } catch {

@@ -103,11 +103,8 @@ function installSignalHandlers(
   const onSigterm = (): void => stop("SIGTERM");
   process.once("SIGINT", onSigint);
   process.once("SIGTERM", onSigterm);
-
-  let disposed = false;
+  // `process.off` is idempotent, so the disposer needs no repeat guard.
   return (): void => {
-    if (disposed) return;
-    disposed = true;
     process.off("SIGINT", onSigint);
     process.off("SIGTERM", onSigterm);
   };
@@ -130,7 +127,6 @@ class AppServerSupervisor {
   #active: AppServer | undefined;
   #starting: AppServer | undefined;
   #initializing: Promise<AppServer> | undefined;
-  readonly #cleanupFailures = new Set<unknown>();
   #recovering = false;
 
   constructor({ options, log, proxy, lifecycle }: AppServerSupervisorOptions) {
@@ -154,8 +150,7 @@ class AppServerSupervisor {
     try {
       initialized = await this.#initializing;
     } catch {
-      // The initialization observer below classifies failures at rejection
-      // time, while normal startup and recovery errors remain with callers.
+      // Startup and recovery errors stay with the callers that requested them.
     }
     const children = [
       ...new Set([this.#active, this.#starting, initialized]),
@@ -164,22 +159,19 @@ class AppServerSupervisor {
     const results = await Promise.allSettled(
       children.map(async (child) => await child.stop()),
     );
+    // A child that will not stop cannot be recovered from during shutdown, so
+    // it is reported rather than propagated.
     for (const result of results)
       if (result.status === "rejected")
-        this.#cleanupFailures.add(result.reason);
-
-    const failures = [...this.#cleanupFailures];
-    if (failures.length === 1) throw failures[0];
-    if (failures.length > 1)
-      throw new AggregateError(failures, "app-server cleanup failed");
+        this.#log.failure("app_server_stop_failed", {}, result.reason);
   }
 
-  /** Stops one partial child while retaining cleanup failure for shutdown. */
+  /** Stops one partial child without masking the failure that preceded it. */
   async #stopPartial(next: AppServer): Promise<void> {
     try {
       await next.stop();
     } catch (error) {
-      this.#cleanupFailures.add(error);
+      this.#log.failure("app_server_stop_failed", {}, error);
     }
   }
 
@@ -196,12 +188,14 @@ class AppServerSupervisor {
       const next = await startAppServer({
         codexPath: this.#options.codexPath,
         codexHome: this.#options.codexHome,
-        // A user-provided proxy-only login must remain untouched when opted out.
+        // A user-provided proxy-only login must remain untouched when opted
+        // out, which an absent source already encodes.
         seedAuthFrom: seedSource,
         seedAuthMode:
           this.#options.syncAuth === "never"
             ? undefined
             : this.#options.syncAuth,
+
         root: this.#options.root,
         startupTimeoutMs: DEFAULT_STARTUP_TIMEOUT_MS,
         shutdownTimeoutMs: this.#options.shutdownTimeoutMs,
@@ -276,16 +270,6 @@ class AppServerSupervisor {
   async #startAndInstall(): Promise<void> {
     const initializing = this.#initialize();
     this.#initializing = initializing;
-    void initializing.catch((error: unknown) => {
-      // An ordinary failure that preceded shutdown remains an operational
-      // startup/recovery error. Once aborted, only the exact lifecycle reason
-      // is expected; a different rejection can be abort cleanup failing.
-      if (
-        this.#lifecycle.signal.aborted &&
-        error !== this.#lifecycle.signal.reason
-      )
-        this.#cleanupFailures.add(error);
-    });
     try {
       const next = await initializing;
       if (this.#lifecycle.signal.aborted) {

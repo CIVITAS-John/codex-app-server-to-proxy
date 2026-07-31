@@ -1,33 +1,18 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import http from "node:http";
-import { promisify } from "node:util";
-import { readFile } from "node:fs/promises";
-import { afterAll, beforeAll, describe, test } from "vitest";
+import { afterAll, beforeAll, test } from "vitest";
 import { startFakeChatBackend } from "../support/chat-backends.js";
 import type { ChatContractBackend } from "../support/chat-contract.js";
-import { repoRootUrl } from "../support/repo-root.js";
 
-/** Promise-based subprocess helper used for the literal curl compatibility path. */
-const execute = promisify(execFile);
+let backend: ChatContractBackend;
 
-/** Synthetic compatibility cases derived from the official request contract. */
-const corpus = JSON.parse(
-  await readFile(
-    new URL(
-      "protocol/fixtures/chat-completions-compatibility.json",
-      repoRootUrl,
-    ),
-    "utf8",
-  ),
-) as {
-  cases: Array<{
-    name: string;
-    client: "curl" | "node-http";
-    request: Record<string, unknown>;
-    expectedObject: string;
-  }>;
-};
+beforeAll(async () => {
+  backend = await startFakeChatBackend();
+});
+
+afterAll(async () => {
+  await backend.close();
+});
 
 /** Sends one JSON request through Node's generic HTTP client. */
 function postWithNodeHttp(
@@ -62,46 +47,24 @@ function postWithNodeHttp(
   });
 }
 
-describe.sequential("published Chat Completions compatibility corpus", () => {
-  let backend: ChatContractBackend;
-
-  beforeAll(async () => {
-    backend = await startFakeChatBackend();
+// The proxy cannot distinguish one HTTP client from another, so only the
+// behavior a non-`fetch` client exercises differently is worth pinning here:
+// consuming a chunked SSE body through Node's own streaming client.
+test("a non-fetch HTTP client streams SSE through to the terminal marker", async () => {
+  const response = await postWithNodeHttp(backend.origin, {
+    model: "gpt-5.6-luna",
+    messages: [{ role: "user", content: "compatibility streaming" }],
+    stream: true,
   });
 
-  afterAll(async () => {
-    await backend.close();
-  });
-
-  for (const entry of corpus.cases) {
-    test(entry.name, async () => {
-      if (entry.client === "curl") {
-        const { stdout } = await execute("curl", [
-          "--fail-with-body",
-          "--silent",
-          "--show-error",
-          `${backend.origin}/v1/chat/completions`,
-          "-H",
-          "Content-Type: application/json",
-          "--data-binary",
-          JSON.stringify(entry.request),
-        ]);
-        const response = JSON.parse(stdout) as { object?: string };
-        assert.equal(response.object, entry.expectedObject);
-        return;
-      }
-
-      const response = await postWithNodeHttp(backend.origin, entry.request);
-      assert.equal(response.status, 200);
-      const frames = response.body
-        .split("\n\n")
-        .filter(Boolean)
-        .map((frame) => frame.slice("data: ".length));
-      assert.equal(frames.at(-1), "[DONE]");
-      const chunks = frames
-        .slice(0, -1)
-        .map((frame) => JSON.parse(frame) as { object?: string });
-      assert.equal(chunks[0]?.object, entry.expectedObject);
-    });
-  }
+  assert.equal(response.status, 200);
+  const frames = response.body
+    .split("\n\n")
+    .filter(Boolean)
+    .map((frame) => frame.slice("data: ".length));
+  assert.equal(frames.at(-1), "[DONE]");
+  const chunks = frames
+    .slice(0, -1)
+    .map((frame) => JSON.parse(frame) as { object?: string });
+  assert.equal(chunks[0]?.object, "chat.completion.chunk");
 });

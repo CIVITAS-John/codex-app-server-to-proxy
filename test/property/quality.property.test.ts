@@ -7,12 +7,12 @@ import { test } from "vitest";
 import { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
 import { bindingHash, canonicalJson } from "../../src/core/canonical.js";
 import { createLogger } from "../../src/core/logger.js";
+import { serializeSseFrame } from "../../src/http/chat-sse.js";
 import {
   aggregateNormalizedEvents,
   EventNormalizer,
-  serializeSseFrame,
   type NormalizedEvent,
-} from "../../src/http/chat.js";
+} from "../../src/http/chat-normalize.js";
 import { startFakeChatBackend } from "../support/chat-backends.js";
 import {
   boundedJsonValue,

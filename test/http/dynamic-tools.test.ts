@@ -12,6 +12,7 @@ import {
   protocolTurn,
 } from "../support/protocol-fixtures.js";
 import {
+  parseSseChunks,
   postChatCompletion,
   responseErrorCode,
   startProxyWithTransport,
@@ -840,14 +841,7 @@ test("streaming continuations hide replayed client calls but expose new calls", 
         messages: toolTranscript(calls, oracleOutput),
       });
       assert.equal(continuedResponse.status, 200);
-      const frames = (await continuedResponse.text())
-        .split("\n\n")
-        .filter(Boolean)
-        .map((frame) => frame.slice("data: ".length));
-      assert.equal(frames.at(-1), "[DONE]");
-      const chunks = frames
-        .slice(0, -1)
-        .map((frame) => JSON.parse(frame) as Record<string, unknown>);
+      const chunks = parseSseChunks(await continuedResponse.text());
       const choices = chunks.flatMap(
         (chunk) =>
           (chunk.choices as

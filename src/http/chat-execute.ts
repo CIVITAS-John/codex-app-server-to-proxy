@@ -1,5 +1,5 @@
 import type { JsonRpcTransport } from "../app-server/json-rpc.js";
-import { record } from "../core/canonical.js";
+import { bindingHash, record } from "../core/canonical.js";
 import type { Logger } from "../core/logger.js";
 import {
   policyBindingHash,
@@ -11,7 +11,6 @@ import {
   type TokenUsageCounters,
 } from "../core/token-usage.js";
 import {
-  bindingHash,
   type ContinuationCoordinator,
   type PendingToolCall,
   type StoredToolCall,
@@ -31,17 +30,13 @@ import {
   toFunctionCallItem,
   toFunctionCallOutputItem,
   toHistoryItems,
-  terminalToolResultBlock,
   validateToolResults,
   type ChatRequest,
 } from "./chat-validate.js";
-import { HttpError } from "./errors.js";
+import { HttpError, toolCorrelationErrorForStatus } from "./errors.js";
 
 /** Maximum buffered app-server activity retained for one HTTP response. */
 const MAX_INGRESS_EVENTS = 1_024;
-
-/** Maximum approximate JSON bytes retained in one response's ingress queue. */
-const MAX_INGRESS_BYTES = 8 * 1024 * 1024;
 
 /** Proxy-created thread subscriptions with raw boundaries on each transport. */
 const RAW_RESPONSE_THREADS = new WeakMap<JsonRpcTransport, Set<string>>();
@@ -56,16 +51,9 @@ type IngressEvent =
       params: unknown;
     };
 
-/** One queued ingress event with the retained byte size computed at enqueue. */
-interface QueuedIngress {
-  event: IngressEvent;
-  bytes: number;
-}
-
 /** Owns bounded request ingress and its wake and failure state. */
 class IngressQueue {
-  readonly #ingress: QueuedIngress[] = [];
-  #ingressBytes = 0;
+  readonly #ingress: IngressEvent[] = [];
   #wake: (() => void) | undefined;
   #queueError: Error | undefined;
   #transportError: Error | undefined;
@@ -83,7 +71,7 @@ class IngressQueue {
 
   /** Reports whether any retained event is a notification. */
   get hasNotification(): boolean {
-    return this.#ingress.some(({ event }) => event.type === "notification");
+    return this.#ingress.some((event) => event.type === "notification");
   }
 
   /**
@@ -96,28 +84,23 @@ class IngressQueue {
 
   /** Returns the next retained event without consuming it. */
   peek(): IngressEvent | undefined {
-    return this.#ingress[0]?.event;
+    return this.#ingress[0];
   }
 
-  /** Retains one event within the count and approximate-byte limits. */
+  /** Retains one event within the bounded event count. */
   enqueue(event: IngressEvent): void {
     if (event.type === "dynamic_tool" && this.#dynamicCallsCancelled) return;
     if (this.#queueError) {
       if (event.type === "dynamic_tool") this.#rejectDynamicCall(event.call);
       return;
     }
-    const eventBytes = approximateJsonBytes(event);
-    if (
-      this.#ingress.length >= MAX_INGRESS_EVENTS ||
-      this.#ingressBytes + eventBytes > MAX_INGRESS_BYTES
-    ) {
+    if (this.#ingress.length >= MAX_INGRESS_EVENTS) {
       this.#queueError = new Error("App-server activity queue overflowed.");
       if (event.type === "dynamic_tool") this.#rejectDynamicCall(event.call);
       this.notify();
       return;
     }
-    this.#ingress.push({ event, bytes: eventBytes });
-    this.#ingressBytes += eventBytes;
+    this.#ingress.push(event);
     this.notify();
   }
 
@@ -138,39 +121,25 @@ class IngressQueue {
     if (this.#queueError) throw this.#queueError;
   }
 
-  /** Rechecks only overflow before the suspension queue is drained. */
-  assertQueueHealthy(): void {
-    if (this.#queueError) throw this.#queueError;
-  }
-
-  /** Consumes the next retained event and releases its byte budget. */
+  /** Consumes the next retained event. */
   shift(): IngressEvent | undefined {
-    const next = this.#ingress.shift();
-    if (!next) return undefined;
-    this.#ingressBytes -= next.bytes;
-    return next.event;
+    return this.#ingress.shift();
   }
 
-  /** Drains all retained events in arrival order and resets byte accounting. */
+  /** Drains all retained events in arrival order. */
   drainAll(): IngressEvent[] {
-    const captured = this.#ingress.splice(0).map((queued) => queued.event);
-    this.#ingressBytes = 0;
-    return captured;
+    return this.#ingress.splice(0);
   }
 
   /** Consumes retained notifications, leaving dynamic requests for cleanup. */
   drainNotifications(): Array<Extract<IngressEvent, { type: "notification" }>> {
     const drained: Array<Extract<IngressEvent, { type: "notification" }>> = [];
-    const retained: QueuedIngress[] = [];
-    for (const queued of this.#ingress.splice(0)) {
-      if (queued.event.type === "notification") drained.push(queued.event);
-      else retained.push(queued);
+    const retained: IngressEvent[] = [];
+    for (const event of this.#ingress.splice(0)) {
+      if (event.type === "notification") drained.push(event);
+      else retained.push(event);
     }
     this.#ingress.push(...retained);
-    this.#ingressBytes = retained.reduce(
-      (sum, queued) => sum + queued.bytes,
-      0,
-    );
     return drained;
   }
 
@@ -178,13 +147,9 @@ class IngressQueue {
   markDynamicCallsCancelled(): void {
     this.#dynamicCallsCancelled = true;
     const retained = this.#ingress.filter(
-      ({ event }) => event.type === "notification",
+      (event) => event.type === "notification",
     );
     this.#ingress.splice(0, this.#ingress.length, ...retained);
-    this.#ingressBytes = retained.reduce(
-      (sum, queued) => sum + queued.bytes,
-      0,
-    );
   }
 
   /**
@@ -239,7 +204,7 @@ class IngressQueue {
   ): Promise<boolean> {
     const hasBoundary = (): boolean =>
       this.#ingress.some(
-        ({ event }) =>
+        (event) =>
           event.type === "notification" &&
           event.method === "rawResponse/completed" &&
           matchesTurn(event.params, threadId, turnId),
@@ -251,7 +216,7 @@ class IngressQueue {
 
   /** Rejects every retained dynamic request during unsuspended cleanup. */
   rejectQueuedDynamicCalls(): void {
-    for (const { event } of this.#ingress)
+    for (const event of this.#ingress)
       if (event.type === "dynamic_tool") this.#rejectDynamicCall(event.call);
   }
 }
@@ -551,10 +516,10 @@ export async function execute(
             handle.terminal = true;
             continue;
           }
+          // `peek` above already routed every dynamic event, and no await
+          // intervenes, so the head can only be a notification here.
           const next = queue.shift();
-          if (!next) continue;
-          if (next.type === "dynamic_tool" || next.type === "raw_dynamic_tool")
-            continue;
+          if (next?.type !== "notification") continue;
           if (!matchesTurn(next.params, handle.threadId, handle.turnId))
             continue;
           for (const event of normalizer.normalize(next.method, next.params)) {
@@ -728,7 +693,6 @@ function captureToolBatch(
   captured: IngressEvent[];
   stored: StoredToolCall[];
 } {
-  queue.assertQueueHealthy();
   const captured = queue.drainAll();
   const calls = captured
     .filter(
@@ -868,7 +832,7 @@ async function resumeContinuation(
 
   // Set threadId first so cleanup can release it after setup failures.
   handle.threadId = stored.threadId;
-  const terminalToolResults = terminalToolResultBlock(request.messages);
+  const { terminalToolResults } = request;
   if (
     stored.state === "expired" &&
     stored.callIds?.length &&
@@ -881,7 +845,11 @@ async function resumeContinuation(
     const pending = stored.pendingCalls;
     // The loader tombstones legacy records without call metadata.
     if (!pending?.length) continuationFailure(410, "expired_tool_continuation");
-    const results = validateToolResults(request.messages, pending);
+    const results = validateToolResults(
+      request.messages,
+      terminalToolResults,
+      pending,
+    );
     // Claim before awaiting so concurrent continuations remain atomic.
     acquireThread(handle, options, onToolRequest);
     await resumeIdleThread(request, options, handle);
@@ -1139,25 +1107,11 @@ function turnPolicyParams(policy: EffectivePolicy): Record<string, unknown> {
   };
 }
 
-/** Estimates retained ingress size using its JSON representation. */
-function approximateJsonBytes(value: unknown): number {
-  try {
-    return Buffer.byteLength(JSON.stringify(value) ?? "null");
-  } catch {
-    return MAX_INGRESS_BYTES + 1;
-  }
-}
-
 /** Throws the stable OpenAI-shaped error for continuation failures. */
 function continuationFailure(status: number, code: string): never {
-  throw new HttpError(
+  throw toolCorrelationErrorForStatus(
     status,
     "The previous response cannot be continued.",
-    status >= 500
-      ? "server_error"
-      : status === 409
-        ? "conflict_error"
-        : "invalid_request_error",
     code,
     "previous_response_id",
   );

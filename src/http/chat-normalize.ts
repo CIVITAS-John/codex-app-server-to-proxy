@@ -174,14 +174,6 @@ export async function aggregateNormalizedEvents(
   };
 }
 
-/** Converts one app-server notification into zero or more public events. */
-export function normalizeNotification(
-  method: string,
-  value: unknown,
-): NormalizedEvent[] {
-  return new EventNormalizer().normalize(method, value);
-}
-
 /** Maintains stable item-to-choice indexes while normalizing interleaved events. */
 export class EventNormalizer {
   readonly #toolCalls = new Map<string, NormalizedToolCall>();
@@ -273,7 +265,8 @@ export class EventNormalizer {
       // this only pins the invariant against a malformed notification.
       if (!last) return [];
       if (total) this.#latestUsageTotal = total;
-      return [{ usage: this.#turnUsage(last, total) }];
+      const usage = this.#turnUsage(last, total);
+      return usage ? [{ usage }] : [];
     }
     if (method === "error") {
       const error = record(params.error);
@@ -344,7 +337,7 @@ export class EventNormalizer {
   #turnUsage(
     last: Record<string, unknown>,
     total: TokenUsageCounters | undefined,
-  ): Usage {
+  ): Usage | undefined {
     // Only a persisted pre-response snapshot (or zero for a fresh thread) is an
     // authoritative baseline. Deriving one from `total - last` would silently
     // lose earlier model requests when the first observed update was coalesced.
@@ -565,14 +558,21 @@ function countersToUsage(value: TokenUsageCounters): Usage {
   };
 }
 
-/** Maps exact app-server last-request usage to the standard usage object. */
-function toUsage(value: Record<string, unknown>): Usage {
-  const input = finite(value.inputTokens, "inputTokens");
-  const output = finite(value.outputTokens, "outputTokens");
+/**
+ * Maps exact app-server last-request usage to the standard usage object.
+ * Usage is optional output: incomplete counters omit it rather than failing a
+ * turn whose frames have already been committed.
+ */
+function toUsage(value: Record<string, unknown>): Usage | undefined {
+  const input = finite(value.inputTokens);
+  const output = finite(value.outputTokens);
+  const total = finite(value.totalTokens);
+  if (input === undefined || output === undefined || total === undefined)
+    return undefined;
   const result: Usage = {
     prompt_tokens: input,
     completion_tokens: output,
-    total_tokens: finite(value.totalTokens, "totalTokens"),
+    total_tokens: total,
   };
   if (typeof value.cachedInputTokens === "number")
     result.prompt_tokens_details = { cached_tokens: value.cachedInputTokens };
@@ -629,9 +629,9 @@ export function isEstablishedUnrelatedNotification(
   return Boolean(turnId && notificationTurnId(params) !== turnId);
 }
 
-/** Requires a finite usage count without estimating it. */
-function finite(value: unknown, name: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value))
-    throw new Error(`Invalid app-server usage ${name}.`);
-  return value;
+/** Returns a usage count only when app-server reported it exactly. */
+function finite(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
 }

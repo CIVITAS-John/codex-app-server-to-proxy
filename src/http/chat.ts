@@ -9,36 +9,10 @@ import {
 import { execute, type ChatHandlerOptions } from "./chat-execute.js";
 import {
   policyHttpError,
-  terminalToolResultBlock,
   validateRequest,
   type ChatRequest,
-  type ParsedChatRequest,
 } from "./chat-validate.js";
-import {
-  PolicyError,
-  resolveEffectivePolicy,
-  type EffectivePolicy,
-} from "../core/policy.js";
-
-export { serializeSseFrame } from "./chat-sse.js";
-export {
-  aggregateNormalizedEvents,
-  EventNormalizer,
-  HANDLED_NOTIFICATION_METHODS,
-  normalizeNotification,
-} from "./chat-normalize.js";
-export type {
-  AggregatedNormalizedEvents,
-  NormalizedDelta,
-  NormalizedError,
-  NormalizedEvent,
-  NormalizedFunction,
-  NormalizedToolCall,
-  NormalizedToolResult,
-  NormalizedToolResultData,
-  Usage,
-} from "./chat-normalize.js";
-export type { ChatHandlerOptions } from "./chat-execute.js";
+import { PolicyError, resolveEffectivePolicy } from "../core/policy.js";
 
 /** Validates, executes, and serializes one Chat Completions request. */
 export async function handleChatCompletion(
@@ -46,44 +20,27 @@ export async function handleChatCompletion(
   response: ServerResponse,
   options: ChatHandlerOptions,
 ): Promise<void> {
-  let parsed: ParsedChatRequest;
+  let request: ChatRequest;
   try {
-    parsed = validateRequest(
+    const { requestPolicy, ...parsed } = validateRequest(
       body,
       options.log,
       options.requestId,
       options.implicitToolContinuation,
     );
+    request = {
+      ...parsed,
+      policy: await resolveEffectivePolicy(
+        requestPolicy,
+        options.root,
+        options.requirements,
+      ),
+    };
   } catch (error) {
     if (error instanceof PolicyError) throw policyHttpError(error);
     throw error;
   }
-  let policy: EffectivePolicy;
-  try {
-    policy = await resolveEffectivePolicy(
-      parsed.requestPolicy,
-      options.root,
-      options.requirements,
-    );
-  } catch (error) {
-    if (error instanceof PolicyError) throw policyHttpError(error);
-    throw error;
-  }
-  const request: ChatRequest = {
-    model: parsed.model,
-    ...(parsed.reasoningEffort
-      ? { reasoningEffort: parsed.reasoningEffort }
-      : {}),
-    messages: parsed.messages,
-    stream: parsed.stream,
-    includeUsage: parsed.includeUsage,
-    dynamicTools: parsed.dynamicTools,
-    ...(parsed.previousResponseId
-      ? { previousResponseId: parsed.previousResponseId }
-      : {}),
-    policy,
-  };
-  const terminalToolResults = terminalToolResultBlock(request.messages);
+  const { terminalToolResults } = request;
   if (!request.previousResponseId && terminalToolResults.length) {
     const callIds = terminalToolResults.map((message) => message.toolCallId!);
     request.previousResponseId =

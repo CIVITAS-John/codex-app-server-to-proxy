@@ -3,7 +3,6 @@ import {
   chmod,
   mkdir,
   readFile,
-  readdir,
   rm,
   stat,
   symlink,
@@ -14,11 +13,10 @@ import { test, vi } from "vitest";
 import { PassThrough } from "node:stream";
 import { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
 import {
-  bindingHash,
   ContinuationCoordinator,
-  MAX_INTERRUPTED_TOOL_TURNS,
   ResponseStore,
 } from "../../src/continuation/state.js";
+import { bindingHash } from "../../src/core/canonical.js";
 import { HttpError } from "../../src/http/errors.js";
 import { withTempDir } from "../support/temp.js";
 
@@ -123,7 +121,7 @@ test("a corrupt store is recovered as empty without inventing mappings", async (
   }, "codex-proxy-state-");
 });
 
-test("state loading rejects schema-invalid record details", async () => {
+test("state loading rejects records that cannot drive continuation", async () => {
   const valid = {
     responseId: "response_valid",
     threadId: "thread_valid",
@@ -132,13 +130,15 @@ test("state loading rejects schema-invalid record details", async () => {
     createdAt: Date.now(),
     expiresAt: Date.now() + 60_000,
   };
+  // This process is the file's only writer, so loading checks the fields
+  // continuation reads rather than re-validating the writer. `usageTotal` and
+  // `pendingCalls` are validated because they feed token arithmetic and
+  // injected thread history.
   const invalidRecords = [
-    { ...valid, unexpected: true },
-    { ...valid, callIds: ["duplicate", "duplicate"] },
-    { ...valid, toolsHash: "A".repeat(64) },
-    { ...valid, policyHash: "f".repeat(63) },
-    { ...valid, reasoningEffort: "" },
-    { ...valid, reasoningEffortBound: false },
+    { ...valid, responseId: "" },
+    { ...valid, threadId: 5 },
+    { ...valid, state: "half_written" },
+    { ...valid, expiresAt: "soon" },
     {
       ...valid,
       usageTotal: {
@@ -158,31 +158,12 @@ test("state loading rejects schema-invalid record details", async () => {
         reasoningOutputTokens: 0,
       },
     },
-    { ...valid, responseId: "" },
-    // pendingCalls must be non-empty, complete, unique, and agree with callIds.
-    { ...valid, callIds: ["call_1"], pendingCalls: [] },
-    {
-      ...valid,
-      callIds: ["call_1"],
-      pendingCalls: [{ callId: "other", name: "lookup", arguments: "{}" }],
-    },
     {
       ...valid,
       callIds: ["call_1"],
       pendingCalls: [{ callId: "call_1", name: "lookup" }],
     },
-    {
-      ...valid,
-      callIds: ["call_1", "call_2"],
-      pendingCalls: [
-        { callId: "call_1", name: "lookup", arguments: "{}" },
-        { callId: "call_1", name: "other", arguments: "{}" },
-      ],
-    },
-    {
-      ...valid,
-      pendingCalls: [{ callId: "call_1", name: "lookup", arguments: "{}" }],
-    },
+    { ...valid, pendingCalls: [{ callId: "", name: "l", arguments: "{}" }] },
   ];
   for (const [index, invalid] of invalidRecords.entries()) {
     await withTempDir(async (directory) => {
@@ -196,6 +177,32 @@ test("state loading rejects schema-invalid record details", async () => {
       );
     }, `codex-proxy-invalid-record-${index}-`);
   }
+});
+
+test("state loading preserves a record carrying unknown future fields", async () => {
+  await withTempDir(async (directory) => {
+    await writeFile(
+      join(directory, "continuations.json"),
+      JSON.stringify({
+        version: 0,
+        records: [
+          {
+            responseId: "response_future",
+            threadId: "thread_future",
+            state: "ready",
+            ...binding,
+            createdAt: Date.now(),
+            expiresAt: Date.now() + 60_000,
+            unknownFutureField: true,
+          },
+        ],
+      }),
+    );
+    assert.equal(
+      new ResponseStore(directory).get("response_future")?.state,
+      "ready",
+    );
+  }, "codex-proxy-future-record-");
 });
 
 test("leftover atomic-write temporary files cannot replace valid records", async () => {
@@ -219,37 +226,39 @@ test("leftover atomic-write temporary files cannot replace valid records", async
   }, "codex-proxy-state-");
 });
 
-test("construction sweeps temporaries stranded by an interrupted write", async () => {
+test("a temporary stranded by an interrupted write is overwritten, not trusted", async () => {
   await withTempDir(async (directory) => {
     await writeFile(
-      join(directory, `continuations.json.999.${"a".repeat(8)}.tmp`),
-      "abruptly truncated",
-    );
-    await writeFile(
-      join(directory, `continuations.json.1000.${"b".repeat(8)}.tmp`),
+      join(directory, "continuations.json.tmp"),
       "abruptly truncated",
     );
 
-    new ResponseStore(directory);
-
-    const remaining = await readdir(directory);
-    assert.equal(
-      remaining.some((name) => name.endsWith(".tmp")),
-      false,
-    );
-  }, "codex-proxy-state-");
-});
-
-test("a failed atomic write preserves disk and rolls back in-memory records", async () => {
-  await withTempDir(async (directory) => {
-    const temporary = join(directory, "forced-temporary");
-    const store = new ResponseStore(directory, undefined, () => temporary);
+    const store = new ResponseStore(directory);
     store.put({
       responseId: "response_1",
       threadId: "thread_1",
       state: "ready",
       ...binding,
     });
+
+    assert.equal(
+      new ResponseStore(directory).get("response_1")?.state,
+      "ready",
+    );
+  }, "codex-proxy-state-");
+});
+
+test("a failed atomic write leaves the last durable state on disk", async () => {
+  await withTempDir(async (directory) => {
+    const temporary = join(directory, "continuations.json.tmp");
+    const store = new ResponseStore(directory);
+    store.put({
+      responseId: "response_1",
+      threadId: "thread_1",
+      state: "ready",
+      ...binding,
+    });
+    // A directory at the temporary path makes the next atomic write fail.
     await mkdir(temporary);
 
     assert.throws(() =>
@@ -260,14 +269,12 @@ test("a failed atomic write preserves disk and rolls back in-memory records", as
         ...binding,
       }),
     );
-    assert.equal(store.get("response_1")?.state, "ready");
-    assert.equal(store.get("response_2"), undefined);
-    // The forced temporary path must be removed before reloading the store.
     await rm(temporary, { recursive: true });
-    assert.equal(
-      new ResponseStore(directory).get("response_1")?.state,
-      "ready",
-    );
+    // Memory may lead disk after a failed write; the durable record is what a
+    // restart resumes from, and it never observed the failed mutation.
+    const reloaded = new ResponseStore(directory);
+    assert.equal(reloaded.get("response_1")?.state, "ready");
+    assert.equal(reloaded.get("response_2"), undefined);
   }, "codex-proxy-state-");
 });
 
@@ -753,7 +760,7 @@ test("late callbacks from an interrupted turn stay unanswered during its continu
   }, "codex-proxy-state-");
 });
 
-test("interrupted turn tombstones evict the least recently interrupted turn", async () => {
+test("every interrupted turn stays suppressed for the transport generation", async () => {
   await withTempDir(async (directory) => {
     const output = new PassThrough();
     const written: Buffer[] = [];
@@ -768,14 +775,12 @@ test("interrupted turn tombstones evict the least recently interrupted turn", as
       calls.push(call.callId),
     );
     assert.ok(lease);
-    // One turn beyond the bound, so only the very first mark is evicted.
-    for (let turn = 0; turn <= MAX_INTERRUPTED_TOOL_TURNS; turn += 1)
+    for (let turn = 0; turn < 5_000; turn += 1)
       coordinator.markTurnInterrupted("thread_1", `turn_${turn}`);
 
     for (const [id, turnId, callId] of [
-      [1, "turn_0", "call_evicted"],
-      [2, "turn_1", "call_retained"],
-      [3, `turn_${MAX_INTERRUPTED_TOOL_TURNS}`, "call_newest"],
+      [1, "turn_0", "call_oldest"],
+      [2, "turn_4999", "call_newest"],
     ] as const)
       rpc.emit("request", {
         id,
@@ -790,9 +795,9 @@ test("interrupted turn tombstones evict the least recently interrupted turn", as
         },
       });
 
-    // An evicted turn is indistinguishable from a live one and reaches the
-    // owner again; every retained turn stays suppressed.
-    assert.deepEqual(calls, ["call_evicted"]);
+    // The set is unbounded within one transport generation, so no late
+    // callback from an interrupted turn is ever answered or routed.
+    assert.deepEqual(calls, []);
     assert.equal(Buffer.concat(written).toString("utf8"), "");
     lease.release();
     coordinator.dispose();

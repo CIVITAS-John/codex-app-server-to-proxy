@@ -3,7 +3,7 @@ import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vitest";
 import { ResponseStore } from "../../src/continuation/state.js";
-import { HANDLED_NOTIFICATION_METHODS } from "../../src/http/chat.js";
+import { HANDLED_NOTIFICATION_METHODS } from "../../src/http/chat-normalize.js";
 import { repoRootUrl } from "../support/repo-root.js";
 import { exposedEvents } from "../../protocol/fixtures/exposed-events.js";
 import {
@@ -219,27 +219,34 @@ test("continuation schema examples agree with the production store reader", asyn
     pendingAccepted.pendingCalls,
   );
 
+  // The schema above describes what the proxy writes. The reader is
+  // deliberately more permissive, because this process is the file's only
+  // writer: it rejects only records it cannot use, and preserves unknown
+  // fields so a store written by a newer version stays loadable.
   const rejected = [
     { ...accepted, responseId: "" },
-    { ...accepted, toolsHash: "A".repeat(64) },
+    { ...accepted, threadId: 5 },
     { ...accepted, createdAt: null },
-    { ...accepted, callIds: ["duplicate", "duplicate"] },
-    { ...accepted, reasoningEffort: "" },
-    { ...accepted, reasoningEffortBound: false },
-    { ...accepted, unexpected: true },
-    // Call metadata must be complete and agree with callIds.
-    { ...pendingAccepted, pendingCalls: [] },
+    { ...accepted, state: "half_written" },
+    { ...accepted, usageTotal: { inputTokens: 1, outputTokens: 1 } },
+    // Injected call metadata must be complete to rebuild the Responses pair.
     {
       ...pendingAccepted,
-      pendingCalls: [{ callId: "foreign", name: "lookup", arguments: "{}" }],
+      pendingCalls: [{ callId: "call_1", name: "lookup" }],
     },
   ];
   for (const record of rejected)
     assert.equal(
       await loadContinuationFixture(record),
       undefined,
-      `trusted schema-invalid continuation ${JSON.stringify(record)}`,
+      `trusted unusable continuation ${JSON.stringify(record)}`,
     );
+
+  assert.equal(
+    (await loadContinuationFixture({ ...accepted, unknownFutureField: true }))
+      ?.threadId,
+    accepted.threadId,
+  );
 });
 
 test("contract documents the implemented Stage 05 compatibility mappings", async () => {

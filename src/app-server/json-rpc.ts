@@ -39,18 +39,16 @@ export interface ServerRequest {
 export class JsonRpcTransport extends EventEmitter {
   readonly #pending = new Map<number, Pending>();
   readonly #output: Writable;
-  readonly #maxPending: number;
   #nextId = 1;
   #closed = false;
 
-  constructor(input: Readable, output: Writable, maxPending = 256) {
+  constructor(input: Readable, output: Writable) {
     super();
     // The shared transport intentionally fans notifications out to every active
     // HTTP request. Those request lifecycles detach their listeners, so a fixed
     // warning threshold would misdiagnose valid configured concurrency as a leak.
     this.setMaxListeners(0);
     this.#output = output;
-    this.#maxPending = maxPending;
     const lines = createInterface({ input, crlfDelay: Infinity });
     lines.on("line", (line) => this.#receive(line));
     lines.on("close", () =>
@@ -69,10 +67,8 @@ export class JsonRpcTransport extends EventEmitter {
       return Promise.reject(new Error("app-server transport is closed"));
     if (signal?.aborted)
       return Promise.reject(signal.reason ?? new Error("request cancelled"));
-    if (this.#pending.size >= this.#maxPending)
-      return Promise.reject(
-        new RpcError(-32001, "app-server request queue is full"),
-      );
+    // In-flight requests are already bounded upstream by the HTTP request pool
+    // and one active turn per thread, so this transport adds no second cap.
     const id = this.#nextId++;
     return new Promise((resolve, reject) => {
       let disposeAbort = (): void => undefined;

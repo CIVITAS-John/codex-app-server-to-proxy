@@ -87,3 +87,25 @@ export function postChatCompletion(
 export async function responseErrorCode(response: Response): Promise<string> {
   return ((await response.json()) as { error: { code: string } }).error.code;
 }
+
+/**
+ * Splits an SSE body into its decoded `data:` payloads. Asserting the terminal
+ * `[DONE]` marker is left to callers, because an error stream deliberately
+ * closes without one.
+ */
+export function parseSseFrames(body: string): string[] {
+  return body
+    .split("\n\n")
+    .filter((frame) => frame.trim() !== "")
+    .map((frame) => frame.slice("data: ".length));
+}
+
+/** Parses every SSE chunk of a successful stream, requiring the `[DONE]` end. */
+export function parseSseChunks<T = Record<string, unknown>>(body: string): T[] {
+  const frames = parseSseFrames(body);
+  if (frames.at(-1) !== "[DONE]")
+    throw new Error(
+      `SSE stream did not end with [DONE]: ${String(frames.at(-1))}`,
+    );
+  return frames.slice(0, -1).map((frame) => JSON.parse(frame) as T);
+}

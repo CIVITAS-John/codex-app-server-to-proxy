@@ -16,22 +16,16 @@ export function listenForAbort(
     return () => undefined;
   }
 
-  let disposed = false;
-  const onAbort = (): void => {
-    if (disposed) return;
-    try {
-      listener(signal);
-    } finally {
-      dispose();
-    }
-  };
+  const onAbort = (): void => listener(signal);
   signal.addEventListener("abort", onAbort, { once: true });
-  const dispose = (): void => {
+  // `once` retires the listener after it fires, so only the returned disposer
+  // needs a flag, and only to stay idempotent for callers releasing twice.
+  let disposed = false;
+  return (): void => {
     if (disposed) return;
     disposed = true;
     signal.removeEventListener("abort", onAbort);
   };
-  return dispose;
 }
 
 /** Resolves after a delay or rejects with the signal's exact abort reason. */
@@ -41,24 +35,19 @@ export function abortableDelay(
 ): Promise<void> {
   if (signal?.aborted) return Promise.reject(signal.reason);
 
+  // A promise settles once, so whichever path runs first wins and the loser's
+  // own release is a no-op; neither needs a settled flag.
   return new Promise<void>((resolve, reject) => {
-    let settled = false;
-    const timer = setTimeout(done, milliseconds);
+    const timer = setTimeout(() => {
+      disposeAbort();
+      resolve();
+    }, milliseconds);
     timer.unref();
     const disposeAbort = listenForAbort(signal, (abortedSignal) => {
-      if (settled) return;
-      settled = true;
       clearTimeout(timer);
       disposeAbort();
       reject(abortedSignal.reason);
     });
-
-    function done(): void {
-      if (settled) return;
-      settled = true;
-      disposeAbort();
-      resolve();
-    }
   });
 }
 

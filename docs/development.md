@@ -46,7 +46,6 @@ The maintained TypeScript modules are grouped by domain so the public HTTP contr
 | `npm run generate:protocol` | Refresh generated app-server protocol structures |
 | `npm run check:protocol` | Regenerate in a temporary root and reject checked-in protocol drift |
 | `npm run models:live` | List the authenticated live Codex model catalog without starting a model turn |
-| `npm run spike:offline` | Run the offline protocol spike |
 | `npm run test:live` | Run the opt-in live contract suite |
 
 The default local test command excludes `*.live.test.ts`, never makes a model call, and enables V8 coverage for maintained `src/` code. Generated protocol files, tests, and the executable shim do not inflate thresholds. Property tests use seed `17072026`, bounded run counts, and checked-in minimal regression examples under `protocol/fixtures/property-regressions.json`.
@@ -57,7 +56,7 @@ The proxy intentionally does not expose `GET /v1/models`. From a repository chec
 
 ## Continuous integration
 
-Required CI runs `npm ci` followed by the same `npm run check` command contributors use locally. Linux, macOS, and Windows all exercise the primary Node.js 24 LTS. Node.js 20 is the minimum supported line; the `engines` range accepts newer majors, and matrix lines are added as they are validated.
+Required CI runs `npm ci`, then the full `npm run check` on Linux and `npm test` on macOS and Windows. Formatting, linting, and protocol regeneration produce platform-independent results, so they are gated once rather than three times; every platform still builds, type-checks, runs the whole offline suite, and tests the packed CLI. Linux, macOS, and Windows all exercise the primary Node.js 24 LTS. Node.js 20 is the minimum supported line; the `engines` range accepts newer majors, and matrix lines are added as they are validated.
 
 CI sets `CODEX_TEST_COVERAGE` explicitly. The primary Node.js 24 Linux job alone runs coverage and its floors and publishes the offline `coverage/` directory; the other operating-system and Node.js compatibility jobs run the same tests without redundant instrumentation. Omitting the variable locally keeps coverage enabled. Coverage is limited to maintained source and thresholds are based on the Stage 07 baseline. Pull requests never run the live suite.
 

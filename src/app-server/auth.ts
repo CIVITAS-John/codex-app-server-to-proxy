@@ -215,7 +215,7 @@ async function startAndWaitForLogin(
 }
 
 /** Opens a login URL with the platform browser without invoking a shell. */
-export async function launchBrowser(url: string): Promise<boolean> {
+async function launchBrowser(url: string): Promise<boolean> {
   const command =
     process.platform === "darwin"
       ? "open"
