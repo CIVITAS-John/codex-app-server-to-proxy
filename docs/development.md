@@ -52,7 +52,7 @@ The default local test command excludes `*.live.test.ts`, never makes a model ca
 
 The protocol cleanliness check seeds a temporary protocol root, regenerates there with the package-owned executable and version pin, compares the complete file set and contents, and removes the temporary root in a `finally` path. It never rewrites checked-in artifacts; `npm run generate:protocol` remains the explicit mutating command.
 
-The proxy intentionally does not expose `GET /v1/models`. From a repository checkout, run `npm run models:live` to initialize and authenticate the pinned app-server and read its paginated `model/list` catalog. The default output shows the exact model strings accepted by Codex plus advertised reasoning efforts. Pass `-- --include-hidden` to include hidden catalog entries or `-- --json` for the complete response entries. Catalog lookup makes zero model calls.
+`GET /v1/models` is the public compatibility route. It queries the active authenticated pinned app-server, aggregates all `model/list` pages, exposes visible model slugs accepted by Codex, and starts zero Codex threads or turns. When the temporary Responses Lite override is installed, it reflects that frozen catalog; otherwise it reflects app-server's ordinary catalog. The OpenAI-shaped `created: 0` and `owned_by: "openai"` fields are synthetic compatibility placeholders because app-server does not provide them. From a repository checkout, `npm run models:live` remains the hidden/full-metadata diagnostic: add `-- --include-hidden` for hidden entries or `-- --json` for complete metadata. It also starts zero model turns.
 
 ## Continuous integration
 

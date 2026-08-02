@@ -1,57 +1,65 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
+import type { Model } from "../../protocol/generated/typescript/v2/Model.js";
+import type { ModelListResponse } from "../../protocol/generated/typescript/v2/ModelListResponse.js";
+import { readModelCatalog } from "../../src/app-server/models.js";
 import {
   formatModelCatalog,
   parseModelListArguments,
-  readModelCatalog,
 } from "../../scripts/list-models-live.mjs";
+import { protocolModel } from "../support/protocol-fixtures.js";
 
 /** Complete catalog entry used by the live-model script tests. */
 const catalogModel = {
-  id: "gpt-5.6-luna",
-  model: "gpt-5.6-luna",
-  upgrade: null,
-  upgradeInfo: null,
-  availabilityNux: null,
+  ...protocolModel("gpt-5.6-luna", { id: "gpt-5.6-luna" }),
   displayName: "GPT-5.4 mini",
   description: "Small Codex model",
-  hidden: false,
   supportedReasoningEfforts: [
     { reasoningEffort: "medium", description: "Balanced" },
     { reasoningEffort: "high", description: "Deeper" },
   ],
-  defaultReasoningEffort: "medium",
-  inputModalities: ["text"],
-  supportsPersonality: false,
-  additionalSpeedTiers: [],
-  serviceTiers: [],
-  defaultServiceTier: null,
   isDefault: true,
-};
+} satisfies Model;
 
 test("live model catalog follows pagination and preserves advertised order", async () => {
   const requests: unknown[] = [];
-  const models = await readModelCatalog(async (params: unknown) => {
-    requests.push(params);
-    return requests.length === 1
-      ? { data: [catalogModel], nextCursor: "next" }
-      : {
-          data: [
-            {
-              ...catalogModel,
-              id: "hidden-model",
-              model: "hidden-model",
-              hidden: true,
-              isDefault: false,
-            },
-          ],
-          nextCursor: null,
-        };
-  }, true);
+  const firstPage = {
+    data: [catalogModel],
+    nextCursor: "next",
+  } satisfies ModelListResponse;
+  const secondPage = {
+    data: [
+      {
+        ...catalogModel,
+        id: "hidden-model",
+        model: "hidden-model",
+        hidden: true,
+        isDefault: false,
+      },
+    ],
+    nextCursor: null,
+  } satisfies ModelListResponse;
+  const models = await readModelCatalog(
+    {
+      request: async (...args) => {
+        requests.push(args);
+        return requests.length === 1 ? firstPage : secondPage;
+      },
+    },
+    { includeHidden: true },
+  );
 
   assert.deepEqual(requests, [
-    { cursor: null, limit: 100, includeHidden: true },
-    { cursor: "next", limit: 100, includeHidden: true },
+    [
+      "model/list",
+      { cursor: null, limit: 100, includeHidden: true },
+      undefined,
+    ],
+    [
+      "model/list",
+      { cursor: "next", limit: 100, includeHidden: true },
+      undefined,
+    ],
   ]);
   assert.deepEqual(
     models.map((model: { model: string }) => model.model),
@@ -66,15 +74,79 @@ test("live model catalog follows pagination and preserves advertised order", asy
       "  GPT-5.4 mini; reasoning: medium, high",
     ].join("\n"),
   );
+  assert.equal(models[0]?.description, "Small Codex model");
+  assert.deepEqual(models[0]?.supportedReasoningEfforts, [
+    { reasoningEffort: "medium", description: "Balanced" },
+    { reasoningEffort: "high", description: "Deeper" },
+  ]);
 });
 
-test("live model catalog rejects malformed responses and cursor loops", async () => {
+test("live model catalog defaults to visible models and forwards its abort signal", async () => {
+  const controller = new AbortController();
+  const signals: Array<AbortSignal | undefined> = [];
+  const emptyPage = {
+    data: [],
+    nextCursor: null,
+  } satisfies ModelListResponse;
+  await readModelCatalog(
+    {
+      request: async (_method, _params, signal) => {
+        signals.push(signal);
+        return emptyPage;
+      },
+    },
+    { signal: controller.signal },
+  );
+  assert.equal(signals[0], controller.signal);
+  assert.equal(signals.length, 1);
+
+  const requests: unknown[] = [];
+  await readModelCatalog({
+    request: async (_method, params) => {
+      requests.push(params);
+      return emptyPage;
+    },
+  });
+  assert.deepEqual(requests, [
+    { cursor: null, limit: 100, includeHidden: false },
+  ]);
+});
+
+test("live model catalog rejects malformed pages, models, and cursor loops", async () => {
+  // Deliberately malformed responses bypass generated types to test validation.
   await assert.rejects(
-    readModelCatalog(async () => ({ data: "invalid", nextCursor: null })),
+    readModelCatalog({
+      request: async () => ({ data: "invalid", nextCursor: null }),
+    }),
     /invalid page/,
   );
   await assert.rejects(
-    readModelCatalog(async () => ({ data: [], nextCursor: "same" })),
+    readModelCatalog({
+      request: async () => ({
+        data: [{ ...catalogModel, hidden: "false" }],
+        nextCursor: null,
+      }),
+    }),
+    /invalid model/,
+  );
+  await assert.rejects(
+    readModelCatalog({
+      request: async () =>
+        ({
+          data: [{ ...catalogModel, model: "" }],
+          nextCursor: null,
+        }) satisfies ModelListResponse,
+    }),
+    /invalid model/,
+  );
+  const repeatedCursorPage = {
+    data: [],
+    nextCursor: "same",
+  } satisfies ModelListResponse;
+  await assert.rejects(
+    readModelCatalog({
+      request: async () => repeatedCursorPage,
+    }),
     /repeated pagination cursor/,
   );
 });

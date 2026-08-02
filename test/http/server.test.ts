@@ -145,6 +145,7 @@ test("every route rejects browser Origin headers", async () => {
     for (const [path, init] of [
       ["/health", {}],
       ["/ready", {}],
+      ["/v1/models", {}],
       ["/missing", {}],
       [
         "/v1/chat/completions",
@@ -233,6 +234,7 @@ test("HTTP failures use OpenAI-shaped JSON and never leak warnings", async () =>
         503,
         "app_server_not_ready",
       ],
+      [fetch(`${origin}/v1/models`), 503, "app_server_not_ready"],
     ];
     for (const [pending, status, code] of cases) {
       const response = await pending;
@@ -243,6 +245,23 @@ test("HTTP failures use OpenAI-shaped JSON and never leak warnings", async () =>
       assert.deepEqual(Object.keys(body), ["error"]);
       assert.equal(body.error.code, code);
       assert.equal(body.error.param, null);
+    }
+  });
+});
+
+test("unsupported model management methods and item paths remain absent", async () => {
+  await withServer({}, async (origin) => {
+    for (const [path, method] of [
+      ["/v1/models", "POST"],
+      ["/v1/models/gpt-5.6-luna", "GET"],
+      ["/v1/models/gpt-5.6-luna", "DELETE"],
+    ] as const) {
+      const response = await fetch(`${origin}${path}`, { method });
+      assert.equal(response.status, 404);
+      assert.equal(
+        ((await response.json()) as { error: { code: string } }).error.code,
+        "route_not_found",
+      );
     }
   });
 });

@@ -1,11 +1,11 @@
 import { pathToFileURL } from "node:url";
 import { startAppServer } from "../dist/app-server/app-server.js";
 import { ensureAuthenticated } from "../dist/app-server/auth.js";
+import { readModelCatalog } from "../dist/app-server/models.js";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const AUTH_TIMEOUT_MS = 120_000;
 const SHUTDOWN_TIMEOUT_MS = 10_000;
-const PAGE_LIMIT = 100;
 
 /** Logger used when catalog output must remain the only normal output. */
 const silentLogger = Object.assign(() => undefined, {
@@ -26,43 +26,6 @@ export function parseModelListArguments(argv) {
   return options;
 }
 
-/** Reads and validates every page in the live app-server model catalog. */
-export async function readModelCatalog(request, includeHidden = false) {
-  const models = [];
-  const seenCursors = new Set();
-  let cursor = null;
-
-  do {
-    const response = await request({
-      cursor,
-      limit: PAGE_LIMIT,
-      includeHidden,
-    });
-    if (
-      typeof response !== "object" ||
-      response === null ||
-      !Array.isArray(response.data) ||
-      !(
-        response.nextCursor === null ||
-        typeof response.nextCursor === "string"
-      )
-    )
-      throw new Error("model/list returned an invalid page.");
-
-    for (const model of response.data) {
-      validateModel(model);
-      models.push(model);
-    }
-
-    cursor = response.nextCursor;
-    if (cursor !== null && seenCursors.has(cursor))
-      throw new Error("model/list returned a repeated pagination cursor.");
-    if (cursor !== null) seenCursors.add(cursor);
-  } while (cursor !== null);
-
-  return models;
-}
-
 /** Formats model identifiers and their advertised reasoning efforts for humans. */
 export function formatModelCatalog(models) {
   if (models.length === 0) return "No models are available.";
@@ -73,33 +36,14 @@ export function formatModelCatalog(models) {
         model.hidden ? "hidden" : undefined,
       ].filter(Boolean);
       const suffix = flags.length === 0 ? "" : ` (${flags.join(", ")})`;
-      const efforts = model.supportedReasoningEfforts
+      // Presentation metadata is advisory: the catalog reader requires only the
+      // selector and visibility, so absent fields degrade instead of throwing.
+      const efforts = (model.supportedReasoningEfforts ?? [])
         .map((option) => option.reasoningEffort)
         .join(", ");
-      return `${model.model}${suffix}\n  ${model.displayName}; reasoning: ${efforts || "not advertised"}`;
+      return `${model.model}${suffix}\n  ${model.displayName ?? model.model}; reasoning: ${efforts || "not advertised"}`;
     })
     .join("\n");
-}
-
-/** Requires the catalog fields used by human and JSON output. */
-function validateModel(model) {
-  if (
-    typeof model !== "object" ||
-    model === null ||
-    typeof model.model !== "string" ||
-    model.model.length === 0 ||
-    typeof model.displayName !== "string" ||
-    typeof model.hidden !== "boolean" ||
-    typeof model.isDefault !== "boolean" ||
-    !Array.isArray(model.supportedReasoningEfforts) ||
-    model.supportedReasoningEfforts.some(
-      (option) =>
-        typeof option !== "object" ||
-        option === null ||
-        typeof option.reasoningEffort !== "string",
-    )
-  )
-    throw new Error("model/list returned an invalid model.");
 }
 
 /** Starts authenticated live Codex, prints its catalog, and always stops it. */
@@ -130,18 +74,14 @@ export async function runLiveModelList(argv) {
       terminal: (message) => process.stderr.write(message),
       signal: lifecycle.signal,
     });
-    const models = await readModelCatalog(
-      async (params) =>
-        await appServer.rpc.request(
-          "model/list",
-          params,
-          AbortSignal.any([
-            lifecycle.signal,
-            AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-          ]),
-        ),
-      options.includeHidden,
-    );
+    const models = await readModelCatalog(appServer.rpc, {
+      includeHidden: options.includeHidden,
+      // One deadline bounds the full pagination sequence, not each page alone.
+      signal: AbortSignal.any([
+        lifecycle.signal,
+        AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      ]),
+    });
     process.stdout.write(
       options.json
         ? `${JSON.stringify(models, null, 2)}\n`

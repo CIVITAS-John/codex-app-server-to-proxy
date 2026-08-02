@@ -6,6 +6,8 @@ import type { InitializeResponse } from "../../protocol/generated/typescript/Ini
 import type { GetAccountResponse } from "../../protocol/generated/typescript/v2/GetAccountResponse.js";
 import type { LoginAccountResponse } from "../../protocol/generated/typescript/v2/LoginAccountResponse.js";
 import type { LogoutAccountResponse } from "../../protocol/generated/typescript/v2/LogoutAccountResponse.js";
+import type { Model } from "../../protocol/generated/typescript/v2/Model.js";
+import type { ModelListResponse } from "../../protocol/generated/typescript/v2/ModelListResponse.js";
 import type { ConfigRequirementsReadResponse } from "../../protocol/generated/typescript/v2/ConfigRequirementsReadResponse.js";
 import type { Thread } from "../../protocol/generated/typescript/v2/Thread.js";
 import type { ThreadInjectItemsResponse } from "../../protocol/generated/typescript/v2/ThreadInjectItemsResponse.js";
@@ -22,6 +24,7 @@ interface ProtocolResponseByMethod {
   "account/read": GetAccountResponse;
   "account/login/start": LoginAccountResponse;
   "account/logout": LogoutAccountResponse;
+  "model/list": ModelListResponse;
   "configRequirements/read": ConfigRequirementsReadResponse;
   "thread/read": ThreadReadResponse;
   "thread/start": ThreadStartResponse;
@@ -46,6 +49,34 @@ export function protocolAuthenticatedAccountResponse(): GetAccountResponse {
   return {
     account: { type: "chatgpt", email: null, planType: "unknown" },
     requiresOpenaiAuth: true,
+  };
+}
+
+/** Builds a complete generated app-server model catalog entry for tests. */
+export function protocolModel(
+  model: string,
+  {
+    id = `internal_${model}`,
+    hidden = false,
+  }: { id?: string; hidden?: boolean } = {},
+): Model {
+  return {
+    id,
+    model,
+    upgrade: null,
+    upgradeInfo: null,
+    availabilityNux: null,
+    displayName: model,
+    description: "Synthetic model fixture.",
+    hidden,
+    supportedReasoningEfforts: [],
+    defaultReasoningEffort: "medium",
+    inputModalities: ["text"],
+    supportsPersonality: false,
+    additionalSpeedTiers: [],
+    serviceTiers: [],
+    defaultServiceTier: null,
+    isDefault: false,
   };
 }
 

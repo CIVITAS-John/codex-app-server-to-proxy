@@ -19,10 +19,11 @@ npx --yes codex-openai-proxy@next serve --root /absolute/path/to/project
 
 Check status:
 
-| Endpoint      | Meaning                                                                                        |
-| ------------- | ---------------------------------------------------------------------------------------------- |
-| `GET /health` | 200 while the proxy process is alive                                                           |
-| `GET /ready`  | 200 once Codex is initialized and authenticated; 503 while starting, logging in, or recovering |
+| Endpoint         | Meaning                                                                                        |
+| ---------------- | ---------------------------------------------------------------------------------------------- |
+| `GET /health`    | 200 while the proxy process is alive                                                           |
+| `GET /ready`     | 200 once Codex is initialized and authenticated; 503 while starting, logging in, or recovering |
+| `GET /v1/models` | Lists models visible through the active authenticated app-server                               |
 
 ## Authentication
 
@@ -78,20 +79,31 @@ curl http://127.0.0.1:8787/v1/chat/completions \
   }'
 ```
 
+List models without starting a Codex thread or turn:
+
+```sh
+curl http://127.0.0.1:8787/v1/models
+```
+
 ## What's supported
 
-| Supported                                                                                                | Not supported                                              |
-| -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| `POST /v1/chat/completions` with text-only messages (`system`, `developer`, `user`, `assistant`, `tool`) | Multimodal message content (images, audio)                 |
-| Streaming (SSE, ends with `data: [DONE]`) and non-streaming                                              | Responses API, embeddings, images, audio, model management |
-| `reasoning_effort` (`none` … `max`, forwarded to Codex)                                                  | `tool_choice` other than `"auto"` / `"none"`               |
-| Client-defined function tools, `tool_calls`, `finish_reason: "tool_calls"`                               | More than one choice per response                          |
-| `stream_options.include_usage`                                                                           | Remote (non-loopback) serving                              |
-| OpenAI-shaped JSON errors                                                                                |                                                            |
+| Supported                                                                                                | Not supported                                           |
+| -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| `POST /v1/chat/completions` with text-only messages (`system`, `developer`, `user`, `assistant`, `tool`) | Multimodal message content (images, audio)              |
+| `GET /v1/models` for visible models                                                                      | Responses API, embeddings, images, audio, model changes |
+| Streaming (SSE, ends with `data: [DONE]`) and non-streaming                                              |                                                         |
+| `reasoning_effort` (`none` … `max`, forwarded to Codex)                                                  | `tool_choice` other than `"auto"` / `"none"`            |
+| Client-defined function tools, `tool_calls`, `finish_reason: "tool_calls"`                               | More than one choice per response                       |
+| `stream_options.include_usage`                                                                           | Remote (non-loopback) serving                           |
+| OpenAI-shaped JSON errors                                                                                |                                                         |
+
+Model retrieval, deletion, and mutation endpoints are not supported.
 
 Harmless unsupported fields are ignored with one structured warning. Malformed or ambiguous input is rejected rather than approximated.
 
-The proxy does not expose `GET /v1/models`. From a repository checkout, run `npm run models:live` to read the authenticated live Codex catalog with zero model calls. Add `-- --include-hidden` for hidden entries or `-- --json` for complete catalog metadata.
+`GET /v1/models` queries the active authenticated pinned app-server, aggregates every upstream `model/list` page, and returns only visible models. Each `id` is the Codex model slug accepted by the proxy. It starts zero Codex threads or turns. When the temporary Responses Lite override is installed, the response reflects its frozen catalog; otherwise it reflects app-server's ordinary catalog. `created: 0` and `owned_by: "openai"` are synthetic compatibility placeholders because app-server does not provide those fields.
+
+From a repository checkout, `npm run models:live` remains a hidden/full-metadata diagnostic rather than a public route. Add `-- --include-hidden` for hidden entries or `-- --json` for complete catalog metadata; it also starts zero model turns.
 
 ## Streaming
 

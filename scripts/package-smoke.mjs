@@ -202,6 +202,7 @@ async function stopShim(child) {
 /** Creates a deterministic fake for the installed package-owned Codex binary. */
 function fakeCodexSource(codexVersion) {
   return `#!/usr/bin/env node
+import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 if (process.argv.includes("--version")) {
   process.stdout.write("codex-cli ${codexVersion}\\n");
@@ -221,9 +222,18 @@ const turn = (status) => ({
   id: "turn_package_smoke", items: [], itemsView: "full", status,
   error: null, startedAt: null, completedAt: null, durationMs: null
 });
+const model = {
+  id: "gpt-5.6-luna", model: "gpt-5.6-luna", upgrade: null, upgradeInfo: null,
+  availabilityNux: null, displayName: "Package smoke model", description: "",
+  hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "low", description: "" }],
+  defaultReasoningEffort: "low", inputModalities: ["text"], supportsPersonality: false,
+  additionalSpeedTiers: [], serviceTiers: [], defaultServiceTier: null, isDefault: true
+};
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line);
+  if (process.env.PACKAGE_SMOKE_RPC_OBSERVATION_PATH)
+    appendFileSync(process.env.PACKAGE_SMOKE_RPC_OBSERVATION_PATH, message.method + "\\n");
   if (message.method === "initialize") send({ id: message.id, result: {
     userAgent: "package-smoke", codexHome: cwd,
     platformFamily: process.platform === "win32" ? "windows" : "unix",
@@ -234,6 +244,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   else if (message.method === "account/read") send({ id: message.id, result: {
     account: { type: "chatgpt", email: null, planType: "unknown" },
     requiresOpenaiAuth: true
+  }});
+  else if (message.method === "model/list") send({ id: message.id, result: {
+    data: [model], nextCursor: null
   }});
   else if (message.method === "thread/start") send({ id: message.id, result: {
     thread, model: "gpt-5.6-luna", modelProvider: "openai", serviceTier: null, cwd,
@@ -419,6 +432,8 @@ async function main() {
     reportPhase("starting shim and exercising loopback request");
     const stateDirectory = join(installRoot, "state");
     const codexHome = join(installRoot, "codex-home");
+    const rpcObservationPath = join(installRoot, "rpc-methods.log");
+    await writeFile(rpcObservationPath, "", "utf8");
     const server = spawnShim(
       shim,
       [
@@ -438,7 +453,10 @@ async function main() {
       ],
       {
         cwd: installRoot,
-        env: process.env,
+        env: {
+          ...process.env,
+          PACKAGE_SMOKE_RPC_OBSERVATION_PATH: rpcObservationPath,
+        },
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
@@ -452,6 +470,25 @@ async function main() {
       const origin = `http://127.0.0.1:${listening.port}`;
       assert.deepEqual(await (await fetch(`${origin}/health`)).json(), { status: "ok" });
       assert.equal((await fetch(`${origin}/ready`)).status, 200);
+      await writeFile(rpcObservationPath, "", "utf8");
+      const models = await fetch(`${origin}/v1/models`);
+      assert.equal(models.status, 200);
+      assert.deepEqual(await models.json(), {
+        object: "list",
+        data: [
+          {
+            id: "gpt-5.6-luna",
+            object: "model",
+            created: 0,
+            owned_by: "openai",
+          },
+        ],
+      });
+      assert.equal(
+        (await readFile(rpcObservationPath, "utf8")).trim(),
+        "model/list",
+        "model listing must not start a Codex thread or turn",
+      );
       const response = await fetch(`${origin}/v1/chat/completions`, {
         method: "POST",
         headers: { "content-type": "application/json" },

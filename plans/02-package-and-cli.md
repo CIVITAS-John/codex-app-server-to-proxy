@@ -35,7 +35,7 @@ Complete. The package builds a strict TypeScript CLI with an executable npm `bin
 
 Request deadlines abort downstream work and forcibly close any already-committed HTTP response. This makes the concurrency bound a hard lifecycle limit even when a streaming client stops reading: the response close path releases the request slot instead of waiting indefinitely for SSE backpressure to drain.
 
-`GET /health` reports process liveness. `GET /ready` deliberately remains unavailable until Stage 03 initializes and authenticates app-server. `POST /v1/chat/completions` validates its content type, body bound, and JSON syntax, then returns `app_server_not_ready`; translation begins in Stage 04.
+`GET /health` reports process liveness. `GET /ready` deliberately remains unavailable until Stage 03 initializes and authenticates app-server. `GET /v1/models` likewise remains unavailable until readiness, then exposes visible models without starting a Codex thread or turn. `POST /v1/chat/completions` validates its content type, body bound, and JSON syntax, then returns `app_server_not_ready`; translation begins in Stage 04.
 
 The package allow-list is limited to the compiled CLI declarations/source maps, README, and protocol artifacts.  No default npm script starts Codex or makes a network or model call.
 

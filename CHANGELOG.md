@@ -2,6 +2,12 @@
 
 All notable user-facing changes are recorded here. This project follows semantic versioning once a version is published.
 
+## Unreleased
+
+### Added
+
+- `GET /v1/models` exposes visible models from the active authenticated pinned app-server without starting a Codex thread or turn. It aggregates every upstream catalog page and returns accepted Codex model slugs in an OpenAI-shaped minimal list; `created: 0` and `owned_by: "openai"` are synthetic compatibility placeholders.
+
 ## 0.1.0-rc.15 — July 30, 2026
 
 ### Changed

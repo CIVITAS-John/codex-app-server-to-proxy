@@ -15,6 +15,7 @@ import {
   type PolicyRequirements,
 } from "../core/policy.js";
 import { handleChatCompletion } from "./chat.js";
+import { handleModelList } from "./models.js";
 import {
   ContinuationCoordinator,
   ResponseStore,
@@ -263,6 +264,15 @@ async function route({
     });
     return;
   }
+  if (request.method === "GET" && url?.pathname === "/v1/models") {
+    await handleModelList(response, {
+      rpc: readyTransport(ready, transport),
+      log,
+      requestId,
+      signal,
+    });
+    return;
+  }
   if (request.method === "POST" && url?.pathname === "/v1/chat/completions") {
     const contentType = request.headers["content-type"]
       ?.split(";", 1)[0]
@@ -276,14 +286,8 @@ async function route({
         "unsupported_media_type",
       );
     const body = await readJsonBody(request, bodyLimit, signal);
-    if (!ready)
-      throw new HttpError(
-        503,
-        "The app-server is not ready.",
-        "server_error",
-        "app_server_not_ready",
-      );
-    if (!transport || !continuations)
+    const rpc = readyTransport(ready, transport);
+    if (!continuations)
       throw new HttpError(
         503,
         "The app-server transport is unavailable.",
@@ -291,7 +295,7 @@ async function route({
         "app_server_not_ready",
       );
     await handleChatCompletion(body, response, {
-      rpc: transport,
+      rpc,
       log,
       requestId,
       signal,
@@ -308,6 +312,28 @@ async function route({
     "not_found_error",
     "route_not_found",
   );
+}
+
+/** Returns the ready authenticated app-server transport required by HTTP work. */
+function readyTransport(
+  ready: boolean,
+  transport: JsonRpcTransport | undefined,
+): JsonRpcTransport {
+  if (!ready)
+    throw new HttpError(
+      503,
+      "The app-server is not ready.",
+      "server_error",
+      "app_server_not_ready",
+    );
+  if (!transport)
+    throw new HttpError(
+      503,
+      "The app-server transport is unavailable.",
+      "server_error",
+      "app_server_not_ready",
+    );
+  return transport;
 }
 
 /** Rejects hostile authorities and every browser-originated request. */

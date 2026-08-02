@@ -6,7 +6,8 @@ This directory is the source of truth for product decisions, implementation stat
 
 ## Product decisions
 
-- Provide only `POST /v1/chat/completions` to generic HTTP clients.
+- Provide `POST /v1/chat/completions` and `GET /v1/models` to generic HTTP clients.
+    - The model route aggregates visible entries from the active authenticated pinned app-server. When installed, the temporary Responses Lite override supplies its frozen catalog; otherwise app-server's ordinary catalog is exposed. It starts no Codex thread or turn; `created: 0` and `owned_by: "openai"` are synthetic compatibility placeholders because app-server has no equivalents. This adds a standard client-discovery route without exposing hidden or full app-server catalog metadata.
 - Ship only an npm CLI named `codex-openai-proxy`.
 - Bind only to localhost/loopback and require no proxy bearer token.
 - Spawn and supervise `codex app-server` as a child process.
