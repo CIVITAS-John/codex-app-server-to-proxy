@@ -36,6 +36,7 @@ export interface ServeOptions {
   maxRequests: number;
   logLevel: LogLevel;
   syncAuth: SyncAuthMode;
+  loginMode: LoginMode;
   stateDir: string;
   codexHome: string;
 }
@@ -60,6 +61,21 @@ export const SYNC_AUTH_MODES = ["always", "never"] as const;
 
 /** A supported credential synchronization mode. */
 export type SyncAuthMode = (typeof SYNC_AUTH_MODES)[number];
+
+/** Supported app-server login modes. */
+export const LOGIN_MODES = ["auto", "device-code", "browser"] as const;
+
+/** A supported app-server login mode. */
+export type LoginMode = (typeof LOGIN_MODES)[number];
+
+/** Selects whether app-server login should attempt interactive browser launch. */
+export function isInteractiveLogin(
+  mode: LoginMode,
+  stderrIsTty: boolean,
+): boolean {
+  if (mode === "auto") return stderrIsTty;
+  return mode === "browser";
+}
 
 /** Normalizes accepted host spellings to validated loopback addresses. */
 export function normalizeLoopbackHost(value: string): ServeOptions["host"] {
@@ -221,6 +237,7 @@ export function parseServeOptions(
     "--max-requests",
     "--log-level",
     "--sync-auth",
+    "--login",
     "--state-dir",
     "--codex-home",
   ]);
@@ -239,6 +256,11 @@ export function parseServeOptions(
     "--sync-auth",
     values.get("--sync-auth") ?? "always",
     SYNC_AUTH_MODES,
+  );
+  const loginMode = oneOf(
+    "--login",
+    values.get("--login") ?? "auto",
+    LOGIN_MODES,
   );
   return {
     host: normalizeLoopbackHost(values.get("--host") ?? "127.0.0.1"),
@@ -271,6 +293,7 @@ export function parseServeOptions(
     ),
     logLevel,
     syncAuth,
+    loginMode,
     ...(stateValue === undefined ? {} : { stateDir: stateValue }),
     ...(codexHomeValue === undefined ? {} : { codexHome: codexHomeValue }),
   };

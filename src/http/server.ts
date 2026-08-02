@@ -63,7 +63,15 @@ export function createProxyServer(
       url = undefined;
     }
     const logRequest = (status: number): void => {
-      log("info", "http_request", {
+      // Successful liveness and readiness polling is debug-only so a frequent
+      // health checker cannot bury real events at the default level. Only the
+      // expected outcomes qualify: a rejection or failure on a probe path
+      // reports a hostile authority, overload, or misuse, and those must stay
+      // visible without opting into debug.
+      const routineProbe =
+        (url?.pathname === "/health" && status === 200) ||
+        (url?.pathname === "/ready" && (status === 200 || status === 503));
+      log(routineProbe ? "debug" : "info", "http_request", {
         request_id: requestId,
         method: request.method,
         path: url?.pathname ?? "[invalid-path]",

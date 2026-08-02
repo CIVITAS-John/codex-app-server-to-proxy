@@ -2,7 +2,17 @@
 
 All notable user-facing changes are recorded here. This project follows semantic versioning once a version is published.
 
-## Unreleased
+## 0.1.0-rc.17 — August 2, 2026
+
+### Added
+
+- `--login <auto|device-code|browser>` selects the ChatGPT login flow. The default `auto` preserves stderr-TTY detection; `browser` forces interactive browser login and `device-code` forces headless device-code login.
+
+### Changed
+
+- Successful `GET /health` and `GET /ready` request logs, including the not-ready 503 a startup poll sees, moved from info to debug so routine probing stays out of default-level output. Every other outcome on those paths — a rejected host or origin, overload, timeout, or a non-GET method — is still logged at info.
+
+## 0.1.0-rc.16 — August 1, 2026
 
 ### Added
 

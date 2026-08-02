@@ -2,6 +2,7 @@ import {
   DEFAULT_CODEX_HOME_DESCRIPTION,
   DEFAULT_STARTUP_TIMEOUT_MS,
   DEFAULT_STATE_DIR_DESCRIPTION,
+  isInteractiveLogin,
   parseServeOptions,
   resolveServeOptions,
   type ServeOptions,
@@ -40,6 +41,8 @@ Options:
                                 (default: ${DEFAULT_CODEX_HOME_DESCRIPTION})
   --sync-auth <always|never>
                                 Synchronize credentials from the main Codex home (default: always)
+  --login <auto|device-code|browser>
+                                Login mode (default: auto)
   --implicit-tool-continuation <true|false>
                                 Resolve tool results by tool_call_id (default: true)
   --request-timeout <duration>  HTTP request deadline (default: 30s)
@@ -191,7 +194,10 @@ class AppServerSupervisor {
           rpc: next.rpc,
           log: this.#log,
           timeoutMs: DEFAULT_STARTUP_TIMEOUT_MS,
-          interactive: Boolean(process.stderr.isTTY),
+          interactive: isInteractiveLogin(
+            this.#options.loginMode,
+            Boolean(process.stderr.isTTY),
+          ),
           terminal: (message) => process.stderr.write(message),
           signal: this.#lifecycle.signal,
         });

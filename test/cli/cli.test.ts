@@ -124,6 +124,7 @@ test("CLI recovery uses the documented bounded retry schedule", () => {
   // Every configurable limit must be discoverable from the help output.
   assert.match(usage, /--request-timeout <duration>/);
   assert.match(usage, /--sync-auth <always\|never>/);
+  assert.match(usage, /--login <auto\|device-code\|browser>/);
   // Removed deadlines must not resurface in help: dynamic tool calls end
   // their turn immediately, so no tool or usage wait remains to configure.
   assert.equal(usage.includes("--tool-timeout"), false);
@@ -900,6 +901,7 @@ testWithPosixExecutable(
     await withTempDir(async (directory) => {
       const fake = join(directory, "codex");
       const stopped = join(directory, "stopped");
+      const loginType = join(directory, "login-type");
       await writeFile(
         fake,
         fakeCodexScript({
@@ -914,6 +916,7 @@ process.on("SIGTERM", () => {
     return;
   }
   if (${message}.method === "account/login/start") {
+    fs.writeFileSync(${JSON.stringify(loginType)}, ${message}.params.type);
     console.log(JSON.stringify({ id: ${message}.id, result: ${embeddedProtocolResults.login} }));
     return;
   }`,
@@ -932,6 +935,13 @@ process.on("SIGTERM", () => {
           join(directory, "state"),
           "--codex-path",
           fake,
+          // This child's stderr is a pipe, so `auto` would select device code.
+          // Forcing `browser` is the only request type terminal detection could
+          // not have produced, which is what proves the flag reaches login. The
+          // fake answers with a device-code payload regardless of the requested
+          // type, so no real browser launch is attempted.
+          "--login",
+          "browser",
           "--shutdown-timeout",
           "2s",
         ],
@@ -948,6 +958,7 @@ process.on("SIGTERM", () => {
       assert.equal(signal, null);
       assert.match(stderr, /shutdown_complete/);
       assert.equal(await readFile(stopped, "utf8"), "yes");
+      assert.equal(await readFile(loginType, "utf8"), "chatgpt");
     }, "codex-proxy-login-stop-");
   },
   10_000,

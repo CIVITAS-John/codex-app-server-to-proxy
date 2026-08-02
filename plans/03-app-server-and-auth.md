@@ -16,14 +16,14 @@ Reliably own one initialized app-server child process and complete ChatGPT login
     - Enabling it allows experimental fields to appear in server-initiated payloads, so generated schemas must be produced with `--experimental` to match.
     - Do not advertise `mcpServerOpenaiFormElicitation` or any user-input elicitation capability.
     - Pick one stable `clientInfo.name` and keep it fixed; app-server forwards it for compliance logging.
-5. Query account state at startup. If unauthenticated, call `account/login/start` with ChatGPT browser login.
+5. Query account state at startup. If unauthenticated, select ChatGPT browser or device-code login through `--login <auto|device-code|browser>`.
     - Start the package-owned app-server with `CODEX_HOME` set to the proxy-owned home.
     - As a temporary Codex `0.146.0` compatibility patch, clone that home's `models_cache.json` into a separate catalog, set `use_responses_lite` to `false` for every model, remove `tool_mode` from originally-Lite entries that advertise native parallel-tool support, and select the clone with `model_catalog_json` before app-server becomes ready. Never edit the refreshable cache directly.
     - If the cache first appears during setup, keep the bootstrap child private and restart app-server once so the startup-only catalog setting takes effect.
     - On every startup in the default `--sync-auth always` mode, compare an existing Codex `auth.json` with the proxy copy and adopt it only when the target is missing or the source is strictly newer. `--sync-auth never` leaves a proxy-only login untouched; the former `if-missing` mode is removed. Treat a missing or unreadable seed as a non-fatal diagnostic before continuing through normal login.
     - If `account/read` returns an RPC error, attempt one best-effort `account/logout`, run the normal browser or device-code login, and require a usable follow-up `account/read`. Continue to fail startup on transport, timeout, cancellation, or failed recovery.
     - After that recovery only, use a best-effort strictly-newer guard and atomic replacement to write back the recovered proxy credential when default synchronization had pulled the unusable credential and the existing source `auth.json` is older. Never create a missing source, and never write back for `never`.
-6. Attempt to open the authorization URL using a narrowly scoped platform launcher.
+6. In `auto` mode, select browser login when stderr is a TTY and device-code login otherwise; `browser` and `device-code` force their respective flows. Attempt to open the browser authorization URL using a narrowly scoped platform launcher.
     - If launching fails, write the authorization URL once to the interactive terminal with instructions. Plaintext structured logs may also contain the URL; continuation state does not persist it.
     - Wait for `account/login/completed` and support cancellation/timeout.
     - If local browser login cannot complete, offer `chatgptDeviceCode` login for headless or remote environments.
@@ -60,6 +60,8 @@ The offline Stage 03 implementation owns and version-checks a shell-free app-ser
 The shared JSON-RPC transport permits its bounded request population to subscribe to notifications and close events without emitting the default low-concurrency `EventEmitter` warning. A response containing an `error` member is always treated as failure; malformed error objects are rejected rather than being reinterpreted as a successful response with an absent result.
 
 The CLI starts app-server before becoming ready and may initiate ChatGPT login. Stage 04 implements `POST /v1/chat/completions`. The isolated `npm run test:live` command runs one shared HTTP contract against the real app-server, serially attempts at most four `gpt-5.6-luna` calls, bounds diagnostics, and unconditionally cleans up; default tests run that contract against only a deterministic fake backend.
+
+Authentication presentation is explicit through `--login <auto|device-code|browser>`. `auto` remains the stderr-TTY-based default, preserving existing interactive and headless behavior; `browser` forces the browser flow and `device-code` forces the headless verification flow. The compatibility consequence is that existing invocations retain their login method, while automation and remote sessions can select a stable method independent of terminal detection.
 
 The proxy declares `@openai/codex` as a runtime dependency and resolves the package's declared `codex` binary. This makes a normal local install self-contained; existing deployments that rely on a global PATH installation continue to work only as a compatibility fallback, while `--codex-path` remains the explicit override.
 

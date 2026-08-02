@@ -29,8 +29,11 @@ Check status:
 
 The proxy signs in with a ChatGPT account — no API key is exchanged. The spawned Codex runs in a proxy-owned home (`~/.codex-openai-proxy/codex-home` by default; override with `--codex-home`), isolated from any `~/.codex` install. On every startup, the proxy compares that home's `auth.json` with the existing `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`) and adopts the source only when it is missing locally or the source is strictly newer. This newest-wins rule propagates a Codex CLI token refresh without replacing credentials the proxy refreshed more recently. If the available credentials are unusable, the proxy attempts one logout and runs the normal login flow instead of exiting:
 
-- **Interactive terminal** — the proxy opens the browser authorization page. Complete the login and leave `serve` running. If the browser can't be launched, the URL is printed to the terminal.
-- **Non-interactive (containers, services, CI)** — the proxy prints a verification URL and one-time device code to stderr. Keep stderr visible until login completes.
+Choose the login flow with `--login <auto|device-code|browser>`:
+
+- `auto` (default) preserves the existing behavior: a stderr TTY uses interactive browser login; non-interactive stderr uses device-code login.
+- `browser` forces interactive browser login. Complete the login while `serve` remains running; if the browser cannot be launched, use the authorization URL printed to stderr.
+- `device-code` forces headless login and prints a verification URL plus one-time device code to stderr. This is appropriate for containers, services, CI, and remote terminals.
 
 Notes:
 
@@ -211,6 +214,7 @@ One response can span several Codex model requests, for example when internal to
 - The listener accepts loopback only (`127.0.0.1`, `::1`, `localhost`); non-loopback `Host` authorities and any request with an `Origin` header are rejected.
 - There is no local bearer-token check, so any process running as your user can call the proxy. See the [security model](https://github.com/CIVITAS-John/codex-app-server-to-proxy/blob/main/docs/security.md).
 - Structured JSON logs go to stderr in plaintext and are not redacted. Any level may contain filesystem paths, login URLs, tokens, prompts, child stderr, or tool details; treat every log capture as sensitive.
+- Successful `/health` and `/ready` probes — including the 503 returned before startup finishes — are logged at debug so a polling health checker stays out of default-level output. Rejected or failed requests to those paths are still logged at info.
 
 Default limits (all configurable via CLI flags):
 
@@ -226,13 +230,14 @@ The request deadline aborts downstream work and closes any response that is stil
 
 ## Troubleshooting
 
-| Symptom                          | What to do                                                                                                                                       |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `/ready` returns 503             | Login or startup hasn't finished — follow [Authentication](#authentication) and check the stderr logs for `app_server_ready` or `startup_failed` |
-| Browser login never appears      | Non-terminal stderr selects device-code login; run `serve` in a foreground terminal without redirecting stderr                                   |
-| Address already in use           | Choose another loopback `--port`                                                                                                                 |
-| `--codex-path` override rejected | The override must report exactly `codex-cli 0.146.0` (the version bundled with this package); remove the flag to use the bundled executable      |
-| Policy request denied            | Managed requirements disallow the value; the proxy never silently weakens policy                                                                 |
+| Symptom                           | What to do                                                                                                                                       |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/ready` returns 503              | Login or startup hasn't finished — follow [Authentication](#authentication) and check the stderr logs for `app_server_ready` or `startup_failed` |
+| Browser login never appears       | `--login auto` selects device-code when stderr is not a TTY. Run in a foreground terminal, or restart with `--login browser` to force the flow.  |
+| Need to sign in without a browser | Start with `--login device-code` and keep stderr visible to copy the verification URL and one-time code.                                         |
+| Address already in use            | Choose another loopback `--port`                                                                                                                 |
+| `--codex-path` override rejected  | The override must report exactly `codex-cli 0.146.0` (the version bundled with this package); remove the flag to use the bundled executable      |
+| Policy request denied             | Managed requirements disallow the value; the proxy never silently weakens policy                                                                 |
 
 For deeper diagnosis, temporarily add `--log-level debug`. All log levels are sensitive; debug adds more diagnostic detail.
 

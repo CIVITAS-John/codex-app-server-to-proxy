@@ -6,7 +6,9 @@ import { join, sep } from "node:path";
 import { afterAll, test, vi } from "vitest";
 import {
   LOG_LEVELS,
+  LOGIN_MODES,
   SYNC_AUTH_MODES,
+  isInteractiveLogin,
   normalizeLoopbackHost,
   parseServeOptions,
   resolveServeOptions,
@@ -79,6 +81,31 @@ test("sync-auth validation defaults to always and accepts supported modes", () =
   );
 });
 
+test("login validation defaults to auto and accepts supported modes", () => {
+  assert.equal(parseServeOptions([]).loginMode, "auto");
+  for (const loginMode of LOGIN_MODES)
+    assert.equal(
+      parseServeOptions(["--login", loginMode]).loginMode,
+      loginMode,
+    );
+  assert.throws(
+    () => parseServeOptions(["--login", "if-needed"]),
+    /--login must be auto, device-code, or browser\./,
+  );
+});
+
+test("login interactivity follows the selected mode", () => {
+  for (const [mode, stderrIsTty, expected] of [
+    ["auto", true, true],
+    ["auto", false, false],
+    ["browser", true, true],
+    ["browser", false, true],
+    ["device-code", true, false],
+    ["device-code", false, false],
+  ] as const)
+    assert.equal(isInteractiveLogin(mode, stderrIsTty), expected);
+});
+
 test("durations cap at the maximum Node timer delay", () => {
   // Larger values overflow Node timers and fire immediately instead of later.
   const maximum = 2 ** 31 - 1;
@@ -129,6 +156,7 @@ test("serve options have safe documented defaults and reject ambiguity", async (
     assert.equal(parsed.root, project);
     assert.equal(parsed.implicitToolContinuation, true);
     assert.equal(parsed.syncAuth, "always");
+    assert.equal(parsed.loginMode, "auto");
     assert.equal(parsed.stateDir, undefined);
     assert.equal(parsed.codexHome, undefined);
     const finalized = await resolveServeOptions(parsed);

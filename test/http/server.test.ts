@@ -172,7 +172,7 @@ test("default request logs retain only the pathname", async () => {
   const entries: Array<Record<string, unknown>> = [];
   const proxy = createProxyServer(
     await options({}),
-    createLogger("info", (entry) => entries.push(entry)),
+    createLogger("debug", (entry) => entries.push(entry)),
   );
   const address = await proxy.listen();
   const origin = `http://${address.address}:${address.port}`;
@@ -182,8 +182,41 @@ test("default request logs retain only the pathname", async () => {
     await proxy.close();
   }
   const request = entries.find((entry) => entry.event === "http_request");
+  assert.equal(request?.level, "debug");
   assert.equal(request?.path, "/health");
   assert.equal(JSON.stringify(entries).includes("secret-value"), false);
+});
+
+test("info request logs drop routine probes but keep probe failures", async () => {
+  const entries: Array<Record<string, unknown>> = [];
+  const proxy = createProxyServer(
+    await options({}),
+    createLogger("info", (entry) => entries.push(entry)),
+  );
+  const address = await proxy.listen();
+  const origin = `http://${address.address}:${address.port}`;
+  try {
+    // The expected probe outcomes, including the not-ready 503 a startup poll
+    // sees, are routine; anything else on a probe path is not.
+    await fetch(`${origin}/health`);
+    await fetch(`${origin}/ready`);
+    await fetch(`${origin}/health`, { method: "POST" });
+    await fetch(`${origin}/missing`);
+  } finally {
+    await proxy.close();
+  }
+  const requests = entries.filter((entry) => entry.event === "http_request");
+  assert.deepEqual(
+    requests.map((entry) => [entry.method, entry.path, entry.status]),
+    [
+      ["POST", "/health", 404],
+      ["GET", "/missing", 404],
+    ],
+  );
+  assert.equal(
+    requests.every((entry) => entry.level === "info"),
+    true,
+  );
 });
 
 test("authority-rejected requests still emit an http_request log entry", async () => {
@@ -197,6 +230,7 @@ test("authority-rejected requests still emit an http_request log entry", async (
   try {
     const headers = new Headers();
     headers.set("origin", "https://hostile.example");
+    // A probe path proves the rejection survives the debug-level probe rule.
     const response = await fetch(`${origin}/health`, { headers });
     assert.equal(response.status, 403);
   } finally {

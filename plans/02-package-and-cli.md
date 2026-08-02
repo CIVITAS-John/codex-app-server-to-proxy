@@ -9,14 +9,14 @@ Create an installable TypeScript CLI with strict loopback enforcement and no dep
 1. Initialize the npm package, strict application and test TypeScript configurations, formatter, linter, Vitest, build output, and executable `bin` entry.
     - Keep `npm test` non-interactive and offline by default.
     - Use a separate Vitest project or explicit opt-in script for live tests so the default include patterns cannot discover them.
-2. Implement `codex-openai-proxy serve` with `--host`, `--port`, `--root`, `--codex-path`, `--codex-home`, `--sync-auth`, log level, state-directory, and shutdown options.
+2. Implement `codex-openai-proxy serve` with `--host`, `--port`, `--root`, `--codex-path`, `--codex-home`, `--sync-auth`, `--login`, log level, state-directory, and shutdown options.
     - `--root` defaults to the launch directory.
     - `--codex-home` defaults to the proxy-owned `~/.codex-openai-proxy/codex-home`; relative overrides resolve from the canonical root.
     - The former `--tool-timeout` was removed with the interrupt-based tool design (2026-07-26); the app-server startup/login deadline is a fixed five minutes.
 3. Default to `127.0.0.1`; normalize and allow only `127.0.0.1`, `::1`, and `localhost`. Resolve `localhost` defensively or bind explicit loopback sockets.
 4. Refuse wildcard, LAN, DNS, mapped, or ambiguous addresses before opening a socket.
 5. Add `GET /health` and `GET /ready`; readiness remains false until app-server initialization and authentication are ready.
-6. Add request IDs, bounded body size, timeouts, abort propagation, graceful signal handling, and structured stderr logging.
+6. Add request IDs, bounded body size, timeouts, abort propagation, graceful signal handling, and structured stderr logging. Log only the expected `/health` and `/ready` outcomes at debug level to avoid routine probe noise at the default level; rejections and failures on those paths stay at the default level.
 7. Build OpenAI-shaped JSON errors for invalid JSON, validation failures, unsupported routes, overload, and internal failures.
 8. Ensure warnings never enter SSE/JSON response bodies except through documented error events.
 
@@ -36,6 +36,8 @@ Complete. The package builds a strict TypeScript CLI with an executable npm `bin
 Request deadlines abort downstream work and forcibly close any already-committed HTTP response. This makes the concurrency bound a hard lifecycle limit even when a streaming client stops reading: the response close path releases the request slot instead of waiting indefinitely for SSE backpressure to drain.
 
 `GET /health` reports process liveness. `GET /ready` deliberately remains unavailable until Stage 03 initializes and authenticates app-server. `GET /v1/models` likewise remains unavailable until readiness, then exposes visible models without starting a Codex thread or turn. `POST /v1/chat/completions` validates its content type, body bound, and JSON syntax, then returns `app_server_not_ready`; translation begins in Stage 04.
+
+`--login <auto|device-code|browser>` selects authentication presentation. The default `auto` retains stderr-TTY selection for compatibility, while `browser` and `device-code` make interactive and headless startup deterministic. Routine probe request logs are debug-only: `GET /health` 200 and `GET /ready` 200 or 503 are the expected outcomes a liveness checker produces, and operators wanting them must opt into `--log-level debug`. The status is part of the rule rather than the path alone, because a 403 from the loopback authority check, a 429 overload, a deadline, or a non-GET 404 on a probe path reports a hostile client, saturation, or misuse; suppressing those by default would remove the only record of an attempted browser-origin or foreign-host request against the most commonly probed routes.
 
 The package allow-list is limited to the compiled CLI declarations/source maps, README, and protocol artifacts.  No default npm script starts Codex or makes a network or model call.
 
