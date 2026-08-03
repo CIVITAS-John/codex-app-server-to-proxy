@@ -141,7 +141,7 @@ export function validateRequest(
     !["user", "tool"].includes(messages.at(-1)!.role)
   )
     invalid("A continuation must end with a user or tool message.", "messages");
-  let includeUsage = false;
+  let includeUsage = true;
   if (body.stream_options !== undefined) {
     const streamOptions = record(body.stream_options);
     if (
@@ -154,7 +154,7 @@ export function validateRequest(
         "stream_options supports only a boolean include_usage field.",
         "stream_options",
       );
-    includeUsage = streamOptions.include_usage === true;
+    includeUsage = streamOptions.include_usage !== false;
   }
   const dynamicTools = validateTools(body.tools, body.tool_choice);
   const supported = new Set([

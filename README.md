@@ -97,7 +97,7 @@ curl http://127.0.0.1:8787/v1/models
 | Streaming (SSE, ends with `data: [DONE]`) and non-streaming                                              |                                                         |
 | `reasoning_effort` (`none` … `max`, forwarded to Codex)                                                  | `tool_choice` other than `"auto"` / `"none"`            |
 | Client-defined function tools, `tool_calls`, `finish_reason: "tool_calls"`                               | More than one choice per response                       |
-| `stream_options.include_usage`                                                                           | Remote (non-loopback) serving                           |
+| Default-on streaming usage chunks (`stream_options.include_usage: false` opts out)                       | Remote (non-loopback) serving                           |
 | OpenAI-shaped JSON errors                                                                                |                                                         |
 
 Model retrieval, deletion, and mutation endpoints are not supported.
@@ -119,12 +119,11 @@ curl -N http://127.0.0.1:8787/v1/chat/completions \
     "model": "gpt-5.6-luna",
     "reasoning_effort": "high",
     "messages": [{"role": "user", "content": "Describe this repository."}],
-    "stream": true,
-    "stream_options": {"include_usage": true}
+    "stream": true
   }'
 ```
 
-Standard clients get assistant text, function calls, the finish reason, and the optional usage chunk. Codex reasoning and internal activity arrive in the nonstandard fields described under [Codex-specific extensions](#codex-specific-extensions).
+Standard clients get assistant text, function calls, the finish reason, and a usage chunk when Codex reports exact counters. The streaming usage chunk is on by default; set `stream_options.include_usage` to `false` to omit it. This default deliberately differs from OpenAI's opt-in behavior. Codex reasoning and internal activity arrive in the nonstandard fields described under [Codex-specific extensions](#codex-specific-extensions).
 
 ## Function tools
 

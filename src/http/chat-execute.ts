@@ -74,12 +74,11 @@ class IngressQueue {
     return this.#ingress.some((event) => event.type === "notification");
   }
 
-  /**
-   * Reports a terminal failure without throwing, for callers that must stop
-   * consuming ingress rather than fail the work already completed.
-   */
-  get failing(): boolean {
-    return Boolean(this.#transportError ?? this.#queueError);
+  /** Reports why terminal collection must stop without throwing. */
+  get failureReason(): "transport_failed" | "queue_overflowed" | undefined {
+    if (this.#transportError) return "transport_failed";
+    if (this.#queueError) return "queue_overflowed";
+    return undefined;
   }
 
   /** Returns the next retained event without consuming it. */
@@ -254,12 +253,13 @@ interface ContinuationSetup {
 }
 
 /**
- * Upper bound on waiting for the terminal usage flush after a turn's last
- * frame. Every turn now ends — completed naturally or interrupted at its tool
- * calls — and app-server flushes usage at turn end within milliseconds, so
- * this cap exists only as a hang backstop, not as an expected wait.
+ * Absolute deadline for terminal usage collection, normally a backstop for a
+ * missing idle boundary. A request-timeout abort can end collection sooner.
  */
-const TERMINAL_USAGE_WAIT_MS = 2_000;
+const TERMINAL_USAGE_WAIT_MS = 10_000;
+
+/** Maximum trailing-usage grace after idle when no usage has been observed. */
+const IDLE_USAGE_GRACE_MS = 1000;
 
 /** Runs or resumes a Codex thread and yields its normalized event stream. */
 export async function execute(
@@ -412,7 +412,10 @@ export async function execute(
   }
   // Constructed only once the attribution boundary is known, so no notification
   // can be normalized against a baseline this response did not begin from.
-  const normalizer = new EventNormalizer(usageBaseline);
+  const normalizer = new EventNormalizer(usageBaseline, {
+    log: options.log,
+    requestId: options.requestId,
+  });
 
   const events =
     (async function* streamExecution(): AsyncGenerator<NormalizedEvent> {
@@ -539,17 +542,24 @@ export async function execute(
             }
           }
         }
-        // Every turn ends at its thread's idle transition — completed turns
-        // naturally, tool-call turns through the interrupt above — and the
-        // terminal usage flush precedes or accompanies it.
+        // Completed and interrupted turns normally reach idle. Known usage lets
+        // that boundary end collection immediately; otherwise idle opens a
+        // 1000 ms grace window for one trailsing usage flush.
         if (!failed) {
-          const late = await collectTerminalUsage(
+          const collected = await collectTerminalUsage(
             queue,
             normalizer,
             handle,
             options.signal,
+            pendingUsage !== undefined,
           );
-          if (late) pendingUsage = late;
+          if (collected.usage) pendingUsage = collected.usage;
+          if (!pendingUsage)
+            options.log("warn", "usage_unreported", {
+              request_id: options.requestId,
+              reason: collected.exitReason,
+              pending_tool_batch: Boolean(toolBatch),
+            });
         }
         // Usage is optional output. Persisting the boundary for the next
         // response is best-effort and must never fail a tool handoff that is
@@ -594,28 +604,40 @@ export async function execute(
 
 /**
  * Consumes notifications that follow the turn's terminal event through the
- * thread's idle boundary, a fixed hang backstop, or abort. The turn already
- * succeeded here, so every terminal condition — including transport failure and
- * ingress overflow — merely stops collection. Usage is optional output and must
- * never retract a completed turn's frames or its continuation mapping.
+ * thread's idle boundary, trailing-usage grace, fixed hang backstop, or abort.
+ * The turn already succeeded here, so every terminal condition merely stops
+ * collection and reports its reason without retracting completed work.
  */
 async function collectTerminalUsage(
   queue: IngressQueue,
   normalizer: EventNormalizer,
   handle: TurnHandle,
   signal: AbortSignal,
-): Promise<Usage | undefined> {
+  hasUsage: boolean,
+): Promise<{
+  usage: Usage | undefined;
+  exitReason:
+    | "idle"
+    | "idle_grace_expired"
+    | "backstop_expired"
+    | "aborted"
+    | "transport_failed"
+    | "queue_overflowed";
+}> {
   let usage: Usage | undefined;
-  let idle = false;
+  let idleAt: number | undefined;
   const deadline = Date.now() + TERMINAL_USAGE_WAIT_MS;
-  const reached = (): boolean => idle;
-  while (!signal.aborted && !queue.failing) {
+  const usageKnown = (): boolean => hasUsage || usage !== undefined;
+  while (true) {
+    if (signal.aborted) return { usage, exitReason: "aborted" };
+    const failureReason = queue.failureReason;
+    if (failureReason) return { usage, exitReason: failureReason };
     for (const event of queue.drainNotifications()) {
       if (
         notificationBehavior(event.method) === "lifecycle" &&
         isIdleThreadStatus(event.params, handle.threadId)
       ) {
-        idle = true;
+        idleAt ??= Date.now();
         continue;
       }
       if (!matchesTurn(event.params, handle.threadId, handle.turnId)) continue;
@@ -624,14 +646,19 @@ async function collectTerminalUsage(
         // follow the terminal frame this response has already committed to.
         if (normalized.usage) usage = normalized.usage;
     }
-    if (reached()) break;
+    const now = Date.now();
+    if (idleAt !== undefined && usageKnown())
+      return { usage, exitReason: "idle" };
+    if (idleAt !== undefined && now >= idleAt + IDLE_USAGE_GRACE_MS)
+      return { usage, exitReason: "idle_grace_expired" };
+    if (now >= deadline) return { usage, exitReason: "backstop_expired" };
     const ready = (): boolean => queue.hasNotification;
-    if (
-      !(await queue.wait(signal, { ready, timeoutMs: deadline - Date.now() }))
-    )
-      break;
+    const waitUntil = Math.min(
+      deadline,
+      idleAt === undefined ? deadline : idleAt + IDLE_USAGE_GRACE_MS,
+    );
+    await queue.wait(signal, { ready, timeoutMs: waitUntil - now });
   }
-  return usage;
 }
 
 /** Recognizes the authoritative idle boundary for one completed thread. */

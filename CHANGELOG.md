@@ -7,10 +7,13 @@ All notable user-facing changes are recorded here. This project follows semantic
 ### Added
 
 - `--login <auto|device-code|browser>` selects the ChatGPT login flow. The default `auto` preserves stderr-TTY detection; `browser` forces interactive browser login and `device-code` forces headless device-code login.
+- Structured `usage_unreported` and `usage_attribution_degraded` warnings identify terminal collection failures and malformed or degraded attribution without estimating unavailable token counts.
 
 ### Changed
 
 - Successful `GET /health` and `GET /ready` request logs, including the not-ready 503 a startup poll sees, moved from info to debug so routine probing stays out of default-level output. Every other outcome on those paths — a rejected host or origin, overload, timeout, or a non-GET method — is still logged at info.
+- Streaming usage chunks are now emitted by default; explicit `stream_options.include_usage: false` opts out. This deliberately differs from OpenAI's opt-in default.
+- Terminal usage collection now waits 250 ms after an `idle` boundary only when the response has no usage, recovering a trailing flush without delaying responses that already have counters. The no-idle hang backstop increased from two to ten seconds; request timeout still ends it sooner.
 
 ## 0.1.0-rc.16 — August 1, 2026
 

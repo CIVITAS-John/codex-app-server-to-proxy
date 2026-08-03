@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, vi } from "vitest";
 import { ResponseStore } from "../../src/continuation/state.js";
+import { createLogger, type Logger } from "../../src/core/logger.js";
 import {
   protocolNotification,
   protocolResponse,
@@ -585,14 +586,24 @@ class ToolAppServer {
         },
       }),
     );
+    this.#send(
+      protocolNotification({
+        method: "thread/status/changed",
+        params: {
+          threadId: this.#thread,
+          status: { type: "idle" },
+        },
+      }),
+    );
   }
 }
 
 /** Starts an ephemeral ready proxy backed by the fake app-server transport. */
-async function startProxy(stateDir: string, fake: ToolAppServer) {
+async function startProxy(stateDir: string, fake: ToolAppServer, log?: Logger) {
   const { origin, proxy } = await startProxyWithTransport(fake.transport.rpc, {
     root: process.cwd(),
     stateDir,
+    log,
   });
   return { origin, proxy };
 }
@@ -2053,12 +2064,17 @@ test("usage observed after a tool-call response ends never advances its boundary
 
 test("a server that never flushes usage leaves it omitted rather than estimated", async () => {
   await withTempDir(async (directory) => {
+    const entries: Array<Record<string, unknown>> = [];
     const fake = new ToolAppServer(true, false, undefined, false, {
       suspendOrder: "never",
       onCompletion: true,
       reasoningOutputTokens: 3,
     });
-    const { origin, proxy } = await startProxy(directory, fake);
+    const { origin, proxy } = await startProxy(
+      directory,
+      fake,
+      createLogger("warn", (entry) => entries.push(entry)),
+    );
     try {
       const response = await postChatCompletion(origin, {
         model: "m",
@@ -2071,6 +2087,14 @@ test("a server that never flushes usage leaves it omitted rather than estimated"
       // Live app-server flushes usage at the interrupt; against a server that
       // does not, the response reports none instead of guessing.
       assert.equal(first.usage, undefined);
+      const warnings = entries.filter(
+        (entry) => entry.event === "usage_unreported",
+      );
+      assert.equal(warnings.length, 1);
+      assert.equal(warnings[0]?.level, "warn");
+      assert.equal(warnings[0]?.reason, "idle_grace_expired");
+      assert.equal(warnings[0]?.pending_tool_batch, true);
+      assert.equal(typeof warnings[0]?.request_id, "string");
     } finally {
       await proxy.close();
     }

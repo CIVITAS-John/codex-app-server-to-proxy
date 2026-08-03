@@ -18,6 +18,12 @@ export interface Usage {
   completion_tokens_details?: { reasoning_tokens: number };
 }
 
+/** Request-scoped logger context for usage-attribution degradation warnings. */
+export interface NormalizerDiagnostics {
+  log: Logger;
+  requestId: string;
+}
+
 /** Function metadata shared by normalized calls and their correlated results. */
 export interface NormalizedFunction {
   name: string;
@@ -181,6 +187,8 @@ export class EventNormalizer {
   #nextToolIndex = 0;
   #sawClientTool = false;
   readonly #usageBaseline: TokenUsageCounters | undefined;
+  readonly #diagnostics: NormalizerDiagnostics | undefined;
+  readonly #warnedReasons = new Set<string>();
   #latestUsageTotal: TokenUsageCounters | undefined;
   #cumulativeUsageValid = true;
 
@@ -189,8 +197,12 @@ export class EventNormalizer {
    * The baseline is fixed for the normalizer's lifetime, so no observed usage
    * can ever be attributed against a boundary it did not begin from.
    */
-  constructor(usageBaseline?: TokenUsageCounters) {
+  constructor(
+    usageBaseline?: TokenUsageCounters,
+    diagnostics?: NormalizerDiagnostics,
+  ) {
     this.#usageBaseline = usageBaseline;
+    this.#diagnostics = diagnostics;
   }
 
   /**
@@ -262,7 +274,10 @@ export class EventNormalizer {
       // boundary, or the tokens between the old and new totals would be
       // reported by no response at all. `last` is required by the protocol, so
       // this only pins the invariant against a malformed notification.
-      if (!last) return [];
+      if (!last) {
+        this.#warnDegraded("missing_last");
+        return [];
+      }
       if (total) this.#latestUsageTotal = total;
       const usage = this.#turnUsage(last, total);
       return usage ? [{ usage }] : [];
@@ -340,14 +355,38 @@ export class EventNormalizer {
     // Only a persisted pre-response snapshot (or zero for a fresh thread) is an
     // authoritative baseline. Deriving one from `total - last` would silently
     // lose earlier model requests when the first observed update was coalesced.
-    if (!this.#usageBaseline || !total || !this.#cumulativeUsageValid)
-      return toUsage(last);
+    if (!this.#usageBaseline) {
+      this.#warnDegraded("baseline_missing");
+      return this.#usageFromLast(last);
+    }
+    if (!total || !this.#cumulativeUsageValid) return this.#usageFromLast(last);
     const turn = subtractTokenUsage(total, this.#usageBaseline);
     // A reset invalidates the old baseline for the rest of this response. Keep
     // the newest total for the next response, but never resume subtraction
     // merely because reset counters later grow beyond the stale snapshot.
-    if (!turn) this.#cumulativeUsageValid = false;
-    return turn ? countersToUsage(turn) : toUsage(last);
+    if (!turn) {
+      this.#cumulativeUsageValid = false;
+      this.#warnDegraded("cumulative_reset");
+      return this.#usageFromLast(last);
+    }
+    return countersToUsage(turn);
+  }
+
+  /** Maps exact last-request counters and diagnoses malformed numeric values. */
+  #usageFromLast(last: Record<string, unknown>): Usage | undefined {
+    const usage = toUsage(last);
+    if (!usage) this.#warnDegraded("non_finite_counters");
+    return usage;
+  }
+
+  /** Emits each usage-attribution degradation reason at most once. */
+  #warnDegraded(reason: string): void {
+    if (!this.#diagnostics || this.#warnedReasons.has(reason)) return;
+    this.#warnedReasons.add(reason);
+    this.#diagnostics.log("warn", "usage_attribution_degraded", {
+      request_id: this.#diagnostics.requestId,
+      reason,
+    });
   }
 
   /** Emits an internal call, or a self-correlating call/result pair. */

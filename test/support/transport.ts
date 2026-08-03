@@ -133,11 +133,11 @@ export function sendTokenUsage(
 
 /**
  * Wire position of a turn's final usage relative to its completion. App-server
- * streams usage separately from completion, so all three orders are legal and
+ * streams usage separately from completion, so all four orders are legal and
  * every one must produce the same response usage.
  */
 export type UsageWireOrder =
-  "before_completion" | "after_completion" | "later_read";
+  "before_completion" | "after_completion" | "after_idle" | "later_read";
 
 /** Milliseconds by which `later_read` defers usage past the completion frame. */
 const LATER_READ_DELAY_MS = 5;
@@ -277,6 +277,7 @@ export interface CompleteTurnOptions {
   reasoningOutputTokens?: number;
   priorRequests?: number;
   usageOrder?: UsageWireOrder;
+  includeUsage?: boolean;
 }
 
 /** Emits typed usage and successful completion notifications for one turn. */
@@ -288,15 +289,18 @@ export function completeTurn(
     reasoningOutputTokens = 0,
     priorRequests = 0,
     usageOrder = "before_completion",
+    includeUsage = true,
   }: CompleteTurnOptions = {},
 ): void {
-  const usage = (): void =>
-    sendTokenUsage(
-      send,
-      threadId,
-      turnId,
-      tokenUsageFixture(reasoningOutputTokens, priorRequests),
-    );
+  const usage = (): void => {
+    if (includeUsage)
+      sendTokenUsage(
+        send,
+        threadId,
+        turnId,
+        tokenUsageFixture(reasoningOutputTokens, priorRequests),
+      );
+  };
   const completed = (): void =>
     send(
       protocolNotification({
@@ -321,6 +325,14 @@ export function completeTurn(
   if (usageOrder === "after_completion") {
     usage();
     idle();
+    return;
+  }
+  if (usageOrder === "after_idle") {
+    idle();
+    // A separate read after idle reproduces the app-server flush race without
+    // keeping the test process alive on behalf of the synthetic notification.
+    const timer = setTimeout(usage, LATER_READ_DELAY_MS);
+    timer.unref();
     return;
   }
   // `later_read` delivers usage and the idle boundary on a transport read the

@@ -10,7 +10,7 @@ import {
   HANDLED_NOTIFICATION_METHODS,
   type Usage,
 } from "../../src/http/chat-normalize.js";
-import { createLogger } from "../../src/core/logger.js";
+import { createLogger, type Logger } from "../../src/core/logger.js";
 import type { ProxyServer } from "../../src/http/server.js";
 import {
   protocolNotification,
@@ -57,6 +57,29 @@ interface StreamedChunk {
   usage?: Usage;
 }
 
+/** In-memory structured logs and the logger that appends to them. */
+interface CapturedLogs {
+  entries: Array<Record<string, unknown>>;
+  log: Logger;
+}
+
+/** Creates a warning-level logger whose entries never leave process memory. */
+function captureLogs(): CapturedLogs {
+  const entries: Array<Record<string, unknown>> = [];
+  return {
+    entries,
+    log: createLogger("warn", (entry) => entries.push(entry)),
+  };
+}
+
+/** Selects entries for one structured event from an in-memory capture. */
+function capturedEvent(
+  entries: Array<Record<string, unknown>>,
+  event: string,
+): Array<Record<string, unknown>> {
+  return entries.filter((entry) => entry.event === event);
+}
+
 /** Decodes one complete SSE body into its chunks, asserting the DONE frame. */
 function streamedChunks(body: string): StreamedChunk[] {
   return parseSseChunks<StreamedChunk>(body);
@@ -68,6 +91,7 @@ interface FakeAppServerOptions {
   onInterrupt?: () => void;
   requestTool?: boolean;
   usageOrder?: UsageWireOrder;
+  usageOnCompletion?: boolean;
   usageAfterTool?: boolean;
   extraModelRequest?: boolean;
 }
@@ -78,6 +102,7 @@ function fakeAppServer({
   onInterrupt = () => {},
   requestTool = false,
   usageOrder = "before_completion",
+  usageOnCompletion = true,
   usageAfterTool = false,
   extraModelRequest = false,
 }: FakeAppServerOptions = {}): FakeTransport {
@@ -137,6 +162,7 @@ function fakeAppServer({
           completeTurn(send, thread, "turn_test", {
             usageOrder,
             priorRequests: extraModelRequest ? 1 : 0,
+            includeUsage: usageOnCompletion,
           });
         }
       } else if (message.method === "turn/interrupt") {
@@ -282,6 +308,16 @@ function failingIngressAppServer(mode: "overflow" | "mismatch" | "suspend"): {
       } else if (message.method === "turn/interrupt") {
         interrupts += 1;
         send(protocolResponse("turn/interrupt", message.id, {}));
+        if (mode === "suspend")
+          send(
+            protocolNotification({
+              method: "thread/status/changed",
+              params: {
+                threadId: "thr_overflow",
+                status: { type: "idle" },
+              },
+            }),
+          );
       } else if (message.error !== undefined) responderErrors.push(message.id);
     },
   });
@@ -336,8 +372,8 @@ function completeThenDropTransport(): FakeTransport {
           },
         }),
       );
-      // No usage and no idle transition follow: the app-server dies inside the
-      // grace period the proxy would otherwise spend waiting for them.
+      // The app-server dies during terminal usage collection, before either a
+      // usage update or the thread's idle transition can arrive.
       setImmediate(() => fake.rpc.close(new Error("transport lost")));
     },
   });
@@ -1157,6 +1193,126 @@ test("attributes every model request of one turn from cumulative usage", () => {
   );
 });
 
+test("warns at most once when usage attribution has no baseline", () => {
+  const captured = captureLogs();
+  const normalizer = new EventNormalizer(undefined, {
+    log: captured.log,
+    requestId: "req_fixture",
+  });
+  const tokenUsage = tokenUsageFixture();
+  const params = { threadId: "thread", turnId: "turn", tokenUsage };
+
+  normalizer.normalize("thread/tokenUsage/updated", params);
+  normalizer.normalize("thread/tokenUsage/updated", params);
+
+  const warnings = capturedEvent(
+    captured.entries,
+    "usage_attribution_degraded",
+  );
+  assert.equal(warnings.length, 1);
+  assert.deepEqual(
+    {
+      level: warnings[0]?.level,
+      request_id: warnings[0]?.request_id,
+      reason: warnings[0]?.reason,
+    },
+    {
+      level: "warn",
+      request_id: "req_fixture",
+      reason: "baseline_missing",
+    },
+  );
+});
+
+test("warns at most once when cumulative usage counters reset", () => {
+  const captured = captureLogs();
+  const normalizer = new EventNormalizer(tokenUsageFixture(0, 2).total, {
+    log: captured.log,
+    requestId: "req_fixture",
+  });
+  const tokenUsage = tokenUsageFixture();
+  const params = { threadId: "thread", turnId: "turn", tokenUsage };
+
+  normalizer.normalize("thread/tokenUsage/updated", params);
+  normalizer.normalize("thread/tokenUsage/updated", params);
+
+  const warnings = capturedEvent(
+    captured.entries,
+    "usage_attribution_degraded",
+  );
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0]?.request_id, "req_fixture");
+  assert.equal(warnings[0]?.reason, "cumulative_reset");
+});
+
+test("warns at most once when a usage update omits last", () => {
+  const captured = captureLogs();
+  const normalizer = new EventNormalizer(tokenUsageFixture().total, {
+    log: captured.log,
+    requestId: "req_fixture",
+  });
+  const params = {
+    threadId: "thread",
+    turnId: "turn",
+    tokenUsage: {
+      total: tokenUsageFixture().total,
+      modelContextWindow: null,
+    },
+  };
+
+  normalizer.normalize("thread/tokenUsage/updated", params);
+  normalizer.normalize("thread/tokenUsage/updated", params);
+
+  const warnings = capturedEvent(
+    captured.entries,
+    "usage_attribution_degraded",
+  );
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0]?.request_id, "req_fixture");
+  assert.equal(warnings[0]?.reason, "missing_last");
+});
+
+test("warns at most once when usage counters are non-finite", () => {
+  const captured = captureLogs();
+  const normalizer = new EventNormalizer(tokenUsageFixture().total, {
+    log: captured.log,
+    requestId: "req_fixture",
+  });
+  const last = { ...tokenUsageFixture().last, outputTokens: Number.NaN };
+  const params = {
+    threadId: "thread",
+    turnId: "turn",
+    tokenUsage: { last, modelContextWindow: null },
+  };
+
+  normalizer.normalize("thread/tokenUsage/updated", params);
+  normalizer.normalize("thread/tokenUsage/updated", params);
+
+  const warnings = capturedEvent(
+    captured.entries,
+    "usage_attribution_degraded",
+  );
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0]?.request_id, "req_fixture");
+  assert.equal(warnings[0]?.reason, "non_finite_counters");
+});
+
+test("logger-less usage degradation remains safe", () => {
+  const normalizer = new EventNormalizer();
+  assert.doesNotThrow(() => {
+    normalizer.normalize("thread/tokenUsage/updated", {
+      threadId: "thread",
+      turnId: "turn",
+      tokenUsage: tokenUsageFixture(),
+    });
+    normalizer.normalize("thread/tokenUsage/updated", {
+      threadId: "thread",
+      turnId: "turn",
+      tokenUsage: { total: tokenUsageFixture().total },
+    });
+  });
+});
+
 test("uses an authoritative baseline when the first observed update is coalesced", () => {
   const normalizer = new EventNormalizer({
     inputTokens: 100,
@@ -1558,6 +1714,42 @@ test("streaming and aggregate responses share content and exact usage", async ()
   });
 });
 
+test("streaming usage defaults on and only explicit false opts out", async () => {
+  await withChatServer(async (origin) => {
+    /** Sends one streaming request with the selected stream options. */
+    const stream = async (streamOptions?: unknown): Promise<Response> =>
+      fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "m",
+          messages: [{ role: "user", content: "Hello" }],
+          stream: true,
+          ...(streamOptions === undefined
+            ? {}
+            : { stream_options: streamOptions }),
+        }),
+      });
+    /** Reports whether a successful stream contains its empty-choice usage chunk. */
+    const hasUsageChunk = async (response: Response): Promise<boolean> => {
+      assert.equal(response.status, 200);
+      return streamedChunks(await response.text()).some(
+        (chunk) => chunk.choices?.length === 0 && chunk.usage !== undefined,
+      );
+    };
+
+    assert.equal(await hasUsageChunk(await stream()), true);
+    assert.equal(
+      await hasUsageChunk(await stream({ include_usage: false })),
+      false,
+    );
+    assert.equal(await hasUsageChunk(await stream({})), true);
+
+    const invalid = await stream({ include_usage: "yes" });
+    assert.equal(invalid.status, 400);
+  });
+});
+
 test("reports usage that app-server streams after turn completion", async () => {
   await withChatServer(async (origin, _proxy, useTransport) => {
     // Usage in the same transport read as the terminal frame is recovered by
@@ -1605,9 +1797,9 @@ test("reports usage that app-server streams after turn completion", async () => 
   });
 });
 
-test("keeps a completed turn when the transport dies before optional usage", async () => {
+test("recovers usage flushed after idle for aggregate and default streaming output", async () => {
   await withChatServer(async (origin, _proxy, useTransport) => {
-    useTransport(completeThenDropTransport());
+    useTransport(fakeAppServer({ usageOrder: "after_idle" }));
     const aggregate = await fetch(`${origin}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1616,18 +1808,16 @@ test("keeps a completed turn when the transport dies before optional usage", asy
         messages: [{ role: "user", content: "Hello" }],
       }),
     });
-    // Usage is optional output. Losing the transport while waiting for it must
-    // not retract frames the completed turn already earned.
     assert.equal(aggregate.status, 200);
-    const body = (await aggregate.json()) as {
-      choices: Array<{ finish_reason: string; message: { content: string } }>;
-      usage?: Usage;
-    };
-    assert.equal(body.choices[0]?.finish_reason, "stop");
-    assert.equal(body.choices[0]?.message.content, "Hello");
-    assert.equal(body.usage, undefined);
+    assert.deepEqual(((await aggregate.json()) as { usage?: Usage }).usage, {
+      prompt_tokens: 4,
+      completion_tokens: 2,
+      total_tokens: 6,
+      prompt_tokens_details: { cached_tokens: 0 },
+      completion_tokens_details: { reasoning_tokens: 0 },
+    });
 
-    useTransport(completeThenDropTransport());
+    useTransport(fakeAppServer({ usageOrder: "after_idle" }));
     const streaming = await fetch(`${origin}/v1/chat/completions`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1635,16 +1825,111 @@ test("keeps a completed turn when the transport dies before optional usage", asy
         model: "m",
         messages: [{ role: "user", content: "Hello" }],
         stream: true,
-        stream_options: { include_usage: true },
       }),
     });
     assert.equal(streaming.status, 200);
-    const text = await streaming.text();
-    const chunks = streamedChunks(text);
-    assert.equal(chunks.at(-1)?.choices?.[0]?.finish_reason, "stop");
-    // A completed stream still terminates normally instead of emitting an error.
-    assert.ok(text.includes("data: [DONE]"));
+    const chunks = streamedChunks(await streaming.text());
+    assert.equal(chunks.at(-2)?.choices?.[0]?.finish_reason, "stop");
+    assert.deepEqual(chunks.at(-1)?.usage, {
+      prompt_tokens: 4,
+      completion_tokens: 2,
+      total_tokens: 6,
+      prompt_tokens_details: { cached_tokens: 0 },
+      completion_tokens_details: { reasoning_tokens: 0 },
+    });
   });
+});
+
+test("warns once when idle grace expires without usage", async () => {
+  const captured = captureLogs();
+  await withChatServer(
+    async (origin, _proxy, useTransport) => {
+      useTransport(fakeAppServer({ usageOnCompletion: false }));
+      const response = await fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "m",
+          messages: [{ role: "user", content: "Hello" }],
+        }),
+      });
+      assert.equal(response.status, 200);
+      const body = (await response.json()) as {
+        choices: Array<{ finish_reason: string }>;
+        usage?: Usage;
+      };
+      assert.equal(body.choices[0]?.finish_reason, "stop");
+      assert.equal(body.usage, undefined);
+
+      const warnings = capturedEvent(captured.entries, "usage_unreported");
+      assert.equal(warnings.length, 1);
+      assert.equal(warnings[0]?.level, "warn");
+      assert.equal(warnings[0]?.reason, "idle_grace_expired");
+      assert.equal(warnings[0]?.pending_tool_batch, false);
+      assert.equal(typeof warnings[0]?.request_id, "string");
+    },
+    30_000,
+    `${tmpdir()}/codex-proxy-chat-tests-${process.pid}`,
+    captured.log,
+  );
+});
+
+test("keeps a completed turn when the transport dies before optional usage", async () => {
+  const captured = captureLogs();
+  await withChatServer(
+    async (origin, _proxy, useTransport) => {
+      useTransport(completeThenDropTransport());
+      const aggregate = await fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "m",
+          messages: [{ role: "user", content: "Hello" }],
+        }),
+      });
+      // Usage is optional output. Losing the transport while waiting for it must
+      // not retract frames the completed turn already earned.
+      assert.equal(aggregate.status, 200);
+      const body = (await aggregate.json()) as {
+        choices: Array<{ finish_reason: string; message: { content: string } }>;
+        usage?: Usage;
+      };
+      assert.equal(body.choices[0]?.finish_reason, "stop");
+      assert.equal(body.choices[0]?.message.content, "Hello");
+      assert.equal(body.usage, undefined);
+      let warnings = capturedEvent(captured.entries, "usage_unreported");
+      assert.equal(warnings.length, 1);
+      assert.equal(warnings[0]?.reason, "transport_failed");
+      assert.equal(warnings[0]?.pending_tool_batch, false);
+      assert.equal(typeof warnings[0]?.request_id, "string");
+
+      useTransport(completeThenDropTransport());
+      const streaming = await fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "m",
+          messages: [{ role: "user", content: "Hello" }],
+          stream: true,
+          stream_options: { include_usage: true },
+        }),
+      });
+      assert.equal(streaming.status, 200);
+      const text = await streaming.text();
+      const chunks = streamedChunks(text);
+      assert.equal(chunks.at(-1)?.choices?.[0]?.finish_reason, "stop");
+      // A completed stream still terminates normally instead of emitting an error.
+      assert.ok(text.includes("data: [DONE]"));
+      warnings = capturedEvent(captured.entries, "usage_unreported");
+      assert.equal(warnings.length, 2);
+      assert.equal(warnings[1]?.reason, "transport_failed");
+      assert.equal(warnings[1]?.pending_tool_batch, false);
+      assert.equal(typeof warnings[1]?.request_id, "string");
+    },
+    30_000,
+    `${tmpdir()}/codex-proxy-chat-tests-${process.pid}`,
+    captured.log,
+  );
 });
 
 test("reports usage for every model request behind one response", async () => {
