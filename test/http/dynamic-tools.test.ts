@@ -888,7 +888,12 @@ test("streaming continuations hide replayed client calls but expose new calls", 
 test("third full-history tool continuation correlates only its terminal result batch", async () => {
   for (const explicitPreviousResponseId of [false, true]) {
     await withTempDir(async (directory) => {
-      const fake = new ToolAppServer();
+      // This correlation case is unrelated to missing usage. Match the live
+      // terminal flush so six requests do not each pay the fallback grace.
+      const fake = new ToolAppServer(true, false, undefined, false, {
+        suspendOrder: "on_interrupt",
+        onCompletion: true,
+      });
       fake.replayAndRequestNewToolOnContinuation = true;
       const { origin, proxy } = await startProxy(directory, fake);
       const tools = [

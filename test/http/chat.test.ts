@@ -186,6 +186,7 @@ function policyCapturingAppServer(): {
   messages: Array<Record<string, unknown>>;
 } {
   const messages: Array<Record<string, unknown>> = [];
+  let priorRequests = 0;
   const fake = createFakeTransport({
     onMessage(message, send) {
       if (typeof message.method !== "string") return;
@@ -221,23 +222,10 @@ function policyCapturingAppServer(): {
             turn: protocolTurn("turn_policy", "inProgress"),
           }),
         );
-        send(
-          protocolNotification({
-            method: "turn/completed",
-            params: {
-              threadId: "thr_policy",
-              turn: protocolTurn("turn_policy", "completed"),
-            },
-          }),
-        );
-        // The idle boundary ends the terminal-usage wait immediately, exactly
-        // as live app-server does at every turn end.
-        send(
-          protocolNotification({
-            method: "thread/status/changed",
-            params: { threadId: "thr_policy", status: { type: "idle" } },
-          }),
-        );
+        // Policy assertions are unrelated to missing usage, so reproduce the
+        // live terminal sequence and avoid the proxy's defensive grace period.
+        completeTurn(send, "thr_policy", "turn_policy", { priorRequests });
+        priorRequests += 1;
       }
     },
   });
