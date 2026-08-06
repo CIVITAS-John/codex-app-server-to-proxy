@@ -8,6 +8,12 @@ export type ErrorType =
   | "rate_limit_error"
   | "server_error";
 
+/** Narrow nonstandard metadata that can be attached to an OpenAI error. */
+export interface ErrorExtensions {
+  xCodex?: { resetAt: number };
+  responseHeaders?: { retryAfter: string };
+}
+
 /** Carries an HTTP status and OpenAI-shaped error metadata. */
 export class HttpError extends Error {
   constructor(
@@ -16,6 +22,7 @@ export class HttpError extends Error {
     readonly type: ErrorType,
     readonly code: string,
     readonly param: string | null = null,
+    readonly extensions: ErrorExtensions = {},
   ) {
     super(message);
   }
@@ -27,6 +34,7 @@ export function errorEnvelope(
   type: ErrorType,
   code: string,
   param: string | null,
+  extensions: ErrorExtensions = {},
 ): Record<string, unknown> {
   return {
     error: {
@@ -34,6 +42,9 @@ export function errorEnvelope(
       type,
       param,
       code,
+      ...(extensions.xCodex
+        ? { x_codex: { reset_at: extensions.xCodex.resetAt } }
+        : {}),
     },
   };
 }
@@ -59,6 +70,7 @@ export function writeJson(
   response: ServerResponse,
   status: number,
   value: unknown,
+  responseHeaders: ErrorExtensions["responseHeaders"] | undefined = undefined,
 ): void {
   if (response.writableEnded) return;
   // A streaming route may fail after its status and content type are committed.
@@ -71,15 +83,33 @@ export function writeJson(
     "content-type": "application/json; charset=utf-8",
     "content-length": Buffer.byteLength(body),
     "cache-control": "no-store",
+    // Only this closed, internally-created header shape is accepted. Error
+    // payloads must never become a path for app-server data to set HTTP headers.
+    ...(responseHeaders ? { "retry-after": responseHeaders.retryAfter } : {}),
   });
   response.end(body);
 }
 
 /** Serializes an HttpError in the OpenAI error envelope. */
 export function writeError(response: ServerResponse, error: HttpError): void {
+  const responseHeaders = safeErrorHeaders(error.extensions.responseHeaders);
   writeJson(
     response,
     error.status,
-    errorEnvelope(error.message, error.type, error.code, error.param),
+    errorEnvelope(
+      error.message,
+      error.type,
+      error.code,
+      error.param,
+      error.extensions,
+    ),
+    responseHeaders,
   );
+}
+
+/** Retains only the decimal Retry-After value created by quota translation. */
+function safeErrorHeaders(
+  headers: ErrorExtensions["responseHeaders"] | undefined,
+): ErrorExtensions["responseHeaders"] | undefined {
+  return headers && /^\d+$/.test(headers.retryAfter) ? headers : undefined;
 }

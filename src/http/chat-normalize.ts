@@ -8,6 +8,7 @@ import {
 } from "../core/token-usage.js";
 import type { StoredToolCall } from "../continuation/state.js";
 import { HttpError } from "./errors.js";
+import { usageLimitError } from "./quota.js";
 
 /** Standard token usage, with details present only when app-server reports them. */
 export interface Usage {
@@ -78,6 +79,7 @@ export interface NormalizedEvent {
   finishReason?: "stop" | "length" | "tool_calls" | "content_filter";
   usage?: Usage;
   error?: string;
+  terminalError?: HttpError;
 }
 
 /** Aggregate fields derived from the shared normalized event stream. */
@@ -156,7 +158,10 @@ export async function aggregateNormalizedEvents(
   let usage: Usage | undefined;
   for await (const event of events) {
     if (event.error)
-      throw new HttpError(502, event.error, "server_error", "app_server_error");
+      throw (
+        event.terminalError ??
+        new HttpError(502, event.error, "server_error", "app_server_error")
+      );
     if (typeof event.delta?.content === "string")
       content += event.delta.content;
     if (typeof event.delta?.reasoning === "string")
@@ -284,14 +289,7 @@ export class EventNormalizer {
     }
     if (method === "error") {
       const error = record(params.error);
-      return [
-        {
-          error:
-            typeof error?.message === "string"
-              ? error.message
-              : "The app-server turn failed.",
-        },
-      ];
+      return [terminalEvent(error, "The app-server turn failed.")];
     }
     if (method === "turn/completed") {
       const turn = record(params.turn);
@@ -301,12 +299,10 @@ export class EventNormalizer {
       if (status === "interrupted") return [{ finishReason: "length" }];
       const error = record(turn?.error);
       return [
-        {
-          error:
-            typeof error?.message === "string"
-              ? error.message
-              : `The app-server turn ended with status ${String(status)}.`,
-        },
+        terminalEvent(
+          status === "failed" ? error : undefined,
+          `The app-server turn ended with status ${String(status)}.`,
+        ),
       ];
     }
     if (method === "item/started" || method === "item/completed") {
@@ -454,6 +450,22 @@ export class EventNormalizer {
     this.#toolCalls.set(id, call);
     return call;
   }
+}
+
+/** Normalizes one app-server terminal failure into a shared typed HTTP error. */
+function terminalEvent(
+  value: unknown,
+  fallbackMessage: string,
+): NormalizedEvent {
+  const error = record(value);
+  const message =
+    typeof error?.message === "string" ? error.message : fallbackMessage;
+  return {
+    error: message,
+    terminalError:
+      usageLimitError(error, message) ??
+      new HttpError(502, message, "server_error", "app_server_error"),
+  };
 }
 
 /** Returns only the completed reasoning suffix not already streamed. */

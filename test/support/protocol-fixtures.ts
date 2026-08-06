@@ -4,6 +4,7 @@ import type { ServerNotification } from "../../protocol/generated/typescript/Ser
 import type { ServerRequest } from "../../protocol/generated/typescript/ServerRequest.js";
 import type { InitializeResponse } from "../../protocol/generated/typescript/InitializeResponse.js";
 import type { GetAccountResponse } from "../../protocol/generated/typescript/v2/GetAccountResponse.js";
+import type { GetAccountRateLimitsResponse } from "../../protocol/generated/typescript/v2/GetAccountRateLimitsResponse.js";
 import type { LoginAccountResponse } from "../../protocol/generated/typescript/v2/LoginAccountResponse.js";
 import type { LogoutAccountResponse } from "../../protocol/generated/typescript/v2/LogoutAccountResponse.js";
 import type { Model } from "../../protocol/generated/typescript/v2/Model.js";
@@ -22,6 +23,7 @@ import type { Turn } from "../../protocol/generated/typescript/v2/Turn.js";
 interface ProtocolResponseByMethod {
   initialize: InitializeResponse;
   "account/read": GetAccountResponse;
+  "account/rateLimits/read": GetAccountRateLimitsResponse;
   "account/login/start": LoginAccountResponse;
   "account/logout": LogoutAccountResponse;
   "model/list": ModelListResponse;

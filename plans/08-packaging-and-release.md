@@ -17,8 +17,9 @@ Publish a reproducible npm CLI that a clean machine can install without cloning 
 - The npm artifact is limited to `dist`, `README.md`, `LICENSE`, `protocol/schemas`, and `protocol/VERSION.json`. Generated protocol TypeScript, tests, fixtures, coverage, plans, scripts, workflows, and local proxy state are not published.
 - Package installation has no proxy install hook. `prepack` builds the publisher's artifact, but installing it never starts Codex, performs login, or invokes the proxy.
 - Removing or deprecating a package version must not delete `~/.codex-openai-proxy`, a custom `--state-dir`, or a custom `--codex-home`. Persisted mappings and proxy-owned login data remain available to a compatible installed version; an incompatible replacement must provide an explicit migration or refuse the store without rewriting it.
+- Quota-limit compatibility is error-only: `usageLimitExceeded` becomes a typed 429 and may include nonstandard reset metadata from one abortable rate-limit lookup. Explicit workspace credit depletion always uses non-retryable `insufficient_credits` without reset; an explicit workspace cap uses non-retryable `workspace_usage_limit_exceeded` only without a trustworthy individual spend-control reset. It neither publishes a quota endpoint nor delays, queues, retries, replays, or proactively rejects requests. Streaming clients must tolerate a typed terminal SSE error after HTTP 200 when output was already committed.
 
-These decisions make the prerelease intentionally narrow: users get a reproducible package and pinned protocol, while a Codex upgrade, stable npm promotion, or persistence-format change requires a new reviewed release decision.
+These decisions make the prerelease intentionally narrow: users get a reproducible package and pinned protocol, while a Codex upgrade, stable npm promotion, persistence-format change, or altered quota-error compatibility requires a new reviewed release decision.
 
 ## Implemented in the source tree
 

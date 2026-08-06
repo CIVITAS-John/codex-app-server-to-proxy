@@ -125,6 +125,8 @@ curl -N http://127.0.0.1:8787/v1/chat/completions \
 
 Standard clients get assistant text, function calls, the finish reason, and a usage chunk when Codex reports exact counters. The streaming usage chunk is on by default; set `stream_options.include_usage` to `false` to omit it. This default deliberately differs from OpenAI's opt-in behavior. Codex reasoning and internal activity arrive in the nonstandard fields described under [Codex-specific extensions](#codex-specific-extensions).
 
+The proxy primes a stream before committing HTTP 200. An immediate Codex quota failure is therefore an ordinary JSON HTTP 429. If output is already visible, the response remains HTTP 200 and ends with exactly one typed SSE error event, without `data: [DONE]`.
+
 ## Function tools
 
 Function tools follow the normal multi-request Chat Completions flow:
@@ -207,6 +209,14 @@ The JSON Schema ships with the package at `protocol/schemas/x-codex.schema.json`
 When Codex reports exact usage for the turn, responses include standard `prompt_tokens`, `completion_tokens`, and `total_tokens`, plus cached-input and reasoning-token detail when available. When no complete record exists, `usage` is omitted — never estimated.
 
 One response can span several Codex model requests, for example when internal tools run before the answer. Usage covers every request the response reported, not only the last one, so reasoning tokens still account for reasoning summaries streamed earlier in the same response. The continuation mapping retains the exact cumulative total at each response boundary. A response that ends in `finish_reason: "tool_calls"` ends its Codex turn immediately, which flushes that turn's exact usage, so it reports the work up to the call and the continuation counts from there. Those tokens are never dropped, never estimated, and never counted twice — this includes reasoning tokens on a tool call that is the final desired result and is never continued.
+
+## Quota errors
+
+Only app-server `codexErrorInfo: "usageLimitExceeded"` becomes HTTP 429 with `error.type: "rate_limit_error"`, normally `error.code: "usage_limit_exceeded"`. This is error enrichment, not a public quota endpoint or proactive admission check, and it is distinct from response-token usage.
+
+For each such failed request, the proxy makes at most one memoized, abortable `account/rateLimits/read`. When it finds a trustworthy future reset, nonstandard `error.x_codex.reset_at` is Unix seconds; an uncommitted response also has the matching integer-seconds `Retry-After` header. A failed or malformed lookup omits both reset values but preserves the typed 429. Client cancellation remains cancellation.
+
+Explicit workspace credit exhaustion always uses `insufficient_credits` with no reset. An explicit workspace usage cap uses `workspace_usage_limit_exceeded` only without a trustworthy individual spend-control reset; when `spendControlReached` and a valid future `individualLimit` reset exist, it remains `usage_limit_exceeded` with reset metadata. Vox Agents treats both workspace codes as non-retryable. The reset is the latest future exhausted primary or secondary window from `rateLimitsByLimitId.codex`, falling back to `rateLimits`; `individualLimit` participates only when `spendControlReached`. The proxy uses stale-percent data only for `rate_limit_reached` and never infers a workspace reset from rolling windows. It never sleeps, queues, consumes reset credit, retries, or replays a request.
 
 ## Safety and limits
 

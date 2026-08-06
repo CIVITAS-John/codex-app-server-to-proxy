@@ -15,6 +15,7 @@ import { UNRESTRICTED_POLICY_REQUIREMENTS } from "../../src/core/policy.js";
 import { createProxyServer, type ProxyServer } from "../../src/http/server.js";
 import { silentLogger } from "../support/logger.js";
 import {
+  protocolNotification,
   protocolResponse,
   protocolThread,
   protocolThreadStartResponse,
@@ -433,13 +434,26 @@ test("a timed-out backpressured stream releases its concurrency slot", async () 
                 protocolThreadStartResponse(protocolThread("thr_stalled")),
               ),
             );
-          else if (message.method === "turn/start")
+          else if (message.method === "turn/start") {
             send(
               protocolResponse("turn/start", id, {
                 turn: protocolTurn("turn_stalled", "inProgress"),
               }),
             );
-          else if (message.method === "turn/interrupt")
+            // Iterator priming waits for visible output before the response's
+            // initial role chunk can encounter the simulated backpressure.
+            send(
+              protocolNotification({
+                method: "item/agentMessage/delta",
+                params: {
+                  threadId: "thr_stalled",
+                  turnId: "turn_stalled",
+                  itemId: "message",
+                  delta: "primed",
+                },
+              }),
+            );
+          } else if (message.method === "turn/interrupt")
             send(protocolResponse("turn/interrupt", id, {}));
         },
       });

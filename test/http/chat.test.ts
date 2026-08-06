@@ -4,7 +4,7 @@ import { once } from "node:events";
 import { mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
+import { test, vi } from "vitest";
 import {
   EventNormalizer,
   HANDLED_NOTIFICATION_METHODS,
@@ -427,7 +427,117 @@ function lateFailureAppServer(mode: "transport" | "event"): FakeTransport {
   return fake;
 }
 
-/** Creates a silent first turn and a successful second turn on one thread. */
+/** Creates a quota-failing turn that can fail before or after visible stream content. */
+function quotaFailureAppServer({
+  terminal,
+  emitContent = false,
+  codexErrorInfo = "usageLimitExceeded",
+  duplicateTerminal = false,
+  resetAt,
+}: {
+  terminal: "error" | "completed";
+  emitContent?: boolean;
+  codexErrorInfo?: "usageLimitExceeded" | "sessionBudgetExceeded";
+  duplicateTerminal?: boolean;
+  resetAt: number;
+}): { rpc: FakeTransport["rpc"]; rateLimitReads(): number } {
+  let reads = 0;
+  const error = {
+    message: "Usage limit reached.",
+    codexErrorInfo,
+    additionalDetails: null,
+  };
+  const fake = createFakeTransport({
+    onMessage(rawMessage, send) {
+      const message = rawMessage as { id: number; method: string };
+      if (message.method === "thread/start") {
+        send(
+          protocolResponse(
+            "thread/start",
+            message.id,
+            protocolThreadStartResponse(protocolThread("thr_quota")),
+          ),
+        );
+        return;
+      }
+      if (message.method === "account/rateLimits/read") {
+        reads += 1;
+        send(
+          protocolResponse("account/rateLimits/read", message.id, {
+            rateLimits: {
+              limitId: "codex",
+              limitName: "Codex",
+              primary: {
+                usedPercent: 100,
+                windowDurationMins: 60,
+                resetsAt: resetAt,
+              },
+              secondary: null,
+              credits: null,
+              individualLimit: null,
+              spendControlReached: null,
+              planType: null,
+              rateLimitReachedType: "rate_limit_reached",
+            },
+            rateLimitsByLimitId: null,
+            rateLimitResetCredits: null,
+          }),
+        );
+        return;
+      }
+      if (message.method !== "turn/start") return;
+      send(
+        protocolResponse("turn/start", message.id, {
+          turn: protocolTurn("turn_quota", "inProgress"),
+        }),
+      );
+      if (emitContent)
+        send(
+          protocolNotification({
+            method: "item/agentMessage/delta",
+            params: {
+              threadId: "thr_quota",
+              turnId: "turn_quota",
+              itemId: "message",
+              delta: "partial",
+            },
+          }),
+        );
+      const report = (): void => {
+        if (terminal === "error")
+          send(
+            protocolNotification({
+              method: "error",
+              params: {
+                threadId: "thr_quota",
+                turnId: "turn_quota",
+                willRetry: false,
+                error,
+              },
+            }),
+          );
+        else
+          send(
+            protocolNotification({
+              method: "turn/completed",
+              params: {
+                threadId: "thr_quota",
+                turn: {
+                  ...protocolTurn("turn_quota", "failed"),
+                  error,
+                },
+              },
+            }),
+          );
+      };
+      report();
+      if (duplicateTerminal) report();
+    },
+  });
+  return { rpc: fake.rpc, rateLimitReads: () => reads };
+}
+
+/** Creates a first turn with one delta and a successful second turn on one thread. */
 function recoverableAppServer(): {
   rpc: FakeTransport["rpc"];
   wasInterrupted(): boolean;
@@ -456,7 +566,22 @@ function recoverableAppServer(): {
             turn: protocolTurn(turnId, "inProgress"),
           }),
         );
-        if (turns === 1) return;
+        if (turns === 1) {
+          // Streaming now primes until real output before writing the role, so
+          // this delta deterministically reaches the injected write failure.
+          send(
+            protocolNotification({
+              method: "item/agentMessage/delta",
+              params: {
+                threadId: "thr_recover",
+                turnId,
+                itemId: "message",
+                delta: "primed",
+              },
+            }),
+          );
+          return;
+        }
         send(
           protocolNotification({
             method: "turn/completed",
@@ -2303,7 +2428,132 @@ test("late streaming failures emit one error and close without DONE", async () =
     });
 });
 
-test("initial SSE write failure disposes eager execution before generator startup", async () => {
+/** Verifies quota failures preserve HTTP semantics before and typed SSE semantics after commit. */
+test("quota failures are JSON 429 before streaming commits and typed SSE errors afterward", async () => {
+  const resetAt = 2_000_000_060;
+  vi.spyOn(Date, "now").mockReturnValue(2_000_000_000_000);
+  try {
+    for (const terminal of ["error", "completed"] as const)
+      await withChatServer(async (origin, _proxy, useTransport) => {
+        const immediate = quotaFailureAppServer({ terminal, resetAt });
+        useTransport(immediate);
+        const aggregate = await fetch(`${origin}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: "m",
+            messages: [{ role: "user", content: terminal }],
+          }),
+        });
+        assert.equal(aggregate.status, 429);
+        assert.equal(
+          aggregate.headers.get("retry-after"),
+          String(resetAt - 2_000_000_000),
+        );
+        assert.deepEqual(await aggregate.json(), {
+          error: {
+            message: "Usage limit reached.",
+            type: "rate_limit_error",
+            param: null,
+            code: "usage_limit_exceeded",
+            x_codex: { reset_at: resetAt },
+          },
+        });
+        assert.equal(immediate.rateLimitReads(), 1);
+
+        const immediateStream = quotaFailureAppServer({ terminal, resetAt });
+        useTransport(immediateStream);
+        const stream = await fetch(`${origin}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: "m",
+            stream: true,
+            messages: [{ role: "user", content: `${terminal} stream` }],
+          }),
+        });
+        assert.equal(stream.status, 429);
+        assert.match(
+          stream.headers.get("content-type") ?? "",
+          /^application\/json/,
+        );
+        assert.equal(
+          ((await stream.json()) as { error: { code: string } }).error.code,
+          "usage_limit_exceeded",
+        );
+        assert.equal(immediateStream.rateLimitReads(), 1);
+
+        const late = quotaFailureAppServer({
+          terminal,
+          emitContent: true,
+          duplicateTerminal: true,
+          resetAt,
+        });
+        useTransport(late);
+        const lateStream = await fetch(`${origin}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: "m",
+            stream: true,
+            messages: [{ role: "user", content: `${terminal} late` }],
+          }),
+        });
+        assert.equal(lateStream.status, 200);
+        assert.equal(lateStream.headers.get("retry-after"), null);
+        const frames = parseSseFrames(await lateStream.text());
+        assert.equal(frames.includes("[DONE]"), false);
+        const errors = frames
+          .map(
+            (frame) => JSON.parse(frame) as { error?: Record<string, unknown> },
+          )
+          .filter((frame) => frame.error !== undefined);
+        assert.equal(errors.length, 1);
+        assert.deepEqual(errors[0]?.error, {
+          message: "Usage limit reached.",
+          type: "rate_limit_error",
+          param: null,
+          code: "usage_limit_exceeded",
+          x_codex: { reset_at: resetAt },
+        });
+        assert.equal(late.rateLimitReads(), 1);
+      });
+  } finally {
+    vi.restoreAllMocks();
+  }
+});
+
+/** Verifies nonquota terminal errors do not trigger quota lookup or remapping. */
+test("nonquota turn errors retain the existing generic app-server failure", async () => {
+  await withChatServer(async (origin, _proxy, useTransport) => {
+    const fake = quotaFailureAppServer({
+      terminal: "completed",
+      codexErrorInfo: "sessionBudgetExceeded",
+      resetAt: 2_000_000_060,
+    });
+    useTransport(fake);
+    const response = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        messages: [{ role: "user", content: "not a quota error" }],
+      }),
+    });
+    assert.equal(response.status, 502);
+    assert.deepEqual(await response.json(), {
+      error: {
+        message: "Usage limit reached.",
+        type: "server_error",
+        param: null,
+        code: "app_server_error",
+      },
+    });
+    assert.equal(fake.rateLimitReads(), 0);
+  });
+});
+
+test("initial SSE write failure disposes a primed streaming execution", async () => {
   await withChatServer(async (origin, proxy, useTransport) => {
     const fake = recoverableAppServer();
     useTransport(fake);

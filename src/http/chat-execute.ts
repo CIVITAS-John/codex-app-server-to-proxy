@@ -34,6 +34,7 @@ import {
   type ChatRequest,
 } from "./chat-validate.js";
 import { HttpError, toolCorrelationErrorForStatus } from "./errors.js";
+import { usageLimitErrorResolver } from "./quota.js";
 
 /** Maximum buffered app-server activity retained for one HTTP response. */
 const MAX_INGRESS_EVENTS = 1_024;
@@ -416,6 +417,7 @@ export async function execute(
     log: options.log,
     requestId: options.requestId,
   });
+  const quotaResolver = usageLimitErrorResolver(options.rpc, options.signal);
 
   const events =
     (async function* streamExecution(): AsyncGenerator<NormalizedEvent> {
@@ -529,7 +531,13 @@ export async function execute(
             if (event.error) {
               handle.terminal = true;
               failed = true;
-              yield event;
+              // This is the sole terminal lifecycle boundary. Resolving quota
+              // metadata here means an error notification and failed completion
+              // cannot trigger duplicate account reads or terminal frames.
+              const terminalError = event.terminalError
+                ? await quotaResolver.resolve(event.terminalError)
+                : undefined;
+              yield terminalError ? { ...event, terminalError } : event;
             } else if (event.finishReason) {
               // Persistence is part of successful completion. Do not expose a
               // terminal success frame until the continuation can be recorded.

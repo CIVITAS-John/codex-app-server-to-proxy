@@ -1,6 +1,6 @@
 import type { ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import { writeJson } from "./errors.js";
+import { HttpError, writeJson } from "./errors.js";
 import { chunk, writeFrame, writeSse, writeSseError } from "./chat-sse.js";
 import {
   aggregateNormalizedEvents,
@@ -49,7 +49,7 @@ export async function handleChatCompletion(
   const responseId = `chatcmpl_codex_${randomUUID().replaceAll("-", "")}`;
   const created = Math.floor(Date.now() / 1_000);
   // Setup is eager so validation and RPC failures retain their HTTP status
-  // instead of committing an SSE response before the generator is advanced.
+  // instead of committing an SSE response before streaming is primed.
   const execution = await execute(request, options, responseId);
   const { events } = execution;
   try {
@@ -65,8 +65,8 @@ export async function handleChatCompletion(
       created,
     );
   } finally {
-    // This also covers writeHead/initial-role failures before the async
-    // generator has ever started, when its own finally block cannot run.
+    // This is idempotent with iterator disposal and also releases eager setup
+    // if stream priming or its initial SSE writes fail.
     await execution.dispose();
   }
 }
@@ -79,23 +79,36 @@ async function streamChatResponse(
   responseId: string,
   created: number,
 ): Promise<void> {
-  response.writeHead(200, {
-    "content-type": "text/event-stream; charset=utf-8",
-    "cache-control": "no-cache, no-store",
-    connection: "keep-alive",
-    "x-accel-buffering": "no",
-  });
-  await writeSse(
-    response,
-    chunk(responseId, created, request.model, { role: "assistant" }, null),
-  );
+  const iterator = events[Symbol.asyncIterator]();
   let streamFailed = false;
   try {
-    for await (const event of events) {
+    // Prime before committing SSE so an immediate quota failure can preserve
+    // its HTTP 429 and Retry-After response metadata instead of becoming 200.
+    const first = await iterator.next();
+    if (
+      !first.done &&
+      first.value.terminalError?.status === 429 &&
+      first.value.terminalError.type === "rate_limit_error"
+    )
+      throw first.value.terminalError;
+    response.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-store",
+      connection: "keep-alive",
+      "x-accel-buffering": "no",
+    });
+    await writeSse(
+      response,
+      chunk(responseId, created, request.model, { role: "assistant" }, null),
+    );
+    const emit = async (event: NormalizedEvent): Promise<boolean> => {
       if (event.error) {
-        await writeSseError(response, event.error);
-        streamFailed = true;
-        break;
+        await writeSseError(
+          response,
+          event.terminalError ??
+            new HttpError(502, event.error, "server_error", "app_server_error"),
+        );
+        return true;
       }
       if (event.delta)
         await writeSse(
@@ -116,14 +129,34 @@ async function streamChatResponse(
           choices: [],
           usage: event.usage,
         });
+      return false;
+    };
+    if (!first.done) streamFailed = await emit(first.value);
+    while (!streamFailed) {
+      const next = await iterator.next();
+      if (next.done) break;
+      streamFailed = await emit(next.value);
     }
   } catch (error) {
+    // Iterator startup precedes headers specifically so route handling can
+    // serialize immediate failures as normal JSON HTTP errors.
+    if (!response.headersSent) throw error;
     streamFailed = true;
     if (!response.writableEnded && !response.destroyed)
       await writeSseError(
         response,
-        error instanceof Error ? error.message : "The app-server turn failed.",
+        error instanceof HttpError &&
+          error.status === 429 &&
+          error.type === "rate_limit_error"
+          ? error
+          : error instanceof Error
+            ? error.message
+            : "The app-server turn failed.",
       );
+  } finally {
+    // Manual priming bypasses `for await`, so explicitly close the generator
+    // to run its turn interruption and listener cleanup before returning.
+    await iterator.return?.();
   }
   if (!streamFailed) await writeFrame(response, "[DONE]");
   response.end();

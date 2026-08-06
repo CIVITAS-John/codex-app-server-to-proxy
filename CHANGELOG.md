@@ -2,6 +2,16 @@
 
 All notable user-facing changes are recorded here. This project follows semantic versioning once a version is published.
 
+## 0.1.0-rc.19 — Pending
+
+### Added
+
+- App-server `usageLimitExceeded` failures now map to typed HTTP 429 `rate_limit_error` responses. A best-effort one-per-request rate-limit lookup may add nonstandard `error.x_codex.reset_at` and a matching pre-commit `Retry-After`; malformed or unavailable limit data never changes the typed error. Explicit workspace credit exhaustion always maps `insufficient_credits` without reset; an explicit workspace usage cap maps `workspace_usage_limit_exceeded` only without a trustworthy individual spend-control reset. Vox Agents treats both codes as non-retryable.
+
+### Changed
+
+- Streaming responses are primed before HTTP 200: an immediate quota failure is JSON 429, while a failure after visible output emits exactly one typed terminal SSE error and no `[DONE]`. The proxy remains fail-fast and does not expose a quota endpoint, proactively gate, sleep, queue, consume reset credit, retry, or replay requests.
+
 ## 0.1.0-rc.17 — August 2, 2026
 
 ### Added
