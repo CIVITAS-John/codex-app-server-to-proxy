@@ -6,87 +6,28 @@ import {
   usageLimitError,
   usageLimitErrorResolver,
 } from "../../src/http/quota.js";
-import type { GetAccountRateLimitsResponse } from "../../protocol/generated/typescript/v2/GetAccountRateLimitsResponse.js";
-import type { RateLimitResetCredit } from "../../protocol/generated/typescript/v2/RateLimitResetCredit.js";
-import type { RateLimitResetCreditsSummary } from "../../protocol/generated/typescript/v2/RateLimitResetCreditsSummary.js";
+import {
+  protocolRateLimitSnapshot,
+  protocolRateLimitsResponse,
+} from "../support/protocol-fixtures.js";
 import type { RateLimitSnapshot } from "../../protocol/generated/typescript/v2/RateLimitSnapshot.js";
 
 /** Fixed Unix time so all quota reset assertions are deterministic. */
 const NOW = 2_000_000_000;
 
-/** Builds one complete generated-protocol rate-limit snapshot for a fake RPC. */
-function rateLimitSnapshot(
-  values: Partial<RateLimitSnapshot> = {},
-): RateLimitSnapshot {
-  return {
-    limitId: "codex",
-    limitName: "Codex",
-    primary: null,
-    secondary: null,
-    credits: null,
-    individualLimit: null,
-    spendControlReached: null,
-    planType: null,
-    rateLimitReachedType: "rate_limit_reached",
-    ...values,
-  };
-}
-
-/** Builds a complete generated account/rateLimits/read response for a fake RPC. */
-function rateLimitResponse(
-  snapshot: RateLimitSnapshot,
-  rateLimitsByLimitId: GetAccountRateLimitsResponse["rateLimitsByLimitId"] = {
-    codex: snapshot,
-  },
-  rateLimitResetCredits: RateLimitResetCreditsSummary | null = null,
-): GetAccountRateLimitsResponse {
-  return {
-    rateLimits: snapshot,
-    rateLimitsByLimitId,
-    rateLimitResetCredits,
-  };
-}
-
-/** Builds one complete generated reset-credit row for a fake quota lookup. */
-function rateLimitResetCredit(
-  values: Partial<RateLimitResetCredit> = {},
-): RateLimitResetCredit {
-  return {
-    id: "reset-credit-fixture",
-    resetType: "codexRateLimits",
-    status: "available",
-    grantedAt: NOW - 60,
-    expiresAt: NOW + 3_600,
-    title: "Synthetic reset credit",
-    description: "Synthetic quota test fixture.",
-    ...values,
-  };
-}
-
-/** Builds one complete generated reset-credit summary for a fake quota lookup. */
-function rateLimitResetCreditsSummary(
-  credits: RateLimitResetCredit[] | null = [rateLimitResetCredit()],
-): RateLimitResetCreditsSummary {
-  return { availableCount: BigInt(credits?.length ?? 1), credits };
-}
-
 /** Creates an app-server request double while retaining its exact call arguments. */
 function rateLimitRpc(result: unknown | (() => Promise<unknown>)): {
-  rpc: JsonRpcTransport;
-  calls: Array<[string, unknown, AbortSignal]>;
+  rpc: Pick<JsonRpcTransport, "request">;
+  calls: Array<[string, unknown, AbortSignal | undefined]>;
 } {
-  const calls: Array<[string, unknown, AbortSignal]> = [];
+  const calls: Array<[string, unknown, AbortSignal | undefined]> = [];
   return {
     rpc: {
-      request: async (
-        method: string,
-        params: unknown,
-        signal: AbortSignal,
-      ): Promise<unknown> => {
+      request: async (method, params, signal): Promise<unknown> => {
         calls.push([method, params, signal]);
         return typeof result === "function" ? await result() : result;
       },
-    } as unknown as JsonRpcTransport,
+    },
     calls,
   };
 }
@@ -97,7 +38,7 @@ async function resolveUsageLimit(
   signal = new AbortController().signal,
 ): Promise<{
   error: HttpError;
-  calls: Array<[string, unknown, AbortSignal]>;
+  calls: Array<[string, unknown, AbortSignal | undefined]>;
   signal: AbortSignal;
 }> {
   const fake = rateLimitRpc(result);
@@ -121,7 +62,7 @@ function fixedClock(): void {
 test("only codex usageLimitExceeded becomes a quota error", () => {
   const quota = usageLimitError(
     { message: "quota", codexErrorInfo: "usageLimitExceeded" },
-    "fallback",
+    "quota",
   );
   assert.equal(quota?.status, 429);
   assert.equal(quota?.type, "rate_limit_error");
@@ -134,7 +75,7 @@ test("only codex usageLimitExceeded becomes a quota error", () => {
     "other",
   ])
     assert.equal(
-      usageLimitError({ message: "not quota", codexErrorInfo }, "fallback"),
+      usageLimitError({ message: "not quota", codexErrorInfo }, "not quota"),
       undefined,
     );
 });
@@ -145,8 +86,8 @@ test("reads quota details once with undefined params and the request signal", as
   try {
     const controller = new AbortController();
     const fake = rateLimitRpc(
-      rateLimitResponse(
-        rateLimitSnapshot({
+      protocolRateLimitsResponse(
+        protocolRateLimitSnapshot({
           primary: {
             usedPercent: 100,
             windowDurationMins: 60,
@@ -180,7 +121,7 @@ test("reads quota details once with undefined params and the request signal", as
 test("uses the codex bucket and latest exhausted reset before rolling fallbacks", async () => {
   fixedClock();
   try {
-    const codex = rateLimitSnapshot({
+    const codex = protocolRateLimitSnapshot({
       primary: {
         usedPercent: 100,
         windowDurationMins: 60,
@@ -192,21 +133,20 @@ test("uses the codex bucket and latest exhausted reset before rolling fallbacks"
         resetsAt: NOW + 90,
       },
     });
-    const fallback = rateLimitSnapshot({
+    const fallback = protocolRateLimitSnapshot({
       rateLimitReachedType: "workspace_owner_credits_depleted",
     });
     const resolved = await resolveUsageLimit(
-      rateLimitResponse(fallback, { codex }),
+      protocolRateLimitsResponse(fallback, { codex }),
     );
     assert.equal(resolved.error.code, "usage_limit_exceeded");
     assert.deepEqual(resolved.error.extensions, {
       xCodex: { resetAt: NOW + 90 },
-      responseHeaders: { retryAfter: "90" },
     });
 
     const rolling = await resolveUsageLimit(
-      rateLimitResponse(
-        rateLimitSnapshot({
+      protocolRateLimitsResponse(
+        protocolRateLimitSnapshot({
           primary: {
             usedPercent: 99,
             windowDurationMins: 60,
@@ -216,8 +156,9 @@ test("uses the codex bucket and latest exhausted reset before rolling fallbacks"
         null,
       ),
     );
-    assert.equal(rolling.error.extensions.xCodex?.resetAt, NOW + 45);
-    assert.equal(rolling.error.extensions.responseHeaders?.retryAfter, "45");
+    assert.deepEqual(rolling.error.extensions, {
+      xCodex: { resetAt: NOW + 45 },
+    });
   } finally {
     vi.restoreAllMocks();
   }
@@ -227,7 +168,7 @@ test("uses the codex bucket and latest exhausted reset before rolling fallbacks"
 test("does not fall back from a malformed codex bucket", async () => {
   fixedClock();
   try {
-    const fallback = rateLimitSnapshot({
+    const fallback = protocolRateLimitSnapshot({
       primary: {
         usedPercent: 100,
         windowDurationMins: 60,
@@ -235,7 +176,7 @@ test("does not fall back from a malformed codex bucket", async () => {
       },
     });
     const resolved = await resolveUsageLimit({
-      ...rateLimitResponse(fallback),
+      ...protocolRateLimitsResponse(fallback),
       rateLimitsByLimitId: { codex: "invalid" },
     });
     assert.deepEqual(resolved.error.extensions, {});
@@ -244,8 +185,8 @@ test("does not fall back from a malformed codex bucket", async () => {
   }
 });
 
-/** Verifies partially malformed lookup shapes cannot drive quota enrichment. */
-test("keeps the default typed quota error for partially malformed lookup payloads", async () => {
+/** Verifies malformed consumed fields cannot drive quota enrichment. */
+test("keeps the default typed quota error for malformed consumed lookup fields", async () => {
   fixedClock();
   try {
     const resetWindow = {
@@ -253,18 +194,10 @@ test("keeps the default typed quota error for partially malformed lookup payload
       windowDurationMins: 60,
       resetsAt: NOW + 30,
     };
-    const enrichable = rateLimitSnapshot({
-      primary: resetWindow,
-      credits: { hasCredits: true, unlimited: false, balance: "10" },
-      planType: "plus",
-    });
-    const selectedResponse = (
-      codex: unknown,
-      responseValues: Record<string, unknown> = {},
-    ): unknown => ({
-      ...rateLimitResponse(enrichable),
+    const enrichable = protocolRateLimitSnapshot({ primary: resetWindow });
+    const selectedResponse = (codex: unknown): unknown => ({
+      ...protocolRateLimitsResponse(enrichable),
       rateLimitsByLimitId: { codex },
-      ...responseValues,
     });
     const withoutField = (field: keyof RateLimitSnapshot): unknown => {
       const snapshot = { ...enrichable } as Record<string, unknown>;
@@ -277,48 +210,16 @@ test("keeps the default typed quota error for partially malformed lookup payload
         create: () => withoutField("primary"),
       },
       {
-        name: "missing limitId",
-        create: () => withoutField("limitId"),
-      },
-      {
-        name: "wrong limitId",
-        create: () => selectedResponse({ ...enrichable, limitId: 7 }),
-      },
-      {
-        name: "missing limitName",
-        create: () => withoutField("limitName"),
-      },
-      {
-        name: "wrong limitName",
-        create: () => selectedResponse({ ...enrichable, limitName: {} }),
-      },
-      {
-        name: "malformed credits",
-        create: () =>
-          selectedResponse({
-            ...enrichable,
-            credits: { hasCredits: true, unlimited: "no", balance: null },
-          }),
-      },
-      {
-        name: "missing planType",
-        create: () => withoutField("planType"),
-      },
-      {
-        name: "unknown planType",
-        create: () => selectedResponse({ ...enrichable, planType: "future" }),
-      },
-      {
         name: "invalid bucket container",
         create: () => ({
-          ...rateLimitResponse(enrichable),
+          ...protocolRateLimitsResponse(enrichable),
           rateLimitsByLimitId: "invalid",
         }),
       },
       {
         name: "array bucket container",
         create: () => ({
-          ...rateLimitResponse(enrichable),
+          ...protocolRateLimitsResponse(enrichable),
           rateLimitsByLimitId: [],
         }),
       },
@@ -332,39 +233,14 @@ test("keeps the default typed quota error for partially malformed lookup payload
           }),
       },
       {
-        name: "missing window duration",
+        name: "malformed spend-control snapshot",
         create: () =>
-          selectedResponse({
-            ...enrichable,
-            primary: { usedPercent: 100, resetsAt: NOW + 30 },
-          }),
+          selectedResponse({ ...enrichable, individualLimit: "invalid" }),
       },
       {
-        name: "malformed reset-credit summary",
+        name: "malformed spend-control flag",
         create: () =>
-          selectedResponse(enrichable, {
-            rateLimitResetCredits: { availableCount: "1", credits: [] },
-          }),
-      },
-      {
-        name: "malformed reset-credit row",
-        create: () => {
-          const { status: _status, ...malformedRow } = rateLimitResetCredit();
-          assert.equal(_status, "available");
-          return selectedResponse(enrichable, {
-            rateLimitResetCredits: {
-              availableCount: 1n,
-              credits: [malformedRow],
-            },
-          });
-        },
-      },
-      {
-        name: "malformed non-codex bucket",
-        create: () => ({
-          ...rateLimitResponse(enrichable),
-          rateLimitsByLimitId: { codex: enrichable, other: "invalid" },
-        }),
+          selectedResponse({ ...enrichable, spendControlReached: "yes" }),
       },
     ];
 
@@ -381,30 +257,32 @@ test("keeps the default typed quota error for partially malformed lookup payload
   }
 });
 
-/** Verifies complete non-null optional quota structures still allow enrichment. */
-test("accepts valid credits and reset-credit details during quota enrichment", async () => {
+/** Verifies unconsumed response fields never disable quota enrichment. */
+test("ignores unconsumed snapshot and response fields during enrichment", async () => {
   fixedClock();
   try {
-    const snapshot = rateLimitSnapshot({
-      primary: {
-        usedPercent: 100,
-        windowDurationMins: 60,
-        resetsAt: NOW + 30,
-      },
-      credits: { hasCredits: true, unlimited: false, balance: "10" },
-      planType: "plus",
+    // Raw wire junk everywhere reset selection does not read: an unknown plan
+    // tier, malformed credits and reset-credit rows, a malformed sibling
+    // bucket, and a window missing its unconsumed duration.
+    const snapshot = {
+      limitId: 7,
+      limitName: null,
+      primary: { usedPercent: 100, resetsAt: NOW + 30 },
+      secondary: null,
+      credits: "malformed",
+      individualLimit: null,
+      spendControlReached: null,
+      planType: "future_plan",
+      rateLimitReachedType: "rate_limit_reached",
+    };
+    const resolved = await resolveUsageLimit({
+      rateLimits: snapshot,
+      rateLimitsByLimitId: { codex: snapshot, other: "invalid" },
+      rateLimitResetCredits: { availableCount: "1", credits: ["junk"] },
     });
-    const resolved = await resolveUsageLimit(
-      rateLimitResponse(
-        snapshot,
-        { codex: snapshot },
-        rateLimitResetCreditsSummary(),
-      ),
-    );
     assert.equal(resolved.error.code, "usage_limit_exceeded");
     assert.deepEqual(resolved.error.extensions, {
       xCodex: { resetAt: NOW + 30 },
-      responseHeaders: { retryAfter: "30" },
     });
   } finally {
     vi.restoreAllMocks();
@@ -418,7 +296,9 @@ test("classifies workspace credit exhaustion without a reset", async () => {
     "workspace_member_credits_depleted",
   ] as const) {
     const resolved = await resolveUsageLimit(
-      rateLimitResponse(rateLimitSnapshot({ rateLimitReachedType })),
+      protocolRateLimitsResponse(
+        protocolRateLimitSnapshot({ rateLimitReachedType }),
+      ),
     );
     assert.equal(resolved.error.code, "insufficient_credits");
     assert.deepEqual(resolved.error.extensions, {});
@@ -434,8 +314,8 @@ test("uses workspace spend-control resets only when the backend confirms them", 
       "workspace_member_usage_limit_reached",
     ] as const) {
       const capped = await resolveUsageLimit(
-        rateLimitResponse(
-          rateLimitSnapshot({
+        protocolRateLimitsResponse(
+          protocolRateLimitSnapshot({
             rateLimitReachedType,
             spendControlReached: true,
             individualLimit: {
@@ -451,8 +331,8 @@ test("uses workspace spend-control resets only when the backend confirms them", 
       assert.equal(capped.error.extensions.xCodex?.resetAt, NOW + 75);
 
       const untrusted = await resolveUsageLimit(
-        rateLimitResponse(
-          rateLimitSnapshot({
+        protocolRateLimitsResponse(
+          protocolRateLimitSnapshot({
             rateLimitReachedType,
             spendControlReached: false,
             individualLimit: {
@@ -473,8 +353,8 @@ test("uses workspace spend-control resets only when the backend confirms them", 
       assert.deepEqual(untrusted.error.extensions, {});
 
       const staleIndividual = await resolveUsageLimit(
-        rateLimitResponse(
-          rateLimitSnapshot({
+        protocolRateLimitsResponse(
+          protocolRateLimitSnapshot({
             rateLimitReachedType,
             spendControlReached: true,
             individualLimit: {

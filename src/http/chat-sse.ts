@@ -1,6 +1,6 @@
 import type { ServerResponse } from "node:http";
 import type { NormalizedDelta } from "./chat-normalize.js";
-import { errorEnvelope, HttpError } from "./errors.js";
+import { errorEnvelopeFor, type HttpError } from "./errors.js";
 
 /** Creates a conventional single-choice streaming chunk. */
 export function chunk(
@@ -30,22 +30,9 @@ export async function writeSse(
 /** Writes the single terminal OpenAI-shaped error allowed on an SSE stream. */
 export async function writeSseError(
   response: ServerResponse,
-  error: HttpError | string,
+  error: HttpError,
 ): Promise<void> {
-  const normalized =
-    typeof error === "string"
-      ? new HttpError(502, error, "server_error", "app_server_error")
-      : error;
-  await writeSse(
-    response,
-    errorEnvelope(
-      normalized.message,
-      normalized.type,
-      normalized.code,
-      normalized.param,
-      normalized.extensions,
-    ),
-  );
+  await writeSse(response, errorEnvelopeFor(error));
 }
 
 /** Writes one SSE data frame and waits for drain when required. */

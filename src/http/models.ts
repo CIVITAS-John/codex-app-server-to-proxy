@@ -2,7 +2,7 @@ import type { ServerResponse } from "node:http";
 import { readModelCatalog, type CatalogModel } from "../app-server/models.js";
 import type { JsonRpcTransport } from "../app-server/json-rpc.js";
 import type { Logger } from "../core/logger.js";
-import { HttpError, writeJson } from "./errors.js";
+import { appServerError, writeJson } from "./errors.js";
 
 /** Standard OpenAI-compatible representation of one available model. */
 export interface ModelListItem {
@@ -39,12 +39,7 @@ export async function handleModelList(
     // endpoint reports client disconnects and request deadlines consistently.
     if (signal.aborted) throw signal.reason;
     log.failure("models_list_failed", { request_id: requestId }, cause);
-    throw new HttpError(
-      502,
-      "The app-server could not list models.",
-      "server_error",
-      "app_server_error",
-    );
+    throw appServerError("The app-server could not list models.");
   }
   // App-server's includeHidden flag is advisory, so hidden entries are dropped
   // again here. Keying by selector also keeps a slug repeated across pages from

@@ -11,7 +11,6 @@ export type ErrorType =
 /** Narrow nonstandard metadata that can be attached to an OpenAI error. */
 export interface ErrorExtensions {
   xCodex?: { resetAt: number };
-  responseHeaders?: { retryAfter: string };
 }
 
 /** Carries an HTTP status and OpenAI-shaped error metadata. */
@@ -49,6 +48,22 @@ export function errorEnvelope(
   };
 }
 
+/** Builds the envelope for one HttpError, shared by JSON and SSE serialization. */
+export function errorEnvelopeFor(error: HttpError): Record<string, unknown> {
+  return errorEnvelope(
+    error.message,
+    error.type,
+    error.code,
+    error.param,
+    error.extensions,
+  );
+}
+
+/** Builds the generic app-server failure shared by every translation site. */
+export function appServerError(message: string): HttpError {
+  return new HttpError(502, message, "server_error", "app_server_error");
+}
+
 /** Builds a tool-correlation error using its narrow status-to-type policy. */
 export function toolCorrelationErrorForStatus(
   status: number,
@@ -70,7 +85,7 @@ export function writeJson(
   response: ServerResponse,
   status: number,
   value: unknown,
-  responseHeaders: ErrorExtensions["responseHeaders"] | undefined = undefined,
+  retryAfterSeconds?: number,
 ): void {
   if (response.writableEnded) return;
   // A streaming route may fail after its status and content type are committed.
@@ -83,33 +98,25 @@ export function writeJson(
     "content-type": "application/json; charset=utf-8",
     "content-length": Buffer.byteLength(body),
     "cache-control": "no-store",
-    // Only this closed, internally-created header shape is accepted. Error
+    // Retry-After is derived internally from a validated reset instant. Error
     // payloads must never become a path for app-server data to set HTTP headers.
-    ...(responseHeaders ? { "retry-after": responseHeaders.retryAfter } : {}),
+    ...(retryAfterSeconds === undefined
+      ? {}
+      : { "retry-after": String(retryAfterSeconds) }),
   });
   response.end(body);
 }
 
 /** Serializes an HttpError in the OpenAI error envelope. */
 export function writeError(response: ServerResponse, error: HttpError): void {
-  const responseHeaders = safeErrorHeaders(error.extensions.responseHeaders);
+  const resetAt = error.extensions.xCodex?.resetAt;
   writeJson(
     response,
     error.status,
-    errorEnvelope(
-      error.message,
-      error.type,
-      error.code,
-      error.param,
-      error.extensions,
-    ),
-    responseHeaders,
+    errorEnvelopeFor(error),
+    // The header stays consistent with reset_at because it is derived from it.
+    resetAt === undefined
+      ? undefined
+      : Math.max(1, resetAt - Math.floor(Date.now() / 1_000)),
   );
-}
-
-/** Retains only the decimal Retry-After value created by quota translation. */
-function safeErrorHeaders(
-  headers: ErrorExtensions["responseHeaders"] | undefined,
-): ErrorExtensions["responseHeaders"] | undefined {
-  return headers && /^\d+$/.test(headers.retryAfter) ? headers : undefined;
 }

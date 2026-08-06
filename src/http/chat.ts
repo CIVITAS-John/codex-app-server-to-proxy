@@ -1,7 +1,8 @@
 import type { ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import { HttpError, writeJson } from "./errors.js";
+import { appServerError, writeJson } from "./errors.js";
 import { chunk, writeFrame, writeSse, writeSseError } from "./chat-sse.js";
+import { isUsageLimitError } from "./quota.js";
 import {
   aggregateNormalizedEvents,
   type NormalizedEvent,
@@ -79,18 +80,8 @@ async function streamChatResponse(
   responseId: string,
   created: number,
 ): Promise<void> {
-  const iterator = events[Symbol.asyncIterator]();
-  let streamFailed = false;
-  try {
-    // Prime before committing SSE so an immediate quota failure can preserve
-    // its HTTP 429 and Retry-After response metadata instead of becoming 200.
-    const first = await iterator.next();
-    if (
-      !first.done &&
-      first.value.terminalError?.status === 429 &&
-      first.value.terminalError.type === "rate_limit_error"
-    )
-      throw first.value.terminalError;
+  let committed = false;
+  const commit = async (): Promise<void> => {
     response.writeHead(200, {
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-cache, no-store",
@@ -101,14 +92,21 @@ async function streamChatResponse(
       response,
       chunk(responseId, created, request.model, { role: "assistant" }, null),
     );
-    const emit = async (event: NormalizedEvent): Promise<boolean> => {
-      if (event.error) {
-        await writeSseError(
-          response,
-          event.terminalError ??
-            new HttpError(502, event.error, "server_error", "app_server_error"),
-        );
-        return true;
+    committed = true;
+  };
+  let streamFailed = false;
+  try {
+    for await (const event of events) {
+      // The first event precedes SSE commitment so an immediate quota failure
+      // preserves its HTTP 429 and Retry-After metadata instead of becoming 200.
+      if (!committed) {
+        if (isUsageLimitError(event.terminalError)) throw event.terminalError;
+        await commit();
+      }
+      if (event.terminalError) {
+        await writeSseError(response, event.terminalError);
+        streamFailed = true;
+        break;
       }
       if (event.delta)
         await writeSse(
@@ -129,34 +127,24 @@ async function streamChatResponse(
           choices: [],
           usage: event.usage,
         });
-      return false;
-    };
-    if (!first.done) streamFailed = await emit(first.value);
-    while (!streamFailed) {
-      const next = await iterator.next();
-      if (next.done) break;
-      streamFailed = await emit(next.value);
     }
+    if (!committed) await commit();
   } catch (error) {
-    // Iterator startup precedes headers specifically so route handling can
+    // The first event precedes headers specifically so route handling can
     // serialize immediate failures as normal JSON HTTP errors.
     if (!response.headersSent) throw error;
     streamFailed = true;
     if (!response.writableEnded && !response.destroyed)
       await writeSseError(
         response,
-        error instanceof HttpError &&
-          error.status === 429 &&
-          error.type === "rate_limit_error"
+        isUsageLimitError(error)
           ? error
-          : error instanceof Error
-            ? error.message
-            : "The app-server turn failed.",
+          : appServerError(
+              error instanceof Error
+                ? error.message
+                : "The app-server turn failed.",
+            ),
       );
-  } finally {
-    // Manual priming bypasses `for await`, so explicitly close the generator
-    // to run its turn interruption and listener cleanup before returning.
-    await iterator.return?.();
   }
   if (!streamFailed) await writeFrame(response, "[DONE]");
   response.end();

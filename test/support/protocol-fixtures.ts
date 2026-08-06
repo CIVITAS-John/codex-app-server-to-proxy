@@ -8,6 +8,7 @@ import type { GetAccountRateLimitsResponse } from "../../protocol/generated/type
 import type { LoginAccountResponse } from "../../protocol/generated/typescript/v2/LoginAccountResponse.js";
 import type { LogoutAccountResponse } from "../../protocol/generated/typescript/v2/LogoutAccountResponse.js";
 import type { Model } from "../../protocol/generated/typescript/v2/Model.js";
+import type { RateLimitSnapshot } from "../../protocol/generated/typescript/v2/RateLimitSnapshot.js";
 import type { ModelListResponse } from "../../protocol/generated/typescript/v2/ModelListResponse.js";
 import type { ConfigRequirementsReadResponse } from "../../protocol/generated/typescript/v2/ConfigRequirementsReadResponse.js";
 import type { Thread } from "../../protocol/generated/typescript/v2/Thread.js";
@@ -80,6 +81,35 @@ export function protocolModel(
     defaultServiceTier: null,
     isDefault: false,
   };
+}
+
+/** Builds one complete generated rate-limit snapshot for fake app-servers. */
+export function protocolRateLimitSnapshot(
+  values: Partial<RateLimitSnapshot> = {},
+): RateLimitSnapshot {
+  return {
+    limitId: "codex",
+    limitName: "Codex",
+    primary: null,
+    secondary: null,
+    credits: null,
+    individualLimit: null,
+    spendControlReached: null,
+    planType: null,
+    rateLimitReachedType: "rate_limit_reached",
+    ...values,
+  };
+}
+
+/** Builds a complete generated account rate-limit response for fake app-servers. */
+export function protocolRateLimitsResponse(
+  snapshot: RateLimitSnapshot,
+  rateLimitsByLimitId: GetAccountRateLimitsResponse["rateLimitsByLimitId"] = {
+    codex: snapshot,
+  },
+  rateLimitResetCredits: GetAccountRateLimitsResponse["rateLimitResetCredits"] = null,
+): GetAccountRateLimitsResponse {
+  return { rateLimits: snapshot, rateLimitsByLimitId, rateLimitResetCredits };
 }
 
 /** Builds a complete generated thread/start response for fake transports. */

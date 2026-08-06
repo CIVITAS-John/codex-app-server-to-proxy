@@ -14,6 +14,8 @@ import { createLogger, type Logger } from "../../src/core/logger.js";
 import type { ProxyServer } from "../../src/http/server.js";
 import {
   protocolNotification,
+  protocolRateLimitSnapshot,
+  protocolRateLimitsResponse,
   protocolResponse,
   protocolServerRequest,
   protocolThread,
@@ -463,25 +465,20 @@ function quotaFailureAppServer({
       if (message.method === "account/rateLimits/read") {
         reads += 1;
         send(
-          protocolResponse("account/rateLimits/read", message.id, {
-            rateLimits: {
-              limitId: "codex",
-              limitName: "Codex",
-              primary: {
-                usedPercent: 100,
-                windowDurationMins: 60,
-                resetsAt: resetAt,
-              },
-              secondary: null,
-              credits: null,
-              individualLimit: null,
-              spendControlReached: null,
-              planType: null,
-              rateLimitReachedType: "rate_limit_reached",
-            },
-            rateLimitsByLimitId: null,
-            rateLimitResetCredits: null,
-          }),
+          protocolResponse(
+            "account/rateLimits/read",
+            message.id,
+            protocolRateLimitsResponse(
+              protocolRateLimitSnapshot({
+                primary: {
+                  usedPercent: 100,
+                  windowDurationMins: 60,
+                  resetsAt: resetAt,
+                },
+              }),
+              null,
+            ),
+          ),
         );
         return;
       }
@@ -1065,7 +1062,8 @@ test("normalizes interleaved text, reasoning, internal items, tools, usage, and 
     },
   });
   assert.equal(
-    new EventNormalizer().normalize(error.method, error.params)[0]?.error,
+    new EventNormalizer().normalize(error.method, error.params)[0]
+      ?.terminalError?.message,
     "failed",
   );
 });

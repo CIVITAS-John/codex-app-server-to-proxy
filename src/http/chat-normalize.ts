@@ -7,7 +7,7 @@ import {
   type TokenUsageCounters,
 } from "../core/token-usage.js";
 import type { StoredToolCall } from "../continuation/state.js";
-import { HttpError } from "./errors.js";
+import { appServerError, type HttpError } from "./errors.js";
 import { usageLimitError } from "./quota.js";
 
 /** Standard token usage, with details present only when app-server reports them. */
@@ -78,7 +78,6 @@ export interface NormalizedEvent {
   delta?: NormalizedDelta;
   finishReason?: "stop" | "length" | "tool_calls" | "content_filter";
   usage?: Usage;
-  error?: string;
   terminalError?: HttpError;
 }
 
@@ -157,11 +156,7 @@ export async function aggregateNormalizedEvents(
   let finishReason: string | null = null;
   let usage: Usage | undefined;
   for await (const event of events) {
-    if (event.error)
-      throw (
-        event.terminalError ??
-        new HttpError(502, event.error, "server_error", "app_server_error")
-      );
+    if (event.terminalError) throw event.terminalError;
     if (typeof event.delta?.content === "string")
       content += event.delta.content;
     if (typeof event.delta?.reasoning === "string")
@@ -454,17 +449,13 @@ export class EventNormalizer {
 
 /** Normalizes one app-server terminal failure into a shared typed HTTP error. */
 function terminalEvent(
-  value: unknown,
+  error: Record<string, unknown> | undefined,
   fallbackMessage: string,
 ): NormalizedEvent {
-  const error = record(value);
   const message =
     typeof error?.message === "string" ? error.message : fallbackMessage;
   return {
-    error: message,
-    terminalError:
-      usageLimitError(error, message) ??
-      new HttpError(502, message, "server_error", "app_server_error"),
+    terminalError: usageLimitError(error, message) ?? appServerError(message),
   };
 }
 

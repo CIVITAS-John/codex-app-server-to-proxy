@@ -14,7 +14,6 @@ interface UsageLimitDetails {
     | "insufficient_credits"
     | "workspace_usage_limit_exceeded";
   resetAt?: number;
-  observedAt: number;
 }
 
 /** Backend classifications used by quota-to-HTTP translation. */
@@ -25,109 +24,57 @@ type KnownRateLimitReachedType =
   | "workspace_owner_usage_limit_reached"
   | "workspace_member_usage_limit_reached";
 
-/** Known app-server account plan classifications. */
-type KnownPlanType =
-  | "free"
-  | "go"
-  | "plus"
-  | "pro"
-  | "prolite"
-  | "team"
-  | "self_serve_business_usage_based"
-  | "business"
-  | "ent26"
-  | "enterprise_cbp_usage_based"
-  | "enterprise"
-  | "edu"
-  | "unknown";
-
 /** Validated rolling-window fields consumed by reset selection. */
 interface RuntimeRateLimitWindow {
   usedPercent: number;
-  windowDurationMins: number | null;
   resetsAt: number | null;
 }
 
-/** Validated spend-control fields consumed by workspace reset selection. */
-interface RuntimeSpendControlSnapshot {
-  limit: string;
-  used: string;
-  remainingPercent: number;
-  resetsAt: number;
-}
-
-/** Validated account-credit fields in one generated rate-limit snapshot. */
-interface RuntimeCreditsSnapshot {
-  hasCredits: boolean;
-  unlimited: boolean;
-  balance: string | null;
-}
-
-/** Validated subset of one coherent generated rate-limit snapshot. */
+/**
+ * The consumed subset of one generated rate-limit snapshot. Like the model
+ * catalog, only the fields reset selection reads are validated, so unfamiliar
+ * metadata or new generated enum members never disable quota enrichment.
+ */
 interface RuntimeRateLimitSnapshot {
-  limitId: string | null;
-  limitName: string | null;
   primary: RuntimeRateLimitWindow | null;
   secondary: RuntimeRateLimitWindow | null;
-  credits: RuntimeCreditsSnapshot | null;
-  individualLimit: RuntimeSpendControlSnapshot | null;
+  individualLimit: { resetsAt: number } | null;
   spendControlReached: boolean | null;
-  planType: KnownPlanType | null;
-  rateLimitReachedType: KnownRateLimitReachedType | null;
-}
-
-/** Validated earned-reset row retained only for response-shape validation. */
-interface RuntimeRateLimitResetCredit {
-  id: string;
-  resetType: "codexRateLimits" | "unknown";
-  status: "available" | "redeeming" | "redeemed" | "unknown";
-  grantedAt: number;
-  expiresAt: number | null;
-  title: string | null;
-  description: string | null;
-}
-
-/** Validated earned-reset summary in an account rate-limit response. */
-interface RuntimeRateLimitResetCreditsSummary {
-  availableCount: number | bigint;
-  credits: RuntimeRateLimitResetCredit[] | null;
-}
-
-/** Fully validated generated account/rateLimits/read response. */
-interface RuntimeAccountRateLimitsResponse {
-  rateLimits: RuntimeRateLimitSnapshot;
-  rateLimitsByLimitId: Record<string, RuntimeRateLimitSnapshot> | null;
-  rateLimitResetCredits: RuntimeRateLimitResetCreditsSummary | null;
+  rateLimitReachedType: unknown;
 }
 
 /** Recognizes the sole app-server TurnError that represents exhausted usage. */
 export function usageLimitError(
-  value: unknown,
-  fallbackMessage: string,
+  error: Record<string, unknown> | undefined,
+  message: string,
 ): HttpError | undefined {
-  const error = record(value);
   if (error?.codexErrorInfo !== "usageLimitExceeded") return undefined;
   return new HttpError(
     429,
-    typeof error.message === "string" ? error.message : fallbackMessage,
+    message,
     "rate_limit_error",
     "usage_limit_exceeded",
   );
 }
 
+/** Recognizes a quota rate-limit error across its pre- and post-lookup codes. */
+export function isUsageLimitError(error: unknown): error is HttpError {
+  return (
+    error instanceof HttpError &&
+    error.status === 429 &&
+    error.type === "rate_limit_error"
+  );
+}
+
 /** Creates the request-scoped, abortable lookup for a terminal usage limit. */
 export function usageLimitErrorResolver(
-  rpc: JsonRpcTransport,
+  rpc: Pick<JsonRpcTransport, "request">,
   signal: AbortSignal,
 ): UsageLimitErrorResolver {
   let details: Promise<UsageLimitDetails | undefined> | undefined;
   return {
     async resolve(error): Promise<HttpError> {
-      if (
-        error.status !== 429 ||
-        error.type !== "rate_limit_error" ||
-        error.code !== "usage_limit_exceeded"
-      )
+      if (!isUsageLimitError(error) || error.code !== "usage_limit_exceeded")
         return error;
       // A failed turn triggers one observational read only. The promise is
       // memoized before awaiting so duplicate terminal events cannot multiply it.
@@ -142,14 +89,7 @@ export function usageLimitErrorResolver(
             error.param,
             result.resetAt === undefined
               ? {}
-              : {
-                  xCodex: { resetAt: result.resetAt },
-                  responseHeaders: {
-                    retryAfter: String(
-                      Math.max(1, result.resetAt - result.observedAt),
-                    ),
-                  },
-                },
+              : { xCodex: { resetAt: result.resetAt } },
           )
         : error;
     },
@@ -158,7 +98,7 @@ export function usageLimitErrorResolver(
 
 /** Reads and validates quota metadata without allowing lookup failure to hide 429. */
 async function readUsageLimitDetails(
-  rpc: JsonRpcTransport,
+  rpc: Pick<JsonRpcTransport, "request">,
   signal: AbortSignal,
 ): Promise<UsageLimitDetails | undefined> {
   try {
@@ -167,10 +107,8 @@ async function readUsageLimitDetails(
       undefined,
       signal,
     );
-    if (signal.aborted)
-      throw signal.reason ?? new Error("rate-limit lookup cancelled");
-    const now = Math.floor(Date.now() / 1_000);
-    return selectUsageLimitDetails(response, now);
+    if (signal.aborted) throw signal.reason;
+    return selectUsageLimitDetails(response, Math.floor(Date.now() / 1_000));
   } catch (error) {
     // An aborted HTTP request must retain cancellation semantics; ordinary
     // transport and malformed-result failures still expose the typed 429.
@@ -179,24 +117,19 @@ async function readUsageLimitDetails(
   }
 }
 
-/** Selects a reset and backend classification from a validated rate-limit response. */
+/** Selects a reset and backend classification from one validated snapshot. */
 function selectUsageLimitDetails(
   value: unknown,
   now: number,
 ): UsageLimitDetails | undefined {
-  const response = accountRateLimitsResponse(value);
-  if (!response) return undefined;
-  const buckets = response.rateLimitsByLimitId;
-  const snapshot =
-    buckets && Object.hasOwn(buckets, "codex")
-      ? buckets.codex!
-      : response.rateLimits;
-  const reached = snapshot.rateLimitReachedType;
+  const snapshot = selectSnapshot(value);
+  if (!snapshot) return undefined;
+  const reached = rateLimitReachedType(snapshot.rateLimitReachedType);
   if (
     reached === "workspace_owner_credits_depleted" ||
     reached === "workspace_member_credits_depleted"
   )
-    return { code: "insufficient_credits", observedAt: now };
+    return { code: "insufficient_credits" };
   if (
     reached === "workspace_owner_usage_limit_reached" ||
     reached === "workspace_member_usage_limit_reached"
@@ -206,69 +139,63 @@ function selectUsageLimitDetails(
         ? futureUnix(snapshot.individualLimit?.resetsAt, now)
         : undefined;
     return reset
-      ? { code: "usage_limit_exceeded", resetAt: reset, observedAt: now }
-      : { code: "workspace_usage_limit_exceeded", observedAt: now };
+      ? { code: "usage_limit_exceeded", resetAt: reset }
+      : { code: "workspace_usage_limit_exceeded" };
   }
   if (reached !== "rate_limit_reached") return undefined;
   const windows = [snapshot.primary, snapshot.secondary];
-  const exhausted = windows
-    .filter((window) => window !== null && window.usedPercent >= 100)
-    .map((window) => futureUnix(window?.resetsAt, now))
-    .filter((reset): reset is number => reset !== undefined);
-  const fallback = windows
-    .map((window) => futureUnix(window?.resetsAt, now))
-    .filter((reset): reset is number => reset !== undefined);
-  const reset = Math.max(...(exhausted.length ? exhausted : fallback));
-  return Number.isFinite(reset)
-    ? { code: "usage_limit_exceeded", resetAt: reset, observedAt: now }
-    : { code: "usage_limit_exceeded", observedAt: now };
+  const exhausted = futureResets(
+    windows.filter((window) => (window?.usedPercent ?? 0) >= 100),
+    now,
+  );
+  const candidates = exhausted.length ? exhausted : futureResets(windows, now);
+  // No future reset leaves the already-typed 429 unchanged.
+  return candidates.length
+    ? { code: "usage_limit_exceeded", resetAt: Math.max(...candidates) }
+    : undefined;
 }
 
-/** Validates the complete generated account/rateLimits/read response shape. */
-function accountRateLimitsResponse(
-  value: unknown,
-): RuntimeAccountRateLimitsResponse | undefined {
+/** Collects the future reset instants from a set of rolling windows. */
+function futureResets(
+  windows: Array<RuntimeRateLimitWindow | null>,
+  now: number,
+): number[] {
+  return windows
+    .map((window) => futureUnix(window?.resetsAt, now))
+    .filter((reset): reset is number => reset !== undefined);
+}
+
+/**
+ * Prefers the codex bucket over the top-level snapshot and validates only the
+ * selected snapshot's consumed fields. A present-but-malformed codex bucket
+ * yields no enrichment rather than silently falling back to another limit.
+ */
+function selectSnapshot(value: unknown): RuntimeRateLimitSnapshot | undefined {
   const response = record(value);
-  if (!response || !rateLimitSnapshot(response.rateLimits)) return undefined;
-  const bucketsValue = response.rateLimitsByLimitId;
-  const buckets = record(bucketsValue);
-  if (
-    bucketsValue !== null &&
-    (!buckets || !Object.values(buckets).every(rateLimitSnapshot))
-  )
-    return undefined;
-  if (!nullableResetCreditsSummary(response.rateLimitResetCredits))
-    return undefined;
-  return {
-    rateLimits: response.rateLimits,
-    rateLimitsByLimitId:
-      bucketsValue === null
-        ? null
-        : (buckets as Record<string, RuntimeRateLimitSnapshot>),
-    rateLimitResetCredits: response.rateLimitResetCredits,
-  };
+  if (!response) return undefined;
+  let selected: unknown = response.rateLimits;
+  if (response.rateLimitsByLimitId !== null) {
+    const buckets = record(response.rateLimitsByLimitId);
+    if (!buckets) return undefined;
+    if (Object.hasOwn(buckets, "codex")) selected = buckets.codex;
+  }
+  return rateLimitSnapshot(selected) ? selected : undefined;
 }
 
-/** Validates the required quota fields of one selected generated snapshot. */
+/** Validates only the consumed quota fields of one selected snapshot. */
 function rateLimitSnapshot(value: unknown): value is RuntimeRateLimitSnapshot {
   const snapshot = record(value);
   if (!snapshot) return false;
   return (
-    nullableString(snapshot.limitId) &&
-    nullableString(snapshot.limitName) &&
     nullableRateLimitWindow(snapshot.primary) &&
     nullableRateLimitWindow(snapshot.secondary) &&
-    nullableCreditsSnapshot(snapshot.credits) &&
-    nullableSpendControlSnapshot(snapshot.individualLimit) &&
+    nullableSpendControlReset(snapshot.individualLimit) &&
     (typeof snapshot.spendControlReached === "boolean" ||
-      snapshot.spendControlReached === null) &&
-    (snapshot.planType === null || planType(snapshot.planType) !== undefined) &&
-    (snapshot.rateLimitReachedType === null ||
-      rateLimitReachedType(snapshot.rateLimitReachedType) !== undefined)
+      snapshot.spendControlReached === null)
   );
 }
 
-/** Validates a nullable generated rolling-window snapshot. */
+/** Validates the consumed fields of a nullable rolling-window snapshot. */
 function nullableRateLimitWindow(
   value: unknown,
 ): value is RuntimeRateLimitWindow | null {
@@ -278,95 +205,23 @@ function nullableRateLimitWindow(
     window &&
     typeof window.usedPercent === "number" &&
     Number.isSafeInteger(window.usedPercent) &&
-    (window.windowDurationMins === null ||
-      (typeof window.windowDurationMins === "number" &&
-        Number.isSafeInteger(window.windowDurationMins))) &&
     (window.resetsAt === null ||
       (typeof window.resetsAt === "number" &&
         Number.isSafeInteger(window.resetsAt))),
   );
 }
 
-/** Validates nullable generated account-credit state. */
-function nullableCreditsSnapshot(
+/** Validates the consumed reset instant of a nullable spend-control snapshot. */
+function nullableSpendControlReset(
   value: unknown,
-): value is RuntimeCreditsSnapshot | null {
-  if (value === null) return true;
-  const credits = record(value);
-  return Boolean(
-    credits &&
-    typeof credits.hasCredits === "boolean" &&
-    typeof credits.unlimited === "boolean" &&
-    nullableString(credits.balance),
-  );
-}
-
-/** Validates a nullable generated workspace spend-control snapshot. */
-function nullableSpendControlSnapshot(
-  value: unknown,
-): value is RuntimeSpendControlSnapshot | null {
+): value is { resetsAt: number } | null {
   if (value === null) return true;
   const limit = record(value);
   return Boolean(
     limit &&
-    typeof limit.limit === "string" &&
-    typeof limit.used === "string" &&
-    typeof limit.remainingPercent === "number" &&
-    Number.isSafeInteger(limit.remainingPercent) &&
     typeof limit.resetsAt === "number" &&
     Number.isSafeInteger(limit.resetsAt),
   );
-}
-
-/** Validates a nullable generated earned-reset summary and every detail row. */
-function nullableResetCreditsSummary(
-  value: unknown,
-): value is RuntimeRateLimitResetCreditsSummary | null {
-  if (value === null) return true;
-  const summary = record(value);
-  if (!summary || !nonnegativeCount(summary.availableCount)) return false;
-  return (
-    summary.credits === null ||
-    (Array.isArray(summary.credits) &&
-      summary.credits.every(rateLimitResetCredit))
-  );
-}
-
-/** Validates one generated earned-reset detail row. */
-function rateLimitResetCredit(
-  value: unknown,
-): value is RuntimeRateLimitResetCredit {
-  const credit = record(value);
-  return Boolean(
-    credit &&
-    typeof credit.id === "string" &&
-    (credit.resetType === "codexRateLimits" ||
-      credit.resetType === "unknown") &&
-    (credit.status === "available" ||
-      credit.status === "redeeming" ||
-      credit.status === "redeemed" ||
-      credit.status === "unknown") &&
-    typeof credit.grantedAt === "number" &&
-    Number.isSafeInteger(credit.grantedAt) &&
-    (credit.expiresAt === null ||
-      (typeof credit.expiresAt === "number" &&
-        Number.isSafeInteger(credit.expiresAt))) &&
-    nullableString(credit.title) &&
-    nullableString(credit.description),
-  );
-}
-
-/** Accepts a JSON count or defensive bigint when it is integral and nonnegative. */
-function nonnegativeCount(value: unknown): value is number | bigint {
-  return (
-    (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) ||
-    (typeof value === "bigint" && value >= 0n)
-  );
-}
-
-/** Validates a required nullable string field. */
-function nullableString(value: unknown): value is string | null {
-  return typeof value === "string" || value === null;
 }
 
 /** Accepts only a future safe-integer Unix timestamp. */
@@ -386,28 +241,6 @@ function rateLimitReachedType(
     case "workspace_member_credits_depleted":
     case "workspace_owner_usage_limit_reached":
     case "workspace_member_usage_limit_reached":
-      return value;
-    default:
-      return undefined;
-  }
-}
-
-/** Narrows one generated account plan classification. */
-function planType(value: unknown): KnownPlanType | undefined {
-  switch (value) {
-    case "free":
-    case "go":
-    case "plus":
-    case "pro":
-    case "prolite":
-    case "team":
-    case "self_serve_business_usage_based":
-    case "business":
-    case "ent26":
-    case "enterprise_cbp_usage_based":
-    case "enterprise":
-    case "edu":
-    case "unknown":
       return value;
     default:
       return undefined;

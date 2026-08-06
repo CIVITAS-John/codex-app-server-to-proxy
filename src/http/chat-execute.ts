@@ -34,7 +34,10 @@ import {
   type ChatRequest,
 } from "./chat-validate.js";
 import { HttpError, toolCorrelationErrorForStatus } from "./errors.js";
-import { usageLimitErrorResolver } from "./quota.js";
+import {
+  usageLimitErrorResolver,
+  type UsageLimitErrorResolver,
+} from "./quota.js";
 
 /** Maximum buffered app-server activity retained for one HTTP response. */
 const MAX_INGRESS_EVENTS = 1_024;
@@ -417,11 +420,12 @@ export async function execute(
     log: options.log,
     requestId: options.requestId,
   });
-  const quotaResolver = usageLimitErrorResolver(options.rpc, options.signal);
-
   const events =
     (async function* streamExecution(): AsyncGenerator<NormalizedEvent> {
       let failed = false;
+      // Constructed only when a turn actually fails; memoized across duplicate
+      // terminal events so one response performs at most one account read.
+      let quotaResolver: UsageLimitErrorResolver | undefined;
       let pendingFinishReason: NormalizedEvent["finishReason"];
       let pendingUsage: Usage | undefined;
       // Tracks whether this response persisted a pending tool batch.
@@ -528,16 +532,20 @@ export async function execute(
           if (!matchesTurn(next.params, handle.threadId, handle.turnId))
             continue;
           for (const event of normalizer.normalize(next.method, next.params)) {
-            if (event.error) {
+            if (event.terminalError) {
               handle.terminal = true;
               failed = true;
               // This is the sole terminal lifecycle boundary. Resolving quota
               // metadata here means an error notification and failed completion
               // cannot trigger duplicate account reads or terminal frames.
-              const terminalError = event.terminalError
-                ? await quotaResolver.resolve(event.terminalError)
-                : undefined;
-              yield terminalError ? { ...event, terminalError } : event;
+              quotaResolver ??= usageLimitErrorResolver(
+                options.rpc,
+                options.signal,
+              );
+              yield {
+                ...event,
+                terminalError: await quotaResolver.resolve(event.terminalError),
+              };
             } else if (event.finishReason) {
               // Persistence is part of successful completion. Do not expose a
               // terminal success frame until the continuation can be recorded.
