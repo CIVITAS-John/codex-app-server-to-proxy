@@ -64,6 +64,19 @@ export function appServerError(message: string): HttpError {
   return new HttpError(502, message, "server_error", "app_server_error");
 }
 
+/**
+ * Recognizes the app-server TurnError that reports exhausted upstream model
+ * capacity. It is transient and unrelated to the account's own quota, so it
+ * maps to the conventional retryable 503 instead of the generic 502.
+ */
+export function serverOverloadedError(
+  error: Record<string, unknown> | undefined,
+  message: string,
+): HttpError | undefined {
+  if (error?.codexErrorInfo !== "serverOverloaded") return undefined;
+  return new HttpError(503, message, "server_error", "server_overloaded");
+}
+
 /** Builds a tool-correlation error using its narrow status-to-type policy. */
 export function toolCorrelationErrorForStatus(
   status: number,

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { toolCorrelationErrorForStatus } from "../../src/http/errors.js";
+import {
+  serverOverloadedError,
+  toolCorrelationErrorForStatus,
+} from "../../src/http/errors.js";
 
 test("HTTP statuses map to stable OpenAI error types", () => {
   for (const [status, type] of [
@@ -23,4 +26,31 @@ test("HTTP statuses map to stable OpenAI error types", () => {
     assert.equal(error.code, "tool_lookup_failed");
     assert.equal(error.param, "tool_call_id");
   }
+});
+
+test("only the overloaded turn error maps to a retryable 503", () => {
+  const overloaded = serverOverloadedError(
+    { codexErrorInfo: "serverOverloaded" },
+    "Selected model is at capacity. Please try a different model.",
+  );
+
+  assert.equal(overloaded?.status, 503);
+  assert.equal(overloaded?.type, "server_error");
+  assert.equal(overloaded?.code, "server_overloaded");
+  assert.equal(
+    overloaded?.message,
+    "Selected model is at capacity. Please try a different model.",
+  );
+
+  for (const codexErrorInfo of [
+    "usageLimitExceeded",
+    "internalServerError",
+    null,
+    undefined,
+  ])
+    assert.equal(
+      serverOverloadedError({ codexErrorInfo }, "other failure"),
+      undefined,
+    );
+  assert.equal(serverOverloadedError(undefined, "no error"), undefined);
 });

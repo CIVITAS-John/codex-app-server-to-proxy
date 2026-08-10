@@ -1,8 +1,7 @@
 import type { ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import { appServerError, writeJson } from "./errors.js";
+import { appServerError, HttpError, writeJson } from "./errors.js";
 import { chunk, writeFrame, writeSse, writeSseError } from "./chat-sse.js";
-import { isUsageLimitError } from "./quota.js";
 import {
   aggregateNormalizedEvents,
   type NormalizedEvent,
@@ -97,10 +96,12 @@ async function streamChatResponse(
   let streamFailed = false;
   try {
     for await (const event of events) {
-      // The first event precedes SSE commitment so an immediate quota failure
-      // preserves its HTTP 429 and Retry-After metadata instead of becoming 200.
+      // The first event precedes SSE commitment so a turn that fails before any
+      // visible output stays an ordinary JSON HTTP error carrying its real
+      // status, code, and Retry-After. Committing 200 first would instead hand
+      // lenient clients an empty stream that reads as a successful non-answer.
       if (!committed) {
-        if (isUsageLimitError(event.terminalError)) throw event.terminalError;
+        if (event.terminalError) throw event.terminalError;
         await commit();
       }
       if (event.terminalError) {
@@ -137,7 +138,7 @@ async function streamChatResponse(
     if (!response.writableEnded && !response.destroyed)
       await writeSseError(
         response,
-        isUsageLimitError(error)
+        error instanceof HttpError
           ? error
           : appServerError(
               error instanceof Error

@@ -27,6 +27,7 @@ import {
   UNRESTRICTED_POLICY_REQUIREMENTS,
   type PolicyRequirements,
 } from "../../src/core/policy.js";
+import type { CodexErrorInfo } from "../../protocol/generated/typescript/v2/CodexErrorInfo.js";
 import type { TokenUsageBreakdown } from "../../protocol/generated/typescript/v2/TokenUsageBreakdown.js";
 import {
   parseSseChunks,
@@ -429,23 +430,25 @@ function lateFailureAppServer(mode: "transport" | "event"): FakeTransport {
   return fake;
 }
 
-/** Creates a quota-failing turn that can fail before or after visible stream content. */
-function quotaFailureAppServer({
+/** Creates a failing turn that can fail before or after visible stream content. */
+function terminalFailureAppServer({
   terminal,
   emitContent = false,
   codexErrorInfo = "usageLimitExceeded",
+  message = "Usage limit reached.",
   duplicateTerminal = false,
   resetAt,
 }: {
   terminal: "error" | "completed";
   emitContent?: boolean;
-  codexErrorInfo?: "usageLimitExceeded" | "sessionBudgetExceeded";
+  codexErrorInfo?: CodexErrorInfo | null;
+  message?: string;
   duplicateTerminal?: boolean;
   resetAt: number;
 }): { rpc: FakeTransport["rpc"]; rateLimitReads(): number } {
   let reads = 0;
   const error = {
-    message: "Usage limit reached.",
+    message,
     codexErrorInfo,
     additionalDetails: null,
   };
@@ -2433,7 +2436,7 @@ test("quota failures are JSON 429 before streaming commits and typed SSE errors 
   try {
     for (const terminal of ["error", "completed"] as const)
       await withChatServer(async (origin, _proxy, useTransport) => {
-        const immediate = quotaFailureAppServer({ terminal, resetAt });
+        const immediate = terminalFailureAppServer({ terminal, resetAt });
         useTransport(immediate);
         const aggregate = await fetch(`${origin}/v1/chat/completions`, {
           method: "POST",
@@ -2459,7 +2462,7 @@ test("quota failures are JSON 429 before streaming commits and typed SSE errors 
         });
         assert.equal(immediate.rateLimitReads(), 1);
 
-        const immediateStream = quotaFailureAppServer({ terminal, resetAt });
+        const immediateStream = terminalFailureAppServer({ terminal, resetAt });
         useTransport(immediateStream);
         const stream = await fetch(`${origin}/v1/chat/completions`, {
           method: "POST",
@@ -2481,7 +2484,7 @@ test("quota failures are JSON 429 before streaming commits and typed SSE errors 
         );
         assert.equal(immediateStream.rateLimitReads(), 1);
 
-        const late = quotaFailureAppServer({
+        const late = terminalFailureAppServer({
           terminal,
           emitContent: true,
           duplicateTerminal: true,
@@ -2524,7 +2527,7 @@ test("quota failures are JSON 429 before streaming commits and typed SSE errors 
 /** Verifies nonquota terminal errors do not trigger quota lookup or remapping. */
 test("nonquota turn errors retain the existing generic app-server failure", async () => {
   await withChatServer(async (origin, _proxy, useTransport) => {
-    const fake = quotaFailureAppServer({
+    const fake = terminalFailureAppServer({
       terminal: "completed",
       codexErrorInfo: "sessionBudgetExceeded",
       resetAt: 2_000_000_060,
@@ -2548,6 +2551,117 @@ test("nonquota turn errors retain the existing generic app-server failure", asyn
       },
     });
     assert.equal(fake.rateLimitReads(), 0);
+  });
+});
+
+/** Verifies exhausted upstream capacity is a retryable failure, never an empty stream. */
+test("model capacity failures are JSON 503 before streaming commits and typed SSE errors afterward", async () => {
+  const capacity = {
+    codexErrorInfo: "serverOverloaded" as const,
+    message: "Selected model is at capacity. Please try a different model.",
+    resetAt: 2_000_000_060,
+  };
+  const envelope = {
+    message: capacity.message,
+    type: "server_error",
+    param: null,
+    code: "server_overloaded",
+  };
+  for (const terminal of ["error", "completed"] as const)
+    await withChatServer(async (origin, _proxy, useTransport) => {
+      const immediate = terminalFailureAppServer({ ...capacity, terminal });
+      useTransport(immediate);
+      const stream = await fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "m",
+          stream: true,
+          messages: [{ role: "user", content: `${terminal} capacity` }],
+        }),
+      });
+      assert.equal(stream.status, 503);
+      assert.match(
+        stream.headers.get("content-type") ?? "",
+        /^application\/json/,
+      );
+      assert.deepEqual(await stream.json(), { error: envelope });
+      // Capacity is an upstream condition, not the account's own quota.
+      assert.equal(immediate.rateLimitReads(), 0);
+
+      const aggregate = terminalFailureAppServer({ ...capacity, terminal });
+      useTransport(aggregate);
+      const nonStreaming = await fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "m",
+          messages: [{ role: "user", content: `${terminal} capacity json` }],
+        }),
+      });
+      assert.equal(nonStreaming.status, 503);
+      assert.deepEqual(await nonStreaming.json(), { error: envelope });
+
+      const late = terminalFailureAppServer({
+        ...capacity,
+        terminal,
+        emitContent: true,
+      });
+      useTransport(late);
+      const lateStream = await fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "m",
+          stream: true,
+          messages: [{ role: "user", content: `${terminal} capacity late` }],
+        }),
+      });
+      assert.equal(lateStream.status, 200);
+      const frames = parseSseFrames(await lateStream.text());
+      assert.equal(frames.includes("[DONE]"), false);
+      const errors = frames
+        .map(
+          (frame) => JSON.parse(frame) as { error?: Record<string, unknown> },
+        )
+        .filter((frame) => frame.error !== undefined);
+      assert.equal(errors.length, 1);
+      assert.deepEqual(errors[0]?.error, envelope);
+    });
+});
+
+/** Verifies the pre-commit rule covers every failure, not only classified ones. */
+test("unclassified turn failures before output are JSON errors on a streaming request", async () => {
+  await withChatServer(async (origin, _proxy, useTransport) => {
+    const fake = terminalFailureAppServer({
+      terminal: "error",
+      codexErrorInfo: null,
+      message: "turn failed",
+      resetAt: 2_000_000_060,
+    });
+    useTransport(fake);
+    const response = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        stream: true,
+        messages: [{ role: "user", content: "fail before output" }],
+      }),
+    });
+    assert.equal(response.status, 502);
+    assert.match(
+      response.headers.get("content-type") ?? "",
+      /^application\/json/,
+    );
+    assert.deepEqual(await response.json(), {
+      error: {
+        message: "turn failed",
+        type: "server_error",
+        param: null,
+        code: "app_server_error",
+      },
+    });
   });
 });
 
@@ -2629,7 +2743,7 @@ test("request timeout wakes a silent turn and closes its SSE stream", async () =
       }),
     });
     const body = await response.text();
-    assert.match(body, /"code":"app_server_error"/);
+    assert.match(body, /"code":"request_timeout"/);
     assert.doesNotMatch(body, /\[DONE\]/);
   }, 50);
 });

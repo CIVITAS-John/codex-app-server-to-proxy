@@ -7,7 +7,11 @@ import {
   type TokenUsageCounters,
 } from "../core/token-usage.js";
 import type { StoredToolCall } from "../continuation/state.js";
-import { appServerError, type HttpError } from "./errors.js";
+import {
+  appServerError,
+  serverOverloadedError,
+  type HttpError,
+} from "./errors.js";
 import { usageLimitError } from "./quota.js";
 
 /** Standard token usage, with details present only when app-server reports them. */
@@ -455,7 +459,10 @@ function terminalEvent(
   const message =
     typeof error?.message === "string" ? error.message : fallbackMessage;
   return {
-    terminalError: usageLimitError(error, message) ?? appServerError(message),
+    terminalError:
+      usageLimitError(error, message) ??
+      serverOverloadedError(error, message) ??
+      appServerError(message),
   };
 }
 

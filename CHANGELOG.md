@@ -2,7 +2,13 @@
 
 All notable user-facing changes are recorded here. This project follows semantic versioning once a version is published.
 
-## 0.1.0-rc.19 — Pending
+## 0.1.0-rc.20 — August 10, 2026
+
+### Added
+
+- App-server `serverOverloaded` failures — Codex's "Selected model is at capacity. Please try a different model." — now map to HTTP 503 `server_error` with `error.code: "server_overloaded"` and the Codex message. Capacity is an upstream condition, so it triggers no rate-limit lookup and carries no `Retry-After` or `reset_at`.
+
+## 0.1.0-rc.19 — August 6, 2026
 
 ### Added
 
@@ -10,7 +16,7 @@ All notable user-facing changes are recorded here. This project follows semantic
 
 ### Changed
 
-- Streaming responses are primed before HTTP 200: an immediate quota failure is JSON 429, while a failure after visible output emits exactly one typed terminal SSE error and no `[DONE]`. The proxy remains fail-fast and does not expose a quota endpoint, proactively gate, sleep, queue, consume reset credit, retry, or replay requests.
+- Streaming responses are primed before HTTP 200: a turn that fails before any visible output is now an ordinary JSON HTTP error with its real status (429 quota, 503 capacity, 502 otherwise) instead of a committed 200 whose stream ended without content, which lenient clients read as a successful empty answer. A failure after visible output still emits exactly one typed terminal SSE error and no `[DONE]`. The proxy remains fail-fast and does not expose a quota endpoint, proactively gate, sleep, queue, consume reset credit, retry, or replay requests.
 
 ## 0.1.0-rc.17 — August 2, 2026
 

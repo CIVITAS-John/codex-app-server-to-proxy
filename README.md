@@ -125,7 +125,7 @@ curl -N http://127.0.0.1:8787/v1/chat/completions \
 
 Standard clients get assistant text, function calls, the finish reason, and a usage chunk when Codex reports exact counters. The streaming usage chunk is on by default; set `stream_options.include_usage` to `false` to omit it. This default deliberately differs from OpenAI's opt-in behavior. Codex reasoning and internal activity arrive in the nonstandard fields described under [Codex-specific extensions](#codex-specific-extensions).
 
-The proxy primes a stream before committing HTTP 200. An immediate Codex quota failure is therefore an ordinary JSON HTTP 429. If output is already visible, the response remains HTTP 200 and ends with exactly one typed SSE error event, without `data: [DONE]`.
+The proxy primes a stream before committing HTTP 200. A turn that fails before any output is therefore an ordinary JSON HTTP error carrying its real status — 429 for a quota failure, 503 `server_overloaded` when the selected model is at capacity, 502 otherwise — instead of a committed 200 whose stream ends with no content. If output is already visible, the response remains HTTP 200 and ends with exactly one typed SSE error event, without `data: [DONE]`.
 
 ## Function tools
 
@@ -217,6 +217,10 @@ Only app-server `codexErrorInfo: "usageLimitExceeded"` becomes HTTP 429 with `er
 For each such failed request, the proxy makes at most one memoized, abortable `account/rateLimits/read`. When it finds a trustworthy future reset, nonstandard `error.x_codex.reset_at` is Unix seconds; an uncommitted response also has the matching integer-seconds `Retry-After` header. A failed or malformed lookup omits both reset values but preserves the typed 429. Client cancellation remains cancellation.
 
 Explicit workspace credit exhaustion always uses `insufficient_credits` with no reset. An explicit workspace usage cap uses `workspace_usage_limit_exceeded` only without a trustworthy individual spend-control reset; when `spendControlReached` and a valid future `individualLimit` reset exist, it remains `usage_limit_exceeded` with reset metadata. Vox Agents treats both workspace codes as non-retryable. The reset is the latest future exhausted primary or secondary window from `rateLimitsByLimitId.codex`, falling back to `rateLimits`; `individualLimit` participates only when `spendControlReached`. The proxy uses stale-percent data only for `rate_limit_reached` and never infers a workspace reset from rolling windows. It never sleeps, queues, consumes reset credit, retries, or replays a request.
+
+## Capacity errors
+
+App-server `codexErrorInfo: "serverOverloaded"` — the failure behind Codex's "Selected model is at capacity. Please try a different model." — becomes HTTP 503 with `error.type: "server_error"` and `error.code: "server_overloaded"`, carrying the Codex message unchanged. It is an upstream condition rather than your account's quota, so it triggers no rate-limit lookup and never carries `Retry-After` or `reset_at`. Every other unclassified turn failure remains 502 `app_server_error`. The proxy does not retry a capacity failure for you; treat 503 as retryable, ideally with another model.
 
 ## Safety and limits
 
