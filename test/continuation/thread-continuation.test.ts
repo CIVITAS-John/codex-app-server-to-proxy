@@ -55,6 +55,7 @@ class ContinuationAppServer {
     private readonly status: unknown = { type: "idle" },
     private readonly completionDelayMs = 0,
     private readonly requestTool = false,
+    private readonly instructionSources: string[] = [],
   ) {
     this.transport = new JsonRpcTransport(this.#fromServer, this.#toServer);
     createInterface({ input: this.#toServer }).on("line", (line) =>
@@ -78,11 +79,10 @@ class ContinuationAppServer {
     const id = message.id as number;
     if (message.method === "thread/start") {
       this.#send(
-        protocolResponse(
-          "thread/start",
-          id,
-          protocolThreadStartResponse(protocolThread(this.#threadId)),
-        ),
+        protocolResponse("thread/start", id, {
+          ...protocolThreadStartResponse(protocolThread(this.#threadId)),
+          instructionSources: this.instructionSources,
+        }),
       );
     } else if (message.method === "thread/read") {
       // The configurable unknown status is intentionally hostile protocol input.
@@ -92,11 +92,10 @@ class ContinuationAppServer {
       });
     } else if (message.method === "thread/resume") {
       this.#send(
-        protocolResponse(
-          "thread/resume",
-          id,
-          protocolThreadResumeResponse(protocolThread(this.#threadId)),
-        ),
+        protocolResponse("thread/resume", id, {
+          ...protocolThreadResumeResponse(protocolThread(this.#threadId)),
+          instructionSources: this.instructionSources,
+        }),
       );
     } else if (message.method === "turn/start") {
       const turnId = `turn_continuation_${++this.#turn}`;
@@ -225,6 +224,50 @@ function post(
     messages: [{ role: "user", content: "continue" }],
   });
 }
+
+test("ready continuations return instruction sources reported by thread/resume", async () => {
+  await withTempDir(async (directory) => {
+    const instructionSources = [
+      "synthetic/project/AGENTS.md",
+      "synthetic/project/src/AGENTS.override.md",
+    ];
+    const fake = new ContinuationAppServer(
+      { type: "idle" },
+      0,
+      false,
+      instructionSources,
+    );
+    const responseId = "response_instruction_sources";
+    const running = await startProxy(directory, fake, {
+      responseId,
+      threadId: "thr_continuation",
+      state: "ready",
+      model: "m",
+      cwd: join(directory, "workspace"),
+      toolsHash: bindingHash([]),
+      policyHash: defaultPolicyHash(join(directory, "workspace")),
+    });
+    try {
+      const response = await post(running.origin, responseId);
+      assert.equal(response.status, 200, await response.clone().text());
+      assert.deepEqual(
+        (
+          (await response.json()) as {
+            x_codex?: { instructionSources?: string[] };
+          }
+        ).x_codex,
+        { instructionSources },
+      );
+      assert.deepEqual(fake.methods.slice(0, 3), [
+        "thread/read",
+        "thread/resume",
+        "turn/start",
+      ]);
+    } finally {
+      await running.proxy.close();
+    }
+  }, "codex-continuation-instruction-sources-");
+});
 
 test("model, reasoning, cwd, tool, and policy binding mismatches fail before thread/read", async () => {
   const cases = [

@@ -239,6 +239,7 @@ export interface ChatHandlerOptions {
 /** One eagerly prepared execution with cleanup independent of generator startup. */
 export interface ExecutionSession {
   events: AsyncGenerator<NormalizedEvent>;
+  instructionSources: string[];
   dispose(): Promise<void>;
 }
 
@@ -254,6 +255,7 @@ interface TurnHandle {
 /** Setup output shared by ready and pending-tool continuation paths. */
 interface ContinuationSetup {
   usageBaseline: TokenUsageCounters | undefined;
+  instructionSources: string[];
 }
 
 /**
@@ -393,6 +395,7 @@ export async function execute(
   };
   options.signal.addEventListener("abort", onAbort, { once: true });
   let usageBaseline: TokenUsageCounters | undefined;
+  let instructionSources: string[];
   try {
     if (request.previousResponseId) {
       const continuation = await resumeContinuation(
@@ -403,8 +406,14 @@ export async function execute(
         onToolRequest,
       );
       usageBaseline = continuation.usageBaseline;
+      instructionSources = continuation.instructionSources;
     } else {
-      await startFreshThread(request, options, handle, onToolRequest);
+      instructionSources = await startFreshThread(
+        request,
+        options,
+        handle,
+        onToolRequest,
+      );
       // A thread this request created has provably consumed nothing yet.
       usageBaseline = ZERO_TOKEN_USAGE;
     }
@@ -615,7 +624,7 @@ export async function execute(
         await cleanup();
       }
     })();
-  return { events, dispose: cleanup };
+  return { events, instructionSources, dispose: cleanup };
 }
 
 /**
@@ -853,7 +862,7 @@ async function resumeContinuation(
     );
     // Claim before awaiting so concurrent continuations remain atomic.
     acquireThread(handle, options, onToolRequest);
-    await resumeIdleThread(request, options, handle);
+    const instructionSources = await resumeIdleThread(request, options, handle);
     const items = pending.flatMap((call) => [
       // Inject the complete pair because an unpaired output is ignored.
       toFunctionCallItem(call),
@@ -880,7 +889,7 @@ async function resumeContinuation(
     // Mark success best-effort; the tombstone already blocks replay.
     options.continuations.recordPendingConsumed(request.previousResponseId!);
     await startTurn(request, options, handle);
-    return { usageBaseline: stored.usageTotal };
+    return { usageBaseline: stored.usageTotal, instructionSources };
   }
 
   if (stored.state === "expired")
@@ -890,9 +899,9 @@ async function resumeContinuation(
   if (terminalToolResults.length)
     continuationFailure(409, "tool_results_without_pending_call");
   acquireThread(handle, options, onToolRequest);
-  await resumeIdleThread(request, options, handle);
+  const instructionSources = await resumeIdleThread(request, options, handle);
   await startTurn(request, options, handle);
-  return { usageBaseline: stored.usageTotal };
+  return { usageBaseline: stored.usageTotal, instructionSources };
 }
 
 /** Gates on a resumable thread status and resumes it under this request's policy. */
@@ -900,7 +909,7 @@ async function resumeIdleThread(
   request: ChatRequest,
   options: ChatHandlerOptions,
   handle: TurnHandle,
-): Promise<void> {
+): Promise<string[]> {
   let resumed: Record<string, unknown>;
   try {
     const read = asRecord(
@@ -942,6 +951,10 @@ async function resumeIdleThread(
   handle.rawResponseBoundaries = rawResponseThreads(options.rpc).has(
     handle.threadId,
   );
+  return requiredStringArray(
+    resumed.instructionSources,
+    "thread/resume.instructionSources",
+  );
 }
 
 /** Starts one fresh durable thread and its initial turn. */
@@ -950,7 +963,7 @@ async function startFreshThread(
   options: ChatHandlerOptions,
   handle: TurnHandle,
   onToolRequest: (toolRequest: PendingToolCall) => void,
-): Promise<void> {
+): Promise<string[]> {
   const started = asRecord(
     await options.rpc.request(
       "thread/start",
@@ -969,6 +982,10 @@ async function startFreshThread(
     "thread/start",
   );
   handle.threadId = requiredId(started.thread, "thread/start.thread");
+  const instructionSources = requiredStringArray(
+    started.instructionSources,
+    "thread/start.instructionSources",
+  );
   rawResponseThreads(options.rpc).add(handle.threadId);
   handle.rawResponseBoundaries = true;
   acquireThread(handle, options, onToolRequest);
@@ -994,6 +1011,7 @@ async function startFreshThread(
       options.signal,
     );
   await startTurn(request, options, handle);
+  return instructionSources;
 }
 
 /** Claims a known thread and installs its dynamic-tool responder. */
@@ -1128,4 +1146,11 @@ function requiredId(value: unknown, location: string): string {
   const result = asRecord(value, location);
   if (typeof result.id !== "string") throw new Error("Invalid app-server id.");
   return result.id;
+}
+
+/** Requires an app-server response field containing only string paths. */
+function requiredStringArray(value: unknown, location: string): string[] {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string"))
+    throw new Error(`Invalid ${location} response.`);
+  return [...value];
 }

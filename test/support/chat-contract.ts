@@ -394,7 +394,7 @@ export function registerChatContract(
         const firstRaw = await firstResponse.text();
         const firstElapsedMs = Date.now() - firstStarted;
         assert.equal(firstResponse.status, 200, diagnostic(firstRaw));
-        let callBody = parseJson<ToolCompletion>(
+        let callBody = parseToolCompletion(
           firstRaw,
           "dynamic-tool completion 1",
         );
@@ -489,7 +489,7 @@ export function registerChatContract(
               `[live] tool-result request ${roundIndex + 1} took ${Date.now() - resultStarted} ms`,
             );
           assert.equal(resultResponse.status, 200, diagnostic(resultRaw));
-          const resultBody = parseJson<ToolCompletion>(
+          const resultBody = parseToolCompletion(
             resultRaw,
             `tool-result completion ${roundIndex + 1}`,
           );
@@ -543,7 +543,7 @@ export function registerChatContract(
         });
         const continuedRaw = await continued.text();
         assert.equal(continued.status, 200, diagnostic(continuedRaw));
-        const continuedBody = parseJson<ToolCompletion>(
+        const continuedBody = parseToolCompletion(
           continuedRaw,
           "restart continuation",
         );
@@ -569,7 +569,7 @@ export function registerChatContract(
         });
         const raw = await response.text();
         assert.equal(response.status, 200, diagnostic(raw));
-        const body = parseJson<ToolCompletion>(raw, "disabled-sandbox chat");
+        const body = parseToolCompletion(raw, "disabled-sandbox chat");
         const choice = body.choices?.[0];
         assert.equal(choice?.finish_reason, "stop");
         // The model may nondeterministically attempt a tool despite the
@@ -733,10 +733,7 @@ export function registerChatContract(
         });
         const continuedRaw = await continued.text();
         assert.equal(continued.status, 200, diagnostic(continuedRaw));
-        const body = parseJson<ToolCompletion>(
-          continuedRaw,
-          "built-in continuation",
-        );
+        const body = parseToolCompletion(continuedRaw, "built-in continuation");
         assert.ok(
           body.choices?.[0]?.message?.content?.trim() ===
             backend!.observationToken,
@@ -777,7 +774,7 @@ export function registerChatContract(
         });
         const replayedRaw = await replayed.text();
         assert.equal(replayed.status, 200, diagnostic(replayedRaw));
-        const replayedBody = parseJson<ToolCompletion>(
+        const replayedBody = parseToolCompletion(
           replayedRaw,
           "built-in activity replay",
         );
@@ -832,7 +829,7 @@ export function registerChatContract(
             scenarioStarted,
           );
           assert.equal(response.status, 200, diagnostic(raw));
-          const body = parseJson<ToolCompletion>(raw, "filesystem tools");
+          const body = parseToolCompletion(raw, "filesystem tools");
           const choice = body.choices?.[0];
           assert.equal(choice?.finish_reason, "stop");
           const calls = [...(choice?.message?.tool_calls ?? [])];
@@ -866,7 +863,7 @@ export function registerChatContract(
               scenarioStarted,
             );
             assert.equal(correction.status, 200, diagnostic(correctionRaw));
-            const correctionChoice = parseJson<ToolCompletion>(
+            const correctionChoice = parseToolCompletion(
               correctionRaw,
               "filesystem write correction",
             ).choices?.[0];
@@ -968,8 +965,7 @@ export function registerChatContract(
         });
         const raw = await response.text();
         assert.equal(response.status, 200, diagnostic(raw));
-        const choice = parseJson<ToolCompletion>(raw, "live web search")
-          .choices?.[0];
+        const choice = parseToolCompletion(raw, "live web search").choices?.[0];
         assert.equal(choice?.finish_reason, "stop");
         const calls = choice?.message?.tool_calls ?? [];
         const results = choice?.message?.tool_results ?? [];
@@ -1029,8 +1025,7 @@ export function registerChatContract(
         });
         const raw = await response.text();
         assert.equal(response.status, 200, diagnostic(raw));
-        const choice = parseJson<ToolCompletion>(raw, "spawned child")
-          .choices?.[0];
+        const choice = parseToolCompletion(raw, "spawned child").choices?.[0];
         assert.equal(choice?.finish_reason, "stop");
         const parentContent = choice?.message?.content?.trim();
         assert.ok(
@@ -1221,6 +1216,7 @@ interface Usage {
 /** Streaming response subset asserted by the shared contract. */
 interface StreamChunk {
   id?: string;
+  x_codex?: { instructionSources?: string[] };
   choices?: Array<{
     delta?: {
       role?: string;
@@ -1253,14 +1249,17 @@ function parseSse(value: string): StreamChunk[] {
     frames.at(-1) === "[DONE]",
     "SSE stream omitted its terminal marker",
   );
-  return frames
+  const chunks = frames
     .slice(0, -1)
     .map((frame) => parseJson<StreamChunk>(frame, "SSE frame"));
+  assertInstructionSources(chunks[0]?.x_codex, "first SSE chunk");
+  return chunks;
 }
 
 /** Aggregate response subset used by the shared function-tool scenario. */
 interface ToolCompletion {
   id?: string;
+  x_codex?: { instructionSources?: string[] };
   choices?: Array<{
     finish_reason?: string | null;
     message?: {
@@ -1278,6 +1277,27 @@ interface ToolCompletion {
     };
   }>;
   usage?: Usage;
+}
+
+/** Parses an aggregate response and requires its instruction provenance. */
+function parseToolCompletion(value: string, label: string): ToolCompletion {
+  const completion = parseJson<ToolCompletion>(value, label);
+  assertInstructionSources(completion.x_codex, label);
+  return completion;
+}
+
+/** Requires the successful-response instruction-source extension shape. */
+function assertInstructionSources(
+  extension: { instructionSources?: string[] } | undefined,
+  label: string,
+): void {
+  assert.ok(
+    Array.isArray(extension?.instructionSources) &&
+      extension.instructionSources.every(
+        (source) => typeof source === "string",
+      ),
+    `${label} omitted valid x_codex.instructionSources`,
+  );
 }
 
 /** Validates reported usage without estimating omitted counts. */

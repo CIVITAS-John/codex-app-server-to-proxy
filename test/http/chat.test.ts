@@ -58,6 +58,7 @@ interface StreamedChunk {
     finish_reason?: string | null;
   }>;
   usage?: Usage;
+  x_codex?: { instructionSources?: string[] };
 }
 
 /** In-memory structured logs and the logger that appends to them. */
@@ -98,6 +99,7 @@ interface FakeAppServerOptions {
   usageOnCompletion?: boolean;
   usageAfterTool?: boolean;
   extraModelRequest?: boolean;
+  instructionSources?: string[];
 }
 
 /** Creates an offline fake app-server transport with deliberately split frames. */
@@ -110,6 +112,7 @@ function fakeAppServer({
   usageOnCompletion = true,
   usageAfterTool = false,
   extraModelRequest = false,
+  instructionSources = [],
 }: FakeAppServerOptions = {}): FakeTransport {
   let thread = "";
   return createFakeTransport({
@@ -123,11 +126,10 @@ function fakeAppServer({
       if (message.method === "thread/start") {
         thread = "thr_test";
         send(
-          protocolResponse(
-            "thread/start",
-            message.id,
-            protocolThreadStartResponse(protocolThread(thread)),
-          ),
+          protocolResponse("thread/start", message.id, {
+            ...protocolThreadStartResponse(protocolThread(thread)),
+            instructionSources,
+          }),
         );
       } else if (message.method === "thread/inject_items") {
         send(protocolResponse("thread/inject_items", message.id, {}));
@@ -1961,6 +1963,77 @@ test("streaming and aggregate responses share content and exact usage", async ()
     assert.equal(streamedUsage?.total_tokens, 6);
     assert.equal(streamedUsage?.prompt_tokens_details?.cached_tokens, 0);
     assert.equal(streamedUsage?.completion_tokens_details?.reasoning_tokens, 0);
+  });
+});
+
+test("returns loaded instruction sources in aggregate and streaming metadata", async () => {
+  await withChatServer(async (origin, _proxy, useTransport) => {
+    const instructionSources = [
+      "synthetic/project/AGENTS.md",
+      "synthetic/project/test/AGENTS.override.md",
+    ];
+    useTransport(fakeAppServer({ instructionSources }));
+    const aggregate = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        messages: [{ role: "user", content: "Hello" }],
+      }),
+    });
+    assert.equal(aggregate.status, 200);
+    assert.deepEqual(
+      (
+        (await aggregate.json()) as {
+          x_codex?: { instructionSources?: string[] };
+        }
+      ).x_codex,
+      { instructionSources },
+    );
+
+    useTransport(fakeAppServer({ instructionSources }));
+    const streaming = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        messages: [{ role: "user", content: "Hello" }],
+        stream: true,
+      }),
+    });
+    assert.equal(streaming.status, 200);
+    const chunks = streamedChunks(await streaming.text());
+    assert.deepEqual(chunks[0]?.x_codex, { instructionSources });
+    assert.equal(
+      chunks.slice(1).some((chunk) => chunk.x_codex !== undefined),
+      false,
+    );
+  });
+});
+
+test("rejects malformed instruction-source metadata before HTTP success", async () => {
+  await withChatServer(async (origin, _proxy, useTransport) => {
+    useTransport(
+      fakeAppServer({
+        instructionSources: [
+          "synthetic/project/AGENTS.md",
+          42,
+        ] as unknown as string[],
+      }),
+    );
+    const response = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        messages: [{ role: "user", content: "Hello" }],
+      }),
+    });
+    assert.equal(response.status, 500);
+    assert.equal(
+      response.headers.get("content-type"),
+      "application/json; charset=utf-8",
+    );
   });
 });
 

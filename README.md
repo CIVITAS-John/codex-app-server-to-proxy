@@ -169,6 +169,13 @@ Responses can include two nonstandard fields on the assistant delta/message:
 | `reasoning`    | Codex's reasoning summary (string)                                                                                 |
 | `tool_results` | Status/results of Codex's internal activity (commands, file changes, MCP calls, web searches, collaboration calls) |
 
+Successful responses also include response-level
+`x_codex.instructionSources`, an array of the environment-native instruction-file
+paths app-server reports as loaded for the Codex thread. Aggregate responses
+include it once; streaming responses include it on the first chunk. An empty
+array means app-server reported no loaded instruction files. Treat these paths
+as sensitive plaintext.
+
 Reasoning deltas stream as they arrive. If app-server supplies reasoning only in
 the completed item, the proxy emits that final text without repeating any
 prefix already streamed for the same item.
