@@ -44,6 +44,8 @@ Changing the default from `read-only` to `disabled` is intentionally breaking. R
 
 The pinned generated protocol added the `indexed` web-search mode beyond the earlier checked-in `x_codex` schema. Stage 06 exposes it as a compatibility addition because the same per-thread `config.web_search` mapping applies to every generated mode. Deterministic tests prove exact forwarding and no shared-configuration mutation. No live policy smoke test or model call was run, so actual provider-side search behavior remains an explicit opt-in verification item rather than an offline claim.
 
+**Decision (2026-09-02): subagent capability is process-scoped and default-off.** Every app-server spawn receives explicit false command-line overrides for both Codex multi-agent controls unless the operator opts in with `--subagents true`. The platform-neutral `workspace-write` scenario reads a random fixture through `commandExecution` and writes its nonce through `fileChange`/`apply_patch`, verified on disk; the live `webSearch` scenario uses the same no-agent backend with filesystem access unavailable. A second app-server enables subagents only for the spawn scenario. The compatibility consequence is that read/write and web capability can be enabled independently of child spawning without adding a per-request `x_codex` multi-agent setting. These scenarios remain pending an authorized live run.
+
 Starting `thread/start` with a writable sandbox can mark the selected cwd as trusted in the user's `config.toml`. The README now calls out that side effect prominently; canonical root containment bounds which projects the proxy can cause app-server to trust.
 
 ## Post-review hardening

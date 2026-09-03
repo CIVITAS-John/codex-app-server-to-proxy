@@ -37,6 +37,7 @@ Options:
   --port <port>                 TCP port, or 0 for an ephemeral port (default: 8787)
   --root <directory>            Allowed working-directory root (default: launch directory)
   --codex-path <path>           Override the package-owned Codex executable
+  --subagents <true|false>      Allow child-agent spawning (default: false)
   --codex-home <directory>      Codex home for the spawned app-server
                                 (default: ${DEFAULT_CODEX_HOME_DESCRIPTION})
   --sync-auth <always|never>
@@ -170,6 +171,7 @@ class AppServerSupervisor {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const next = await startAppServer({
         codexPath: this.#options.codexPath,
+        subagentsEnabled: this.#options.subagentsEnabled,
         codexHome: this.#options.codexHome,
         seedAuthFrom: seedSource,
         root: this.#options.root,
@@ -303,6 +305,7 @@ async function runServer(options: ServeOptions, log: Logger): Promise<number> {
     port: address.port,
     default_sandbox: "disabled",
     default_web_search: "disabled",
+    subagents_enabled: options.subagentsEnabled,
     ready: false,
   });
   log("debug", "server_root", { root: options.root });

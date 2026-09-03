@@ -9,9 +9,10 @@ Create an installable TypeScript CLI with strict loopback enforcement and no dep
 1. Initialize the npm package, strict application and test TypeScript configurations, formatter, linter, Vitest, build output, and executable `bin` entry.
     - Keep `npm test` non-interactive and offline by default.
     - Use a separate Vitest project or explicit opt-in script for live tests so the default include patterns cannot discover them.
-2. Implement `codex-openai-proxy serve` with `--host`, `--port`, `--root`, `--codex-path`, `--codex-home`, `--sync-auth`, `--login`, log level, state-directory, and shutdown options.
+2. Implement `codex-openai-proxy serve` with `--host`, `--port`, `--root`, `--codex-path`, `--codex-home`, `--sync-auth`, `--login`, `--subagents`, log level, state-directory, and shutdown options.
     - `--root` defaults to the launch directory.
     - `--codex-home` defaults to the proxy-owned `~/.codex-openai-proxy/codex-home`; relative overrides resolve from the canonical root.
+    - `--subagents` defaults to `false`; `true` is an explicit process-wide opt-in and remains independent of per-request filesystem and web policy.
     - The former `--tool-timeout` was removed with the interrupt-based tool design (2026-07-26); the app-server startup/login deadline is a fixed five minutes.
 3. Default to `127.0.0.1`; normalize and allow only `127.0.0.1`, `::1`, and `localhost`. Resolve `localhost` defensively or bind explicit loopback sockets.
 4. Refuse wildcard, LAN, DNS, mapped, or ambiguous addresses before opening a socket.
@@ -42,5 +43,7 @@ Request deadlines abort downstream work and forcibly close any already-committed
 The package allow-list is limited to the compiled CLI declarations/source maps, README, and protocol artifacts.  No default npm script starts Codex or makes a network or model call.
 
 The CLI exposes `--codex-home` separately from the per-root continuation state directory. Its default is shared across roots so one proxy login persists, but it remains outside the allowed root and isolated from the ordinary Codex CLI home.
+
+The CLI starts app-server with subagent spawning disabled by default and exposes `--subagents true` as the only opt-in. The effective value is visible in the startup log. This is a deliberate compatibility change from inheriting Codex's enabled-by-default multi-agent configuration.
 
 The Stage 02 coverage is type-checked and runs through Vitest, with files split by configuration, HTTP server, and CLI lifecycle responsibilities. Vitest is a development dependency, and the default non-watch configuration excludes opt-in live-test filenames. 

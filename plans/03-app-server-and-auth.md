@@ -9,6 +9,7 @@ Reliably own one initialized app-server child process and complete ChatGPT login
 1. Resolve the package-owned Codex executable by default, with explicit `--codex-path` override and PATH compatibility fallback. Validate its version before serving.
 2. Spawn without a shell, communicate through newline-delimited JSON-RPC on stdio, and log stderr lines as plaintext.
     - App-server omits the `"jsonrpc": "2.0"` member on the wire; the transport must tolerate and mirror this rather than assume a strict JSON-RPC library will.
+    - Pass explicit `agents.enabled` and `features.multi_agent` command-line overrides on every spawn. Both default to false and become true only for `--subagents true`.
 3. Implement request IDs, response correlation, server-to-client requests, notifications, cancellation, bounded queues, and malformed-line handling.
     - Surface app-server `-32001` overload errors as retryable OpenAI-shaped HTTP 503 responses before HTTP headers are committed.
 4. Send `initialize` with stable client metadata, then send `initialized`.
@@ -47,6 +48,7 @@ Reliably own one initialized app-server child process and complete ChatGPT login
 - Tests prove fallback authorization succeeds and that plaintext log entries remain structured even when they contain the URL; continuation state omits authentication data.
 - Elicitation capabilities are absent from initialization and unexpected elicitation requests receive an immediate fail-closed response.
 - No shell interpolation is used for spawning Codex or opening the browser.
+- App-server arguments disable both multi-agent controls by default and enable both only for the explicit process-wide opt-in.
 - The opt-in protocol spike records text, tool round trip, and persisted restart/resume observations using at most four model calls, all with `gpt-5.6-luna` and small output limits.
 
 ## Cost guard
@@ -60,6 +62,8 @@ The offline Stage 03 implementation owns and version-checks a shell-free app-ser
 The shared JSON-RPC transport permits its bounded request population to subscribe to notifications and close events without emitting the default low-concurrency `EventEmitter` warning. A response containing an `error` member is always treated as failure; malformed error objects are rejected rather than being reinterpreted as a successful response with an absent result.
 
 The CLI starts app-server before becoming ready and may initiate ChatGPT login. Stage 04 implements `POST /v1/chat/completions`. The isolated `npm run test:live` command runs one shared HTTP contract against the real app-server, serially attempts at most four `gpt-5.6-luna` calls, bounds diagnostics, and unconditionally cleans up; default tests run that contract against only a deterministic fake backend.
+
+Every app-server spawn receives command-line overrides for both Codex multi-agent controls. They are false by default and true only when the operator passes `--subagents true`, so existing `config.toml` values cannot silently broaden the proxy's process policy. The compatibility consequence is that child spawning, which Codex otherwise enables by default, now requires an explicit proxy startup opt-in.
 
 Authentication presentation is explicit through `--login <auto|device-code|browser>`. `auto` remains the stderr-TTY-based default, preserving existing interactive and headless behavior; `browser` forces the browser flow and `device-code` forces the headless verification flow. The compatibility consequence is that existing invocations retain their login method, while automation and remote sessions can select a stable method independent of terminal detection.
 

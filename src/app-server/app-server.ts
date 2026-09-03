@@ -117,6 +117,8 @@ export interface AppServer {
 /** Configures app-server process startup and shutdown. */
 export interface StartAppServerOptions {
   codexPath: string;
+  /** Whether the child process may expose tools that spawn subagents. */
+  subagentsEnabled?: boolean | undefined;
   /** Codex home for the child; isolates its caches and auth from ~/.codex. */
   codexHome?: string | undefined;
   /**
@@ -130,6 +132,20 @@ export interface StartAppServerOptions {
   log: Logger;
   spawnProcess?: typeof spawn;
   signal?: AbortSignal;
+}
+
+/** Builds app-server arguments with an explicit fail-closed subagent policy. */
+export function appServerArguments(subagentsEnabled = false): string[] {
+  const enabled = String(subagentsEnabled);
+  // Both the stable agent setting and its feature gate are explicit so a
+  // custom config.toml cannot silently broaden or narrow the selected policy.
+  return [
+    "app-server",
+    "-c",
+    `agents.enabled=${enabled}`,
+    "-c",
+    `features.multi_agent=${enabled}`,
+  ];
 }
 
 /** Starts, verifies, and initializes an app-server child process. */
@@ -173,7 +189,7 @@ export async function startAppServer(
   if (options.signal?.aborted) throw abortReason(options.signal);
   const child = spawnProcess(
     invocation.command,
-    [...invocation.prefixArgs, "app-server"],
+    [...invocation.prefixArgs, ...appServerArguments(options.subagentsEnabled)],
     {
       cwd: options.root,
       env,

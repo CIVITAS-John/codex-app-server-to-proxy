@@ -55,6 +55,7 @@ Support client-defined tools across requests while preserving safe Codex thread 
 - A pending tool continuation succeeds after restart from persisted call metadata alone.
 - Mapping writes survive abrupt termination without corrupting other records.
 - One opt-in live scenario requires two independent client tool calls in its initial parallel batch, then completes three consecutive full-history tool-result continuations with `gpt-5.6-luna` using at most four model calls before restart continuation.
+- A separate opt-in collaboration scenario requires exactly one `spawnAgent` lifecycle, a completed `agentsStates` entry carrying the unpredictable child nonce back to the parent, and a raw provider completion for the child thread. It rejects additional built-in activity and fails closed if child raw completion events cannot be observed. Agent enablement is isolated to that scenario's Codex home and is not a new per-request `x_codex` field.
 
 ## Implemented decisions
 

@@ -2,6 +2,14 @@
 
 All notable user-facing changes are recorded here. This project follows semantic versioning once a version is published.
 
+## 0.1.0-rc.21 — September 2, 2026
+
+### Changed
+
+- **Breaking:** Subagent spawning is disabled by default with explicit app-server command-line overrides. Operators must pass `--subagents true` to enable it for the proxy process; filesystem and web permissions remain independent.
+- The pending opt-in live contract design adds platform-neutral disk-verified command/file-change coverage, isolated live web search, and an exactly-one-child nonce handoff. Its cost guard changes from proxy turn starts to at most 24 deduplicated `rawResponse/completed` upstream model responses across parent and child threads; one proxy turn can contain several such responses around tool calls, and child threads add their own. No normal count is claimed before live calibration. File/web coverage runs with subagents disabled, so this adds no per-request `x_codex` multi-agent field.
+- Nonstandard internal `tool_results` for collaboration calls now retain sanitized `receiverThreadIds` and child `agentsStates` status/message data, allowing clients and the live contract to verify a completed child handoff without exposing sender IDs or provider-native payloads.
+
 ## 0.1.0-rc.20 — August 10, 2026
 
 ### Added

@@ -14,6 +14,7 @@ import { homedir } from "node:os";
 import { PassThrough } from "node:stream";
 import { test } from "vitest";
 import {
+  appServerArguments,
   attachAppServerStderrLogging,
   CLIENT_VERSION,
   PINNED_CODEX_VERSION,
@@ -376,6 +377,23 @@ test("package Codex uses Node while explicit executables remain direct", () => {
     command: "/tmp/custom-codex",
     prefixArgs: [],
   });
+});
+
+test("app-server arguments disable subagents by default and support opt-in", () => {
+  assert.deepEqual(appServerArguments(), [
+    "app-server",
+    "-c",
+    "agents.enabled=false",
+    "-c",
+    "features.multi_agent=false",
+  ]);
+  assert.deepEqual(appServerArguments(true), [
+    "app-server",
+    "-c",
+    "agents.enabled=true",
+    "-c",
+    "features.multi_agent=true",
+  ]);
 });
 
 testWithPosixExecutable(

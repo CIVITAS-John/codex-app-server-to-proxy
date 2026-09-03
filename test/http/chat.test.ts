@@ -90,6 +90,7 @@ function streamedChunks(body: string): StreamedChunk[] {
 
 /** Turn behavior selected by one offline fake app-server. */
 interface FakeAppServerOptions {
+  collabAgentLifecycle?: boolean;
   complete?: boolean;
   onInterrupt?: () => void;
   requestTool?: boolean;
@@ -101,6 +102,7 @@ interface FakeAppServerOptions {
 
 /** Creates an offline fake app-server transport with deliberately split frames. */
 function fakeAppServer({
+  collabAgentLifecycle = false,
   complete = true,
   onInterrupt = () => {},
   requestTool = false,
@@ -150,6 +152,59 @@ function fakeAppServer({
         // reporting its own usage against grown cumulative counters.
         if (extraModelRequest)
           sendTokenUsage(send, thread, "turn_test", tokenUsageFixture());
+        if (collabAgentLifecycle) {
+          send(
+            protocolNotification({
+              method: "item/started",
+              params: {
+                threadId: thread,
+                turnId: "turn_test",
+                startedAtMs: 0,
+                item: {
+                  type: "collabAgentToolCall",
+                  id: "collab_spawn",
+                  tool: "spawnAgent",
+                  status: "inProgress",
+                  senderThreadId: thread,
+                  receiverThreadIds: ["thr_child"],
+                  prompt: "Return the nonce.",
+                  model: null,
+                  reasoningEffort: null,
+                  agentsStates: {
+                    thr_child: { status: "running", message: null },
+                  },
+                },
+              },
+            }),
+          );
+          send(
+            protocolNotification({
+              method: "item/completed",
+              params: {
+                threadId: thread,
+                turnId: "turn_test",
+                completedAtMs: 1,
+                item: {
+                  type: "collabAgentToolCall",
+                  id: "collab_spawn",
+                  tool: "spawnAgent",
+                  status: "completed",
+                  senderThreadId: thread,
+                  receiverThreadIds: ["thr_child"],
+                  prompt: "Return the nonce.",
+                  model: null,
+                  reasoningEffort: null,
+                  agentsStates: {
+                    thr_child: {
+                      status: "completed",
+                      message: "contract-child-nonce",
+                    },
+                  },
+                },
+              },
+            }),
+          );
+        }
         send(
           protocolNotification({
             method: "item/agentMessage/delta",
@@ -1113,6 +1168,87 @@ test("tool lifecycle output is emitted without truncation", () => {
   assert.equal(completed?.content, content);
 });
 
+test("sanitizes partial collab-agent lifecycle state without repeating its call", () => {
+  const normalizer = new EventNormalizer();
+  const started = normalizer.normalize("item/started", {
+    threadId: "thread",
+    turnId: "turn",
+    item: {
+      type: "collabAgentToolCall",
+      id: "collab_wait",
+      tool: "wait",
+      status: "inProgress",
+      senderThreadId: "thread",
+      receiverThreadIds: "not-an-array",
+      prompt: { raw: "not public" },
+      model: 42,
+      reasoningEffort: false,
+    },
+  });
+  assert.deepEqual(started, [
+    {
+      delta: {
+        tool_calls: [
+          {
+            index: 0,
+            id: "collab_wait",
+            type: "function",
+            function: { name: "wait", arguments: '{"tool":"wait"}' },
+          },
+        ],
+      },
+    },
+  ]);
+
+  const completed = normalizer.normalize("item/completed", {
+    threadId: "thread",
+    turnId: "turn",
+    item: {
+      type: "collabAgentToolCall",
+      id: "collab_wait",
+      tool: "wait",
+      receiverThreadIds: ["thr_child", 42, "thr_other"],
+      agentsStates: {
+        thr_child: {
+          status: "completed",
+          message: "child nonce",
+          providerPayload: { private: true },
+        },
+        thr_other: { message: null },
+        unlisted: { status: "completed", message: "must stay private" },
+        malformed: { status: 42, message: { raw: "not public" } },
+        scalar: "not public",
+      },
+    },
+  });
+  assert.deepEqual(completed, [
+    {
+      delta: {
+        tool_results: [
+          {
+            id: "collab_wait",
+            type: "function",
+            function: { name: "wait", arguments: '{"tool":"wait"}' },
+            result: {
+              status: "completed",
+              content: {
+                receiverThreadIds: ["thr_child", "thr_other"],
+                agentsStates: {
+                  thr_child: {
+                    status: "completed",
+                    message: "child nonce",
+                  },
+                  thr_other: { message: null },
+                },
+              },
+            },
+          },
+        ],
+      },
+    },
+  ]);
+});
+
 test("hides replayed dynamic lifecycle items without changing continuation finish reason", () => {
   /** Builds a generated dynamic-tool lifecycle notification for this turn. */
   const replayedDynamicTool = (method: "item/started" | "item/completed") => {
@@ -2068,6 +2204,79 @@ test("reports usage for every model request behind one response", async () => {
       prompt_tokens_details: { cached_tokens: 0 },
       completion_tokens_details: { reasoning_tokens: 0 },
     });
+  });
+});
+
+test("returns sanitized collab-agent lifecycle output in the aggregate response", async () => {
+  await withChatServer(async (origin, _proxy, useTransport) => {
+    useTransport(fakeAppServer({ collabAgentLifecycle: true }));
+    const response = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        messages: [{ role: "user", content: "spawn one child" }],
+      }),
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      choices: Array<{
+        finish_reason: string;
+        message: {
+          tool_calls?: Array<{
+            function: { name: string; arguments: string };
+          }>;
+          tool_results?: Array<{
+            result: { content?: Record<string, unknown> };
+          }>;
+        };
+      }>;
+    };
+    const choice = body.choices[0]!;
+    assert.equal(choice.finish_reason, "stop");
+    assert.equal(choice.message.tool_calls?.length, 1);
+    assert.deepEqual(
+      choice.message.tool_calls?.[0]?.function.name,
+      "spawnAgent",
+    );
+    assert.deepEqual(
+      JSON.parse(choice.message.tool_calls?.[0]?.function.arguments ?? "null"),
+      {
+        tool: "spawnAgent",
+        prompt: "Return the nonce.",
+        model: null,
+        reasoningEffort: null,
+        receiverThreadIds: ["thr_child"],
+      },
+    );
+    assert.deepEqual(choice.message.tool_results, [
+      {
+        id: "collab_spawn",
+        type: "function",
+        function: {
+          name: "spawnAgent",
+          arguments:
+            '{"tool":"spawnAgent","prompt":"Return the nonce.","model":null,"reasoningEffort":null,"receiverThreadIds":["thr_child"]}',
+        },
+        result: {
+          status: "completed",
+          content: {
+            receiverThreadIds: ["thr_child"],
+            agentsStates: {
+              thr_child: {
+                status: "completed",
+                message: "contract-child-nonce",
+              },
+            },
+          },
+        },
+      },
+    ]);
+    assert.equal(
+      "senderThreadId" in
+        (choice.message.tool_results?.[0]?.result.content ?? {}),
+      false,
+    );
   });
 });
 

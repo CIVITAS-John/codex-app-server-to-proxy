@@ -86,5 +86,6 @@ Implemented on 2026-07-12:
 - Added synthetic exposed-event and rejected-continuation fixtures.
 - Added deterministic, type-checked Vitest coverage split between protocol contract, continuation behavior, and offline spike responsibilities. The continuation tests prove that rejections do not mutate state or start a replacement thread.
 - Added a zero-model-call disposable offline spike for text streaming, a two-request tool round trip, and restart/resume mechanics.
+- The expanded opt-in live contract counts distinct upstream completions from `rawResponse/completed`, not proxy `turn/start` calls. The suite-wide counter must include parent and child thread IDs across transport restarts and separate live backends, and spawning fails verification if child raw completions are unavailable.
 
 Stage 01 is complete as an offline contract gate. Browser login/fallback, actual dynamic-request lifetime, per-request web-search enforcement, persisted app-server restart, and branching fidelity remain unproven. The compatibility contract rejects or withholds these behaviors until the Stage 03 opt-in live spike records the expected observation, cleanup, output cap, and call count within its four-call guard.

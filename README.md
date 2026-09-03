@@ -13,6 +13,7 @@ npx --yes codex-openai-proxy@next serve --root /absolute/path/to/project
 ```
 
 - `--root` is the narrowest directory tree Codex may work in (defaults to the launch directory).
+- Child-agent spawning is disabled by default. Pass `--subagents true` to opt in for the whole proxy process.
 - The proxy listens at `http://127.0.0.1:8787` and starts the ChatGPT login flow on first use.
 - Or install globally: `npm install --global codex-openai-proxy@next`, then `codex-openai-proxy serve --root ...`.
 - Run `codex-openai-proxy --help` for all server, timeout, logging, and state options.
@@ -163,16 +164,18 @@ Pass the `id` of the newest completed response as top-level `previous_response_i
 
 Responses can include two nonstandard fields on the assistant delta/message:
 
-| Field          | Contents                                                                                      |
-| -------------- | --------------------------------------------------------------------------------------------- |
-| `reasoning`    | Codex's reasoning summary (string)                                                            |
-| `tool_results` | Status/results of Codex's internal activity (commands, file changes, MCP calls, web searches) |
+| Field          | Contents                                                                                                           |
+| -------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `reasoning`    | Codex's reasoning summary (string)                                                                                 |
+| `tool_results` | Status/results of Codex's internal activity (commands, file changes, MCP calls, web searches, collaboration calls) |
 
 Reasoning deltas stream as they arrive. If app-server supplies reasoning only in
 the completed item, the proxy emits that final text without repeating any
 prefix already streamed for the same item.
 
 Internal activity also appears as function-shaped entries in `tool_calls`. These are **observational** — Codex already executed them. Do not execute them, and do not send tool results for them; they never cause `finish_reason: "tool_calls"`. Only your own client-defined functions suspend the turn and require `role: "tool"` follow-ups.
+
+For collaboration calls, `tool_results[].result.content` can include sanitized `receiverThreadIds` and `agentsStates` entries containing only child status and message fields. Sender thread IDs and provider-native payloads are not exposed.
 
 If your client replays a prior assistant message verbatim in a fresh request, the proxy strips these observational fields automatically. Assistant messages may also carry `reasoning_content`, the field OpenAI-compatible clients such as the Vercel AI SDK write instead of `reasoning`; it is accepted and stripped the same way. Either field is response-only — sending it on a non-assistant message, or as anything other than a string, is rejected.
 
@@ -199,6 +202,8 @@ Per-request Codex controls live under a nonstandard top-level `x_codex` object:
 | `web_search` | `disabled`, `cached`, `indexed`, `live`                          | `disabled`              | Applied per Codex thread                                                          |
 
 The `disabled` sandbox provides no built-in shell or local filesystem reads or writes through an execution environment. The proxy realizes it as Codex's native `read-only` sandbox plus `environments: []`, so managed policy requirements must allow `read-only` for a request to use `disabled`. Client-provided tools and hosted web search, when explicitly enabled, remain separate capabilities.
+
+Multi-agent availability is app-server process configuration, not a Chat Completions request policy. The proxy starts app-server with subagents disabled unless the operator passes `--subagents true`; the startup log records the effective value as `subagents_enabled`. The proxy exposes no per-request `x_codex` multi-agent field, so enabling `read-only`, `workspace-write`, or web search does not itself enable child spawning.
 
 The JSON Schema ships with the package at `protocol/schemas/x-codex.schema.json`.
 

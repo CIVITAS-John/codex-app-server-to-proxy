@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, test } from "vitest";
 import { parseSseFrames } from "./http.js";
 
 /** Model fixed by the repository's live-test cost policy. */
 export const CONTRACT_MODEL = "gpt-5.6-luna";
 
-/** Hard model-turn guard with one retry above the normal eleven live calls. */
-export const MAX_LIVE_MODEL_CALLS = 12;
+/** Hard provider-response ceiling shared by every paid live backend. */
+export const MAX_LIVE_PROVIDER_CALLS = 24;
 
 /**
  * Ordered tool batches used to require one parallel pair followed by two
@@ -28,7 +30,7 @@ export const OBSERVATION_FIXTURE = ".codex-contract-observation";
 export const OBSERVATION_COMMAND = `cat ${OBSERVATION_FIXTURE}`;
 
 /** Maximum model turns allowed by the comprehensive offline contract. */
-const MAX_OFFLINE_MODEL_CALLS = 14;
+const MAX_OFFLINE_PROVIDER_CALLS = 18;
 
 /**
  * Maximum model turns allowed through the third tool-result continuation:
@@ -98,6 +100,10 @@ export interface ChatContractBackend {
   origin: string;
   root: string;
   observationToken: string;
+  writePath: string;
+  providerCalls(): { parent: number; child: number; total: number };
+  assertChildProviderCallsObserved(childThreadId: string): void;
+  /** Compatibility count retained for deterministic turn-oriented fakes. */
   modelCalls(): number;
   resumeCalls(): number;
   waitForInterrupt(): Promise<void>;
@@ -114,6 +120,9 @@ export type ChatContractScenario =
   | "role-history-sse"
   | "dynamic-tool-restart"
   | "disabled-sandbox-chat"
+  | "filesystem-read-write"
+  | "live-web-search"
+  | "spawn-child-agent"
   | "safe-policy-built-in-continuation"
   | "invalid-input"
   | "disconnect";
@@ -121,7 +130,7 @@ export type ChatContractScenario =
 /** Selects named scenarios and a suite-wide model-call guard. */
 export interface ChatContractOptions {
   scenarios?: readonly ChatContractScenario[];
-  maxModelCalls?: number;
+  maxProviderCalls?: number;
   /**
    * Reports wall-clock timings for the tool-call response and its
    * continuation. Live-only: numbers alone, to keep evidence of the real
@@ -136,6 +145,9 @@ const OFFLINE_SCENARIOS: readonly ChatContractScenario[] = [
   "role-history-sse",
   "dynamic-tool-restart",
   "disabled-sandbox-chat",
+  "filesystem-read-write",
+  "live-web-search",
+  "spawn-child-agent",
   "safe-policy-built-in-continuation",
   "invalid-input",
   "disconnect",
@@ -150,7 +162,8 @@ export function registerChatContract(
   describe.sequential(`Chat Completions contract (${name})`, () => {
     let backend: ChatContractBackend | undefined;
     const scenarios = new Set(options.scenarios ?? OFFLINE_SCENARIOS);
-    const maxModelCalls = options.maxModelCalls ?? MAX_OFFLINE_MODEL_CALLS;
+    const maxProviderCalls =
+      options.maxProviderCalls ?? MAX_OFFLINE_PROVIDER_CALLS;
 
     beforeAll(async () => {
       backend = await startBackend();
@@ -158,11 +171,15 @@ export function registerChatContract(
 
     afterAll(async () => {
       if (!backend) return;
-      const modelCalls = backend.modelCalls();
-      await backend.close();
+      let providerCalls: number;
+      try {
+        providerCalls = backend.providerCalls().total;
+      } finally {
+        await backend.close();
+      }
       assert.ok(
-        modelCalls <= maxModelCalls,
-        `contract exceeded ${maxModelCalls} model calls`,
+        providerCalls <= maxProviderCalls,
+        `contract exceeded ${maxProviderCalls} provider calls`,
       );
     }, 20_000);
 
@@ -172,8 +189,8 @@ export function registerChatContract(
       signal?: AbortSignal,
     ): Promise<Response> => {
       assert.ok(
-        (backend?.modelCalls() ?? 0) < maxModelCalls,
-        `contract attempted more than ${maxModelCalls} model calls`,
+        (backend?.providerCalls().total ?? 0) < maxProviderCalls,
+        `contract attempted more than ${maxProviderCalls} provider calls`,
       );
       return fetch(`${backend!.origin}/v1/chat/completions`, {
         method: "POST",
@@ -772,6 +789,245 @@ export function registerChatContract(
         );
       }, 130_000);
 
+    if (scenarios.has("filesystem-read-write"))
+      test("reads and writes only the isolated workspace through built-in tools", async () => {
+        await assert.rejects(readFile(backend!.writePath, "utf8"), {
+          code: "ENOENT",
+        });
+        const response = await chat({
+          model: CONTRACT_MODEL,
+          messages: [
+            {
+              role: "user",
+              content: `This is contract-filesystem-read-write. Use exactly one commandExecution to read ${JSON.stringify(resolve(backend!.root, OBSERVATION_FIXTURE))}. Then use apply_patch, not a shell write, to create ${JSON.stringify(backend!.writePath)} as one line containing exactly the value you read, with trailing whitespace removed. Do not repeat that value in assistant text. Do not use web search or collaboration tools. Reply briefly after both finish.`,
+            },
+          ],
+          x_codex: {
+            cwd: backend!.root,
+            sandbox: "workspace-write",
+            web_search: "disabled",
+          },
+        });
+        const raw = await response.text();
+        assert.equal(response.status, 200, diagnostic(raw));
+        const choice = parseJson<ToolCompletion>(raw, "filesystem tools")
+          .choices?.[0];
+        assert.equal(choice?.finish_reason, "stop");
+        const calls = choice?.message?.tool_calls ?? [];
+        const results = choice?.message?.tool_results ?? [];
+        const commands = calls.filter(
+          (call) => call.function.name === "commandExecution",
+        );
+        const changes = calls.filter(
+          (call) => call.function.name === "fileChange",
+        );
+        assert.equal(commands.length, 1, "expected exactly one command read");
+        assert.equal(
+          changes.length,
+          1,
+          "expected exactly one apply_patch change",
+        );
+        assert.ok(
+          results.some(
+            (result) =>
+              result.id === commands[0]!.id &&
+              result.result?.status === "completed" &&
+              result.result.exit_code === 0 &&
+              typeof result.result.content === "string" &&
+              result.result.content.trim() === backend!.observationToken,
+          ),
+          "commandExecution did not return the exact read nonce",
+        );
+        const changeArguments = parseJson<{
+          changes?: Array<{ path?: string }>;
+        }>(changes[0]!.function.arguments, "fileChange arguments");
+        assert.ok(
+          changeArguments.changes?.some(
+            (change) =>
+              typeof change.path === "string" &&
+              resolve(backend!.root, change.path) === backend!.writePath,
+          ),
+          "fileChange did not target the isolated output path",
+        );
+        assert.ok(
+          results.some(
+            (result) =>
+              result.id === changes[0]!.id &&
+              result.result?.status === "completed",
+          ),
+          "fileChange omitted its completed result",
+        );
+        assert.equal(
+          calls.some((call) =>
+            [
+              "webSearch",
+              "spawnAgent",
+              "sendInput",
+              "resumeAgent",
+              "wait",
+              "closeAgent",
+            ].includes(call.function.name),
+          ),
+          false,
+          "filesystem scenario exposed web or collaboration activity",
+        );
+        assert.equal(
+          choice?.message?.content?.includes(backend!.observationToken),
+          false,
+          "filesystem scenario repeated the read nonce in assistant text",
+        );
+        assert.equal(
+          await readFile(backend!.writePath, "utf8"),
+          `${backend!.observationToken}\n`,
+        );
+      }, 130_000);
+
+    if (scenarios.has("live-web-search"))
+      test("exposes a correlated live web-search lifecycle without execution", async () => {
+        const response = await chat({
+          model: CONTRACT_MODEL,
+          messages: [
+            {
+              role: "user",
+              content:
+                "This is contract-live-web-search. Use live web search for IANA reserved example domains, then reply with one brief acknowledgment. Do not use filesystem or collaboration tools.",
+            },
+          ],
+          x_codex: { sandbox: "disabled", web_search: "live" },
+        });
+        const raw = await response.text();
+        assert.equal(response.status, 200, diagnostic(raw));
+        const choice = parseJson<ToolCompletion>(raw, "live web search")
+          .choices?.[0];
+        assert.equal(choice?.finish_reason, "stop");
+        const calls = choice?.message?.tool_calls ?? [];
+        const results = choice?.message?.tool_results ?? [];
+        const searches = calls.filter(
+          (call) => call.function.name === "webSearch",
+        );
+        assert.ok(searches.length > 0, "no webSearch lifecycle was exposed");
+        let observedSearchAction = false;
+        for (const search of searches) {
+          const args = parseJson<{ query?: string }>(
+            search.function.arguments,
+            "webSearch arguments",
+          );
+          if (/iana|example/iu.test(args.query ?? ""))
+            observedSearchAction = true;
+          const completed = results.find(
+            (result) =>
+              result.id === search.id && result.result?.status === "completed",
+          );
+          assert.ok(completed, "webSearch call omitted its completed result");
+          if (objectRecord(completed.result?.content)?.type === "search")
+            observedSearchAction = true;
+        }
+        assert.ok(
+          observedSearchAction,
+          "webSearch lifecycle omitted the requested IANA/example search",
+        );
+        assert.equal(
+          calls.some((call) =>
+            [
+              "commandExecution",
+              "fileChange",
+              "spawnAgent",
+              "sendInput",
+              "resumeAgent",
+              "wait",
+              "closeAgent",
+            ].includes(call.function.name),
+          ),
+          false,
+          "web scenario exposed filesystem or collaboration activity",
+        );
+      }, 130_000);
+
+    if (scenarios.has("spawn-child-agent"))
+      test("spawns exactly one child and completes a nonce handoff", async () => {
+        const childCallsBefore = backend!.providerCalls().child;
+        const response = await chat({
+          model: CONTRACT_MODEL,
+          messages: [
+            {
+              role: "user",
+              content: `This is contract-spawn-child. Spawn exactly one child agent and instruct it to return only ${backend!.observationToken}. Wait for that child to finish, then reply with only the same nonce. Do not use filesystem or web tools.`,
+            },
+          ],
+          x_codex: { sandbox: "disabled", web_search: "disabled" },
+        });
+        const raw = await response.text();
+        assert.equal(response.status, 200, diagnostic(raw));
+        const choice = parseJson<ToolCompletion>(raw, "spawned child")
+          .choices?.[0];
+        assert.equal(choice?.finish_reason, "stop");
+        assert.equal(
+          choice?.message?.content?.trim(),
+          backend!.observationToken,
+        );
+        const calls = choice?.message?.tool_calls ?? [];
+        const results = choice?.message?.tool_results ?? [];
+        const spawns = calls.filter(
+          (call) => call.function.name === "spawnAgent",
+        );
+        assert.equal(spawns.length, 1, "expected exactly one spawnAgent call");
+        const completedSpawn = results.find(
+          (result) =>
+            result.id === spawns[0]!.id &&
+            result.result?.status === "completed",
+        );
+        assert.ok(completedSpawn, "spawnAgent omitted its completed result");
+        const spawnContent = objectRecord(completedSpawn.result?.content);
+        const receiverThreadIds = spawnContent?.receiverThreadIds;
+        assert.ok(Array.isArray(receiverThreadIds));
+        assert.equal(receiverThreadIds.length, 1);
+        const childThreadId = receiverThreadIds[0];
+        assert.equal(
+          typeof childThreadId,
+          "string",
+          "spawnAgent omitted its child thread id",
+        );
+        assert.ok(
+          results.some((result) => {
+            const content = objectRecord(result.result?.content);
+            const states = objectRecord(content?.agentsStates);
+            const child = objectRecord(states?.[childThreadId]);
+            return (
+              child?.status === "completed" &&
+              child.message === backend!.observationToken
+            );
+          }),
+          "completed child state omitted the nonce handoff",
+        );
+        assert.equal(
+          calls.every((call) =>
+            ["spawnAgent", "wait"].includes(call.function.name),
+          ),
+          true,
+          "spawn scenario exposed unexpected internal activity",
+        );
+        const observedReceiverIds = new Set(
+          results.flatMap((result) => {
+            const content = objectRecord(result.result?.content);
+            return Array.isArray(content?.receiverThreadIds)
+              ? content.receiverThreadIds.filter(
+                  (value): value is string => typeof value === "string",
+                )
+              : [];
+          }),
+        );
+        assert.deepEqual(
+          [...observedReceiverIds],
+          [childThreadId],
+          "spawn scenario referenced an unexpected child thread",
+        );
+        backend!.assertChildProviderCallsObserved(childThreadId);
+        assert.ok(
+          backend!.providerCalls().child > childCallsBefore,
+          "spawn scenario observed no new child provider completion",
+        );
+      }, 130_000);
+
     if (scenarios.has("invalid-input"))
       test("rejects invalid requests before starting model work", async () => {
         const callsBefore = backend!.modelCalls();
@@ -976,4 +1232,11 @@ function parseJson<T>(value: string, context: string): T {
 /** Reports only response size so live failures cannot echo captured content. */
 function diagnostic(value: string): string {
   return `response body was ${Buffer.byteLength(value)} bytes`;
+}
+
+/** Narrows one untrusted extension value to a non-array object. */
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
 }

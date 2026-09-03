@@ -508,9 +508,22 @@ function internalToolShape(item: Record<string, unknown>): {
     "arguments",
     "query",
     "action",
-    "prompt",
   ])
     if (item[key] !== undefined) details[key] = item[key];
+  if (item.type === "collabAgentToolCall") {
+    if (typeof item.prompt === "string" || item.prompt === null)
+      details.prompt = item.prompt;
+    if (typeof item.model === "string" || item.model === null)
+      details.model = item.model;
+    if (
+      typeof item.reasoningEffort === "string" ||
+      item.reasoningEffort === null
+    )
+      details.reasoningEffort = item.reasoningEffort;
+    const receiverThreadIds = stringArray(item.receiverThreadIds);
+    if (receiverThreadIds !== undefined)
+      details.receiverThreadIds = receiverThreadIds;
+  }
   return {
     name: typeof item.tool === "string" ? item.tool : kind,
     arguments: JSON.stringify(details),
@@ -528,7 +541,10 @@ function internalToolResult(
   item: Record<string, unknown>,
   call: NormalizedToolCall,
 ): NormalizedToolResult {
-  const result = item.result ?? item.aggregatedOutput ?? item.action;
+  const result =
+    item.type === "collabAgentToolCall"
+      ? collabAgentResultContent(item)
+      : (item.result ?? item.aggregatedOutput ?? item.action);
   return {
     id: String(item.id),
     type: "function",
@@ -542,6 +558,55 @@ function internalToolResult(
         : {}),
     },
   };
+}
+
+/** Selects the documented child lifecycle fields from a collab result. */
+function collabAgentResultContent(
+  item: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const receiverThreadIds = stringArray(item.receiverThreadIds);
+  const agentsStates = normalizedAgentStates(
+    item.agentsStates,
+    new Set(receiverThreadIds ?? []),
+  );
+  if (receiverThreadIds === undefined && agentsStates === undefined)
+    return undefined;
+  return {
+    ...(receiverThreadIds !== undefined ? { receiverThreadIds } : {}),
+    ...(agentsStates !== undefined ? { agentsStates } : {}),
+  };
+}
+
+/** Retains only string entries from a protocol string-array field. */
+function stringArray(value: unknown): string[] | undefined {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : undefined;
+}
+
+/** Retains only documented status/message fields from child-agent states. */
+function normalizedAgentStates(
+  value: unknown,
+  receiverThreadIds: ReadonlySet<string>,
+): Record<string, { status?: string; message?: string | null }> | undefined {
+  const states = record(value);
+  if (!states) return undefined;
+  return Object.fromEntries(
+    Object.entries(states).flatMap(([threadId, rawState]) => {
+      if (!receiverThreadIds.has(threadId)) return [];
+      const state = record(rawState);
+      if (!state) return [];
+      const normalized = {
+        ...(typeof state.status === "string" ? { status: state.status } : {}),
+        ...(typeof state.message === "string" || state.message === null
+          ? { message: state.message }
+          : {}),
+      };
+      return Object.keys(normalized).length > 0
+        ? ([[threadId, normalized]] as const)
+        : [];
+    }),
+  );
 }
 
 /** Maps correlated item deltas to an in-progress tool result. */

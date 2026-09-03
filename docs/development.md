@@ -64,7 +64,9 @@ The recorded floors describe a complete offline run, so they are enforced only w
 
 ## Live contract tests
 
-The live suite exercises streaming role history, a required two-call parallel client-tool batch followed by three consecutive full-history function-tool result continuations, completed-thread continuation after restarting the proxy and app-server, explicit read-only/disabled-web policy, default disabled-sandbox chat without execution tools, bounded built-in tool observation, and continuation after that tool information. Its app-server uses an ephemeral proxy-style Codex home and must load the temporary regular-Responses catalog before any model call. It runs serially, caps captured diagnostics, uses only `gpt-5.6-luna`, normally makes eleven model calls, and attempts at most twelve:
+The live suite runs serially with only `gpt-5.6-luna`, caps captured diagnostics, and remains excluded from default tests. In addition to role-history, dynamic-tool, restart, and disabled-capability coverage, its opt-in scenarios exercise a platform-neutral `workspace-write` turn that reads a random fixture through `commandExecution`, writes the same nonce through `fileChange`/`apply_patch`, and verifies the file on disk; a live `webSearch` turn with filesystem and agents unavailable; and exactly one spawned child that returns a nonce to its parent and reaches a completed `agentsStates` entry. The file/web app-server starts with subagents disabled; the separate spawn app-server starts with them explicitly enabled. This process-level separation proves filesystem access does not imply spawning and adds no per-request `x_codex` multi-agent field.
+
+The hard cost guard is 24 distinct upstream model responses, deduplicated by `(threadId, responseId)` from `rawResponse/completed` across parent and child threads and retained across app-server restarts and both live backends. Here, the provider is the upstream model service used by app-server; one proxy-issued `turn/start` can produce several of these responses around tool calls, and child threads produce their own. The guard interrupts further work at the limit. A spawn run fails rather than undercounting if the app-server does not expose the child thread's raw completion. No expected normal count is stated until an authorized live calibration records one.
 
 ```sh
 npm run test:live
@@ -72,7 +74,7 @@ npm run test:live
 
 Running that dedicated command is the explicit local opt-in. It uses an existing ChatGPT login when available and otherwise preserves the normal interactive login fallback in a TTY. The default executable is owned by the pinned npm package. Set `CODEX_PATH` only for an explicit override; it must report the exact pinned contract version.
 
-The checked-in online workflow is manual, serial, protected by the `codex-live-tests` GitHub environment, and fails before dependency installation when `CODEX_ACCESS_TOKEN` is absent. Headless CI suppresses device-code URLs and one-time codes; credentials are never printed. The workflow is optional and never a required pull-request or release gate. Before either live path, state the expected normal total of eleven `gpt-5.6-luna` calls and the hard maximum of twelve.
+The checked-in online workflow is manual, serial, protected by the `codex-live-tests` GitHub environment, and fails before dependency installation when `CODEX_ACCESS_TOKEN` is absent. Headless CI suppresses device-code URLs and one-time codes; credentials are never printed. The workflow is optional and never a required pull-request or release gate. Before either live path, state the `gpt-5.6-luna` model and the hard maximum of 24 deduplicated upstream model responses; record the normal count only after live calibration.
 
 Transport framing, malformed-frame handling, process failures, and other fault injection remain fake-only because a live app-server cannot provide those cases deterministically.
 

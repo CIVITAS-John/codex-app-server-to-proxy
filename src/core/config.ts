@@ -29,6 +29,7 @@ export interface ServeOptions {
   port: number;
   root: string;
   codexPath: string;
+  subagentsEnabled: boolean;
   implicitToolContinuation: boolean;
   requestTimeoutMs: number;
   shutdownTimeoutMs: number;
@@ -230,6 +231,7 @@ export function parseServeOptions(
     "--port",
     "--root",
     "--codex-path",
+    "--subagents",
     "--implicit-tool-continuation",
     "--request-timeout",
     "--shutdown-timeout",
@@ -267,6 +269,10 @@ export function parseServeOptions(
     port: integer("--port", values.get("--port") ?? "8787", 0, 65_535),
     root,
     codexPath: values.get("--codex-path") ?? "codex",
+    subagentsEnabled: boolean(
+      "--subagents",
+      values.get("--subagents") ?? "false",
+    ),
     implicitToolContinuation: boolean(
       "--implicit-tool-continuation",
       values.get("--implicit-tool-continuation") ?? "true",

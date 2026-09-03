@@ -125,6 +125,7 @@ test("CLI recovery uses the documented bounded retry schedule", () => {
   assert.match(usage, /--request-timeout <duration>/);
   assert.match(usage, /--sync-auth <always\|never>/);
   assert.match(usage, /--login <auto\|device-code\|browser>/);
+  assert.match(usage, /--subagents <true\|false>.*default: false/);
   // Removed deadlines must not resurface in help: dynamic tool calls end
   // their turn immediately, so no tool or usage wait remains to configure.
   assert.equal(usage.includes("--tool-timeout"), false);
@@ -223,6 +224,8 @@ test("CLI logs configured paths plainly in initial startup failures", async () =
         ".",
         "--state-dir",
         join(directory, "state"),
+        "--codex-home",
+        join(directory, "codex-home"),
         "--codex-path",
         missingCodex,
       ],
@@ -344,6 +347,7 @@ testWithPosixExecutable(
       assert.equal(signal, null);
       assert.match(stderr, /shutdown_complete/);
       assert.match(stderr, /"default_sandbox":"disabled"/);
+      assert.match(stderr, /"subagents_enabled":false/);
       assert.match(stderr, /"default_web_search":"disabled"/);
       assert.equal(
         stderr.includes(`"proxy_version":"${CLIENT_VERSION}"`),

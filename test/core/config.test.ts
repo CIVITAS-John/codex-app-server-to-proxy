@@ -94,6 +94,22 @@ test("login validation defaults to auto and accepts supported modes", () => {
   );
 });
 
+test("subagents default off and require an explicit boolean opt-in", () => {
+  assert.equal(parseServeOptions([]).subagentsEnabled, false);
+  assert.equal(
+    parseServeOptions(["--subagents", "true"]).subagentsEnabled,
+    true,
+  );
+  assert.equal(
+    parseServeOptions(["--subagents=false"]).subagentsEnabled,
+    false,
+  );
+  assert.throws(
+    () => parseServeOptions(["--subagents", "yes"]),
+    /--subagents must be true or false\./,
+  );
+});
+
 test("login interactivity follows the selected mode", () => {
   for (const [mode, stderrIsTty, expected] of [
     ["auto", true, true],
@@ -154,6 +170,7 @@ test("serve options have safe documented defaults and reject ambiguity", async (
     assert.equal(parsed.host, "127.0.0.1");
     assert.equal(parsed.port, 8787);
     assert.equal(parsed.root, project);
+    assert.equal(parsed.subagentsEnabled, false);
     assert.equal(parsed.implicitToolContinuation, true);
     assert.equal(parsed.syncAuth, "always");
     assert.equal(parsed.loginMode, "auto");
