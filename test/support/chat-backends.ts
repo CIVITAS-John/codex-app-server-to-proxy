@@ -60,12 +60,28 @@ import {
 export async function startFakeChatBackend(
   log: Logger = silentLogger,
 ): Promise<ChatContractBackend> {
+  return startConfiguredFakeChatBackend(false, log);
+}
+
+/** Starts a fake whose filesystem turn needs one corrective write continuation. */
+export async function startFakeFilesystemCorrectionChatBackend(
+  log: Logger = silentLogger,
+): Promise<ChatContractBackend> {
+  return startConfiguredFakeChatBackend(true, log);
+}
+
+/** Starts one deterministic fake with optional first-turn write omission. */
+async function startConfiguredFakeChatBackend(
+  deferFilesystemWrite: boolean,
+  log: Logger,
+): Promise<ChatContractBackend> {
   const environment = await createContractEnvironment();
   return startRestartableBackend(environment, async () => {
     const scripted = createScriptedTransport(
       environment.root,
       environment.observationToken,
       environment.writePath,
+      deferFilesystemWrite,
     );
     return startProxy(
       scripted.rpc,
@@ -443,6 +459,7 @@ function createScriptedTransport(
   root: string,
   observationToken: string,
   writePath: string,
+  deferFilesystemWrite = false,
 ): ScriptedTransport {
   let nextThread = 0;
   let nextTurn = 0;
@@ -601,6 +618,70 @@ function createScriptedTransport(
             }),
           );
         };
+        /** Emits one completed file-change lifecycle and performs its write. */
+        const sendFilesystemWrite = (): void => {
+          const change = {
+            path: writePath,
+            kind: { type: "add" as const },
+            diff: `+${observationToken}\n`,
+          };
+          send(
+            protocolNotification({
+              method: "item/started",
+              params: {
+                threadId,
+                turnId,
+                startedAtMs: Date.now(),
+                item: {
+                  type: "fileChange",
+                  id: "contract-filesystem-write",
+                  changes: [change],
+                  status: "inProgress",
+                },
+              },
+            }),
+          );
+          void writeFile(writePath, `${observationToken}\n`, {
+            encoding: "utf8",
+            flag: "wx",
+            mode: 0o600,
+          })
+            .then(() => {
+              send(
+                protocolNotification({
+                  method: "item/completed",
+                  params: {
+                    threadId,
+                    turnId,
+                    completedAtMs: Date.now(),
+                    item: {
+                      type: "fileChange",
+                      id: "contract-filesystem-write",
+                      changes: [change],
+                      status: "completed",
+                    },
+                  },
+                }),
+              );
+              send(
+                protocolNotification({
+                  method: "item/agentMessage/delta",
+                  params: {
+                    threadId,
+                    turnId,
+                    itemId: "filesystem-message",
+                    delta: "filesystem-complete",
+                  },
+                }),
+              );
+              complete(threadId, turnId);
+            })
+            .catch((error: unknown) =>
+              scripted.close(
+                error instanceof Error ? error : new Error(String(error)),
+              ),
+            );
+        };
         if (prompt.includes("contract-disabled-sandbox")) {
           send(
             protocolNotification({
@@ -667,67 +748,27 @@ function createScriptedTransport(
             }),
           );
           sendUsage(threadId, turnId);
-          const change = {
-            path: writePath,
-            kind: { type: "add" as const },
-            diff: `+${observationToken}\n`,
-          };
-          send(
-            protocolNotification({
-              method: "item/started",
-              params: {
-                threadId,
-                turnId,
-                startedAtMs: Date.now(),
-                item: {
-                  type: "fileChange",
-                  id: "contract-filesystem-write",
-                  changes: [change],
-                  status: "inProgress",
+          if (deferFilesystemWrite) {
+            send(
+              protocolNotification({
+                method: "item/agentMessage/delta",
+                params: {
+                  threadId,
+                  turnId,
+                  itemId: "filesystem-write-omitted-message",
+                  delta: "read-complete",
                 },
-              },
-            }),
-          );
-          void writeFile(writePath, `${observationToken}\n`, {
-            encoding: "utf8",
-            flag: "wx",
-            mode: 0o600,
-          })
-            .then(() => {
-              send(
-                protocolNotification({
-                  method: "item/completed",
-                  params: {
-                    threadId,
-                    turnId,
-                    completedAtMs: Date.now(),
-                    item: {
-                      type: "fileChange",
-                      id: "contract-filesystem-write",
-                      changes: [change],
-                      status: "completed",
-                    },
-                  },
-                }),
-              );
-              send(
-                protocolNotification({
-                  method: "item/agentMessage/delta",
-                  params: {
-                    threadId,
-                    turnId,
-                    itemId: "filesystem-message",
-                    delta: "filesystem-complete",
-                  },
-                }),
-              );
-              complete(threadId, turnId);
-            })
-            .catch((error: unknown) =>
-              scripted.close(
-                error instanceof Error ? error : new Error(String(error)),
-              ),
+              }),
             );
+            complete(threadId, turnId);
+            return;
+          }
+          sendFilesystemWrite();
+          return;
+        }
+        if (prompt.includes("Complete the missing mandatory write now")) {
+          sendUsage(threadId, turnId);
+          sendFilesystemWrite();
           return;
         }
         if (prompt.includes("contract-live-web-search")) {
