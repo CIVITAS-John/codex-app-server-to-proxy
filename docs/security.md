@@ -38,4 +38,4 @@ Before release:
 1. Run `npm ci && npm run check` from a clean tree.
 2. Confirm protocol regeneration is clean and coverage excludes generated artifacts.
 3. Keep runtime log captures out of fixtures and workflow artifacts; use only synthetic placeholders in checked-in diagnostics and review any capture before sharing.
-4. Run the opt-in live suite only with explicit authorization; state `gpt-5.6-luna` and the hard maximum of 24 distinct upstream model responses first. Count deduplicated `(threadId, responseId)` pairs from `rawResponse/completed` across parent and child threads; fail if child completions cannot be observed.
+4. Run the opt-in live suite only with explicit authorization; state `gpt-5.6-luna` and the hard maximum of 32 distinct upstream model responses first. Count deduplicated `(threadId, responseId)` pairs from `rawResponse/completed` across parent and child threads; fail if child completions cannot be observed.

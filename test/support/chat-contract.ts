@@ -8,7 +8,7 @@ import { parseSseFrames } from "./http.js";
 export const CONTRACT_MODEL = "gpt-5.6-luna";
 
 /** Hard provider-response ceiling shared by every paid live backend. */
-export const MAX_LIVE_PROVIDER_CALLS = 24;
+export const MAX_LIVE_PROVIDER_CALLS = 32;
 
 /**
  * Ordered tool batches used to require one parallel pair followed by two
@@ -31,6 +31,9 @@ export const OBSERVATION_COMMAND = `cat ${OBSERVATION_FIXTURE}`;
 
 /** Maximum model turns allowed by the comprehensive offline contract. */
 const MAX_OFFLINE_PROVIDER_CALLS = 18;
+
+/** Live filesystem scenario budget for an initial request plus one correction. */
+const LIVE_FILESYSTEM_SCENARIO_TIMEOUT_MS = 260_000;
 
 /**
  * Maximum model turns allowed through the third tool-result continuation:
@@ -132,9 +135,9 @@ export interface ChatContractOptions {
   scenarios?: readonly ChatContractScenario[];
   maxProviderCalls?: number;
   /**
-   * Reports wall-clock timings for the tool-call response and its
-   * continuation. Live-only: numbers alone, to keep evidence of the real
-   * interrupt-flush latency in the run output.
+   * Reports live-only wall-clock timings for dynamic-tool continuations and
+   * filesystem request phases. Output stays numeric or enumerated so run logs
+   * keep timing evidence without exposing request content.
    */
   reportToolTimings?: boolean;
 }
@@ -791,128 +794,164 @@ export function registerChatContract(
       }, 130_000);
 
     if (scenarios.has("filesystem-read-write"))
-      test("reads and writes only the isolated workspace through built-in tools", async () => {
-        await assert.rejects(readFile(backend!.writePath, "utf8"), {
-          code: "ENOENT",
-        });
-        const policy = {
-          cwd: backend!.root,
-          sandbox: "workspace-write",
-          web_search: "disabled",
-        };
-        const relativeWritePath = relative(backend!.root, backend!.writePath);
-        const response = await chat({
-          model: CONTRACT_MODEL,
-          reasoning_effort: "medium",
-          messages: [
-            {
-              role: "user",
-              content: `This is contract-filesystem-read-write. Complete both mandatory steps before your final reply. Step 1: use exactly one commandExecution to read ${JSON.stringify(resolve(backend!.root, OBSERVATION_FIXTURE))}. Step 2: use apply_patch, not a shell write, to create the root-relative file ${JSON.stringify(relativeWritePath)} as one line containing exactly the value read in step 1, with trailing whitespace removed. Do not stop after step 1. Do not repeat the value in assistant text. Do not use web search or collaboration tools. Reply briefly only after both tool operations finish.`,
-            },
-          ],
-          x_codex: policy,
-        });
-        const raw = await response.text();
-        assert.equal(response.status, 200, diagnostic(raw));
-        const body = parseJson<ToolCompletion>(raw, "filesystem tools");
-        const choice = body.choices?.[0];
-        assert.equal(choice?.finish_reason, "stop");
-        const calls = [...(choice?.message?.tool_calls ?? [])];
-        const results = [...(choice?.message?.tool_results ?? [])];
-        const assistantContents = [choice?.message?.content ?? ""];
-        if (!calls.some((call) => call.function.name === "fileChange")) {
-          assert.match(body.id ?? "", /^chatcmpl_codex_/);
-          const correction = await chat({
+      test(
+        "reads and writes only the isolated workspace through built-in tools",
+        async () => {
+          const scenarioStarted = Date.now();
+          await assert.rejects(readFile(backend!.writePath, "utf8"), {
+            code: "ENOENT",
+          });
+          const policy = {
+            cwd: backend!.root,
+            sandbox: "workspace-write",
+            web_search: "disabled",
+          };
+          const relativeWritePath = relative(backend!.root, backend!.writePath);
+          logLiveFilesystemTiming(
+            options,
+            "initial",
+            "active",
+            scenarioStarted,
+          );
+          const response = await chat({
             model: CONTRACT_MODEL,
             reasoning_effort: "medium",
-            previous_response_id: body.id,
             messages: [
               {
                 role: "user",
-                content: `Complete the missing mandatory write now. Without running another command, use apply_patch to create the root-relative file ${JSON.stringify(relativeWritePath)} as one line containing exactly the prior command's stdout with trailing whitespace removed. Do not repeat that value in assistant text.`,
+                content: `This is contract-filesystem-read-write. Complete both mandatory steps before your final reply. Step 1: use exactly one commandExecution to read ${JSON.stringify(resolve(backend!.root, OBSERVATION_FIXTURE))}. Step 2: use apply_patch, not a shell write, to create the root-relative file ${JSON.stringify(relativeWritePath)} as one line containing exactly the value read in step 1, with trailing whitespace removed. Do not stop after step 1. Do not repeat the value in assistant text. Do not use web search or collaboration tools. Reply briefly only after both tool operations finish.`,
               },
             ],
             x_codex: policy,
           });
-          const correctionRaw = await correction.text();
-          assert.equal(correction.status, 200, diagnostic(correctionRaw));
-          const correctionChoice = parseJson<ToolCompletion>(
-            correctionRaw,
-            "filesystem write correction",
-          ).choices?.[0];
-          assert.equal(correctionChoice?.finish_reason, "stop");
-          calls.push(...(correctionChoice?.message?.tool_calls ?? []));
-          results.push(...(correctionChoice?.message?.tool_results ?? []));
-          assistantContents.push(correctionChoice?.message?.content ?? "");
-        }
-        const commands = calls.filter(
-          (call) => call.function.name === "commandExecution",
-        );
-        const changes = calls.filter(
-          (call) => call.function.name === "fileChange",
-        );
-        assert.equal(commands.length, 1, "expected exactly one command read");
-        assert.equal(
-          changes.length,
-          1,
-          "expected exactly one apply_patch change",
-        );
-        assert.ok(
-          results.some(
-            (result) =>
-              result.id === commands[0]!.id &&
-              result.result?.status === "completed" &&
-              result.result.exit_code === 0 &&
-              typeof result.result.content === "string" &&
-              result.result.content.trim() === backend!.observationToken,
-          ),
-          "commandExecution did not return the exact read nonce",
-        );
-        const changeArguments = parseJson<{
-          changes?: Array<{ path?: string }>;
-        }>(changes[0]!.function.arguments, "fileChange arguments");
-        assert.ok(
-          changeArguments.changes?.some(
-            (change) =>
-              typeof change.path === "string" &&
-              resolve(backend!.root, change.path) === backend!.writePath,
-          ),
-          "fileChange did not target the isolated output path",
-        );
-        assert.ok(
-          results.some(
-            (result) =>
-              result.id === changes[0]!.id &&
-              result.result?.status === "completed",
-          ),
-          "fileChange omitted its completed result",
-        );
-        assert.equal(
-          calls.some((call) =>
-            [
-              "webSearch",
-              "spawnAgent",
-              "sendInput",
-              "resumeAgent",
-              "wait",
-              "closeAgent",
-            ].includes(call.function.name),
-          ),
-          false,
-          "filesystem scenario exposed web or collaboration activity",
-        );
-        assert.equal(
-          assistantContents.some((content) =>
-            content?.includes(backend!.observationToken),
-          ),
-          false,
-          "filesystem scenario repeated the read nonce in assistant text",
-        );
-        assert.equal(
-          await readFile(backend!.writePath, "utf8"),
-          `${backend!.observationToken}\n`,
-        );
-      }, 130_000);
+          const raw = await response.text();
+          logLiveFilesystemTiming(
+            options,
+            "initial",
+            "completed",
+            scenarioStarted,
+          );
+          assert.equal(response.status, 200, diagnostic(raw));
+          const body = parseJson<ToolCompletion>(raw, "filesystem tools");
+          const choice = body.choices?.[0];
+          assert.equal(choice?.finish_reason, "stop");
+          const calls = [...(choice?.message?.tool_calls ?? [])];
+          const results = [...(choice?.message?.tool_results ?? [])];
+          const assistantContents = [choice?.message?.content ?? ""];
+          if (!calls.some((call) => call.function.name === "fileChange")) {
+            assert.match(body.id ?? "", /^chatcmpl_codex_/);
+            logLiveFilesystemTiming(
+              options,
+              "correction",
+              "active",
+              scenarioStarted,
+            );
+            const correction = await chat({
+              model: CONTRACT_MODEL,
+              reasoning_effort: "medium",
+              previous_response_id: body.id,
+              messages: [
+                {
+                  role: "user",
+                  content: `Complete the missing mandatory write now. Without running another command, use apply_patch to create the root-relative file ${JSON.stringify(relativeWritePath)} as one line containing exactly the prior command's stdout with trailing whitespace removed. Do not repeat that value in assistant text.`,
+                },
+              ],
+              x_codex: policy,
+            });
+            const correctionRaw = await correction.text();
+            logLiveFilesystemTiming(
+              options,
+              "correction",
+              "completed",
+              scenarioStarted,
+            );
+            assert.equal(correction.status, 200, diagnostic(correctionRaw));
+            const correctionChoice = parseJson<ToolCompletion>(
+              correctionRaw,
+              "filesystem write correction",
+            ).choices?.[0];
+            assert.equal(correctionChoice?.finish_reason, "stop");
+            calls.push(...(correctionChoice?.message?.tool_calls ?? []));
+            results.push(...(correctionChoice?.message?.tool_results ?? []));
+            assistantContents.push(correctionChoice?.message?.content ?? "");
+          } else {
+            logLiveFilesystemTiming(
+              options,
+              "correction",
+              "skipped",
+              scenarioStarted,
+            );
+          }
+          const commands = calls.filter(
+            (call) => call.function.name === "commandExecution",
+          );
+          const changes = calls.filter(
+            (call) => call.function.name === "fileChange",
+          );
+          assert.equal(commands.length, 1, "expected exactly one command read");
+          assert.equal(
+            changes.length,
+            1,
+            "expected exactly one apply_patch change",
+          );
+          assert.ok(
+            results.some(
+              (result) =>
+                result.id === commands[0]!.id &&
+                result.result?.status === "completed" &&
+                result.result.exit_code === 0 &&
+                typeof result.result.content === "string" &&
+                result.result.content.trim() === backend!.observationToken,
+            ),
+            "commandExecution did not return the exact read nonce",
+          );
+          const changeArguments = parseJson<{
+            changes?: Array<{ path?: string }>;
+          }>(changes[0]!.function.arguments, "fileChange arguments");
+          assert.ok(
+            changeArguments.changes?.some(
+              (change) =>
+                typeof change.path === "string" &&
+                resolve(backend!.root, change.path) === backend!.writePath,
+            ),
+            "fileChange did not target the isolated output path",
+          );
+          assert.ok(
+            results.some(
+              (result) =>
+                result.id === changes[0]!.id &&
+                result.result?.status === "completed",
+            ),
+            "fileChange omitted its completed result",
+          );
+          assert.equal(
+            calls.some((call) =>
+              [
+                "webSearch",
+                "spawnAgent",
+                "sendInput",
+                "resumeAgent",
+                "wait",
+                "closeAgent",
+              ].includes(call.function.name),
+            ),
+            false,
+            "filesystem scenario exposed web or collaboration activity",
+          );
+          assert.equal(
+            assistantContents.some((content) =>
+              content?.includes(backend!.observationToken),
+            ),
+            false,
+            "filesystem scenario repeated the read nonce in assistant text",
+          );
+          assert.equal(
+            await readFile(backend!.writePath, "utf8"),
+            `${backend!.observationToken}\n`,
+          );
+        },
+        LIVE_FILESYSTEM_SCENARIO_TIMEOUT_MS,
+      );
 
     if (scenarios.has("live-web-search"))
       test("exposes a correlated live web-search lifecycle without execution", async () => {
@@ -1155,6 +1194,19 @@ export function registerChatContract(
         assert.ok((body.choices?.[0]?.message?.content?.length ?? 0) > 0);
       }, 130_000);
   });
+}
+
+/** Reports sanitized live filesystem request phase timings when enabled. */
+function logLiveFilesystemTiming(
+  options: ChatContractOptions,
+  phase: "initial" | "correction",
+  state: "active" | "completed" | "skipped",
+  scenarioStarted: number,
+): void {
+  if (!options.reportToolTimings) return;
+  console.info(
+    `[live] filesystem phase=${phase} state=${state} elapsed_ms=${Date.now() - scenarioStarted}`,
+  );
 }
 
 /** Standard usage subset asserted by the shared contract. */
