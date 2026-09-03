@@ -184,6 +184,8 @@ Internal activity also appears as function-shaped entries in `tool_calls`. These
 
 For collaboration calls, `tool_results[].result.content` can include sanitized `receiverThreadIds` and `agentsStates` entries containing only child status and message fields. Sender thread IDs and provider-native payloads are not exposed.
 
+For `webSearch`, app-server may emit an incomplete start item. The proxy withholds that placeholder and uses the completed item's `query` and `action` as the observational call input. Search results, when app-server supplies them, are exposed as `tool_results[].result.content`; the action metadata is not misclassified as output.
+
 If your client replays a prior assistant message verbatim in a fresh request, the proxy strips these observational fields automatically. Assistant messages may also carry `reasoning_content`, the field OpenAI-compatible clients such as the Vercel AI SDK write instead of `reasoning`; it is accepted and stripped the same way. Either field is response-only — sending it on a non-assistant message, or as anything other than a string, is rejected.
 
 ### Select Codex policy

@@ -1776,7 +1776,12 @@ test("allocates unique call indexes across internal, dynamic, and orphan progres
     arguments: '{"id":1}',
   });
   const laterInternal = normalizer.normalize("item/started", {
-    item: { id: "later", type: "webSearch", query: "forecast" },
+    item: {
+      id: "later",
+      type: "webSearch",
+      query: "forecast",
+      action: { type: "search", query: "forecast", queries: null },
+    },
   });
   const orphan = normalizer.normalize("item/mcpToolCall/progress", {
     itemId: "orphan",
@@ -1798,6 +1803,70 @@ test("allocates unique call indexes across internal, dynamic, and orphan progres
     (orphan[0]?.delta?.tool_results as Array<{ id: string }>)[0]?.id,
     "orphan",
   );
+});
+
+test("uses completed web-search input and results instead of placeholders", () => {
+  const normalizer = new EventNormalizer();
+  assert.deepEqual(
+    normalizer.normalize("item/started", {
+      item: {
+        id: "search",
+        type: "webSearch",
+        query: "",
+        action: { type: "other" },
+        results: null,
+      },
+    }),
+    [],
+  );
+
+  const completed = normalizer.normalize("item/completed", {
+    item: {
+      id: "search",
+      type: "webSearch",
+      query: "Vox Populi Tradition Artistry next technology",
+      action: {
+        type: "search",
+        query: "Vox Populi Tradition Artistry next technology",
+        queries: ["Vox Populi Tradition Artistry next technology"],
+      },
+      results: [{ title: "synthetic result" }],
+      status: "completed",
+    },
+  });
+  assert.deepEqual(completed, [
+    {
+      delta: {
+        tool_calls: [
+          {
+            index: 0,
+            id: "search",
+            type: "function",
+            function: {
+              name: "webSearch",
+              arguments:
+                '{"query":"Vox Populi Tradition Artistry next technology","action":{"type":"search","query":"Vox Populi Tradition Artistry next technology","queries":["Vox Populi Tradition Artistry next technology"]}}',
+            },
+          },
+        ],
+        tool_results: [
+          {
+            id: "search",
+            type: "function",
+            function: {
+              name: "webSearch",
+              arguments:
+                '{"query":"Vox Populi Tradition Artistry next technology","action":{"type":"search","query":"Vox Populi Tradition Artistry next technology","queries":["Vox Populi Tradition Artistry next technology"]}}',
+            },
+            result: {
+              status: "completed",
+              content: [{ title: "synthetic result" }],
+            },
+          },
+        ],
+      },
+    },
+  ]);
 });
 
 test("does not repeat arguments when orphan progress precedes item start", () => {

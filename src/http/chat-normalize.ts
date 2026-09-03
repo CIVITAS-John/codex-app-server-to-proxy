@@ -316,6 +316,16 @@ export class EventNormalizer {
         return method === "item/completed"
           ? this.#completedReasoning(item)
           : [];
+      if (
+        item.type === "webSearch" &&
+        method === "item/started" &&
+        !webSearchInputReady(item)
+      ) {
+        // app-server may start web search with a placeholder query/action and
+        // only fill in the actual request on item/completed. Do not publish
+        // placeholder arguments that telemetry consumers will treat as input.
+        return [];
+      }
       return [
         this.#internalItem(
           method === "item/started" ? "started" : "completed",
@@ -530,6 +540,13 @@ function internalToolShape(item: Record<string, unknown>): {
   };
 }
 
+/** Returns whether a web-search start contains stable request arguments. */
+function webSearchInputReady(item: Record<string, unknown>): boolean {
+  const query = typeof item.query === "string" ? item.query.trim() : "";
+  const action = record(item.action);
+  return query.length > 0 && action !== undefined && action.type !== "other";
+}
+
 /** Produces a valid function name from an app-server method or item kind. */
 function safeToolName(value: string): string {
   const normalized = value.replaceAll(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128);
@@ -544,7 +561,9 @@ function internalToolResult(
   const result =
     item.type === "collabAgentToolCall"
       ? collabAgentResultContent(item)
-      : (item.result ?? item.aggregatedOutput ?? item.action);
+      : item.type === "webSearch"
+        ? item.results
+        : (item.result ?? item.aggregatedOutput ?? item.action);
   return {
     id: String(item.id),
     type: "function",
