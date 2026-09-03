@@ -80,6 +80,7 @@ Support client-defined tools across requests while preserving safe Codex thread 
 - Parallel dynamic calls are batched and answered in observed arrival order, replacing the earlier lexicographic call-ID ordering. This is a compatibility change for clients that inferred an order from call IDs; clients must correlate by `call_id` instead.
 - App-server dynamic call IDs are deduplicated within a batch by the same seen-set merge used across raw items and callbacks. The first observed call wins and no duplicate is persisted or exposed.
 - Internal Codex tools are emitted as function-shaped calls/results but remain observational. They neither enter the suspension store nor become client-executable dynamic calls.
+- **Decision (2026-09-03): report successful thread reuse.** Every successful response includes the additive nonstandard response-level boolean `x_codex.threadReused`; it is `true` only after an existing mapped thread successfully resumes and its next turn starts, including implicit tool-result continuations, and `false` after a fresh `thread/start`. Aggregate responses carry it once and streams carry it only on the first chunk. Compatibility consequence: successful response objects gain one boolean field that strict Chat Completions clients may ignore.
 
 ## Implementation status
 

@@ -1216,7 +1216,7 @@ interface Usage {
 /** Streaming response subset asserted by the shared contract. */
 interface StreamChunk {
   id?: string;
-  x_codex?: { instructionSources?: string[] };
+  x_codex?: { instructionSources?: string[]; threadReused?: boolean };
   choices?: Array<{
     delta?: {
       role?: string;
@@ -1252,14 +1252,14 @@ function parseSse(value: string): StreamChunk[] {
   const chunks = frames
     .slice(0, -1)
     .map((frame) => parseJson<StreamChunk>(frame, "SSE frame"));
-  assertInstructionSources(chunks[0]?.x_codex, "first SSE chunk");
+  assertResponseMetadata(chunks[0]?.x_codex, "first SSE chunk");
   return chunks;
 }
 
 /** Aggregate response subset used by the shared function-tool scenario. */
 interface ToolCompletion {
   id?: string;
-  x_codex?: { instructionSources?: string[] };
+  x_codex?: { instructionSources?: string[]; threadReused?: boolean };
   choices?: Array<{
     finish_reason?: string | null;
     message?: {
@@ -1282,13 +1282,14 @@ interface ToolCompletion {
 /** Parses an aggregate response and requires its instruction provenance. */
 function parseToolCompletion(value: string, label: string): ToolCompletion {
   const completion = parseJson<ToolCompletion>(value, label);
-  assertInstructionSources(completion.x_codex, label);
+  assertResponseMetadata(completion.x_codex, label);
   return completion;
 }
 
-/** Requires the successful-response instruction-source extension shape. */
-function assertInstructionSources(
-  extension: { instructionSources?: string[] } | undefined,
+/** Requires the successful response-level x_codex metadata shape. */
+function assertResponseMetadata(
+  extension:
+    { instructionSources?: string[]; threadReused?: boolean } | undefined,
   label: string,
 ): void {
   assert.ok(
@@ -1297,6 +1298,11 @@ function assertInstructionSources(
         (source) => typeof source === "string",
       ),
     `${label} omitted valid x_codex.instructionSources`,
+  );
+  assert.equal(
+    typeof extension?.threadReused,
+    "boolean",
+    `${label} omitted x_codex.threadReused`,
   );
 }
 

@@ -42,6 +42,7 @@ interface CompletionUsage {
 /** Minimal parsed Chat Completions response used by the acceptance tests. */
 interface CompletionBody {
   id: string;
+  x_codex?: { threadReused?: boolean };
   usage?: CompletionUsage;
   choices: Array<{
     finish_reason: string;
@@ -1854,6 +1855,11 @@ test("implicit tool continuation must repeat the original x_codex policy", async
         messages: toolTranscript(calls),
       });
       assert.equal(repeated.status, 200);
+      assert.equal(
+        ((await repeated.clone().json()) as CompletionBody).x_codex
+          ?.threadReused,
+        true,
+      );
       assert.deepEqual(
         fake.injected.map((item) => [item.type, item.call_id]),
         [

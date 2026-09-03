@@ -225,7 +225,7 @@ function post(
   });
 }
 
-test("ready continuations return instruction sources reported by thread/resume", async () => {
+test("ready continuations report resumed instruction sources and thread reuse", async () => {
   await withTempDir(async (directory) => {
     const instructionSources = [
       "synthetic/project/AGENTS.md",
@@ -253,10 +253,13 @@ test("ready continuations return instruction sources reported by thread/resume",
       assert.deepEqual(
         (
           (await response.json()) as {
-            x_codex?: { instructionSources?: string[] };
+            x_codex?: {
+              instructionSources?: string[];
+              threadReused?: boolean;
+            };
           }
         ).x_codex,
-        { instructionSources },
+        { instructionSources, threadReused: true },
       );
       assert.deepEqual(fake.methods.slice(0, 3), [
         "thread/read",
@@ -267,6 +270,43 @@ test("ready continuations return instruction sources reported by thread/resume",
       await running.proxy.close();
     }
   }, "codex-continuation-instruction-sources-");
+});
+
+test("streaming continuations report thread reuse on the first chunk", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ContinuationAppServer();
+    const responseId = "response_streaming_thread_reuse";
+    const running = await startProxy(directory, fake, {
+      responseId,
+      threadId: "thr_continuation",
+      state: "ready",
+      model: "m",
+      cwd: join(directory, "workspace"),
+      toolsHash: bindingHash([]),
+      policyHash: defaultPolicyHash(join(directory, "workspace")),
+    });
+    try {
+      const response = await post(
+        running.origin,
+        responseId,
+        "m",
+        undefined,
+        true,
+      );
+      assert.equal(response.status, 200, await response.clone().text());
+      const chunks = parseSseChunks(await response.text());
+      assert.deepEqual(chunks[0]?.x_codex, {
+        instructionSources: [],
+        threadReused: true,
+      });
+      assert.equal(
+        chunks.slice(1).some((chunk) => chunk.x_codex !== undefined),
+        false,
+      );
+    } finally {
+      await running.proxy.close();
+    }
+  }, "codex-streaming-thread-reuse-");
 });
 
 test("model, reasoning, cwd, tool, and policy binding mismatches fail before thread/read", async () => {

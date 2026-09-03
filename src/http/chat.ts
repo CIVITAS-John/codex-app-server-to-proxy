@@ -51,7 +51,7 @@ export async function handleChatCompletion(
   // Setup is eager so validation and RPC failures retain their HTTP status
   // instead of committing an SSE response before streaming is primed.
   const execution = await execute(request, options, responseId);
-  const { events, instructionSources } = execution;
+  const { events, instructionSources, threadReused } = execution;
   try {
     if (request.stream) {
       await streamChatResponse(
@@ -61,6 +61,7 @@ export async function handleChatCompletion(
         responseId,
         created,
         instructionSources,
+        threadReused,
       );
       return;
     }
@@ -71,6 +72,7 @@ export async function handleChatCompletion(
       responseId,
       created,
       instructionSources,
+      threadReused,
     );
   } finally {
     // This is idempotent with iterator disposal and also releases eager setup
@@ -87,6 +89,7 @@ async function streamChatResponse(
   responseId: string,
   created: number,
   instructionSources: string[],
+  threadReused: boolean,
 ): Promise<void> {
   let committed = false;
   const commit = async (): Promise<void> => {
@@ -98,7 +101,7 @@ async function streamChatResponse(
     });
     await writeSse(response, {
       ...chunk(responseId, created, request.model, { role: "assistant" }, null),
-      x_codex: { instructionSources },
+      x_codex: { instructionSources, threadReused },
     });
     committed = true;
   };
@@ -168,6 +171,7 @@ async function writeAggregateResponse(
   responseId: string,
   created: number,
   instructionSources: string[],
+  threadReused: boolean,
 ): Promise<void> {
   const aggregated = await aggregateNormalizedEvents(events);
   const { content, reasoning, toolResults, finishReason, usage } = aggregated;
@@ -189,7 +193,7 @@ async function writeAggregateResponse(
     object: "chat.completion",
     created,
     model: request.model,
-    x_codex: { instructionSources },
+    x_codex: { instructionSources, threadReused },
     choices: [{ index: 0, message, finish_reason: finishReason ?? "stop" }],
     ...(usage ? { usage } : {}),
   });

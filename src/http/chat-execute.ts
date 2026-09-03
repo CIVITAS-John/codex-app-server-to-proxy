@@ -240,6 +240,7 @@ export interface ChatHandlerOptions {
 export interface ExecutionSession {
   events: AsyncGenerator<NormalizedEvent>;
   instructionSources: string[];
+  threadReused: boolean;
   dispose(): Promise<void>;
 }
 
@@ -396,6 +397,7 @@ export async function execute(
   options.signal.addEventListener("abort", onAbort, { once: true });
   let usageBaseline: TokenUsageCounters | undefined;
   let instructionSources: string[];
+  let threadReused: boolean;
   try {
     if (request.previousResponseId) {
       const continuation = await resumeContinuation(
@@ -407,6 +409,9 @@ export async function execute(
       );
       usageBaseline = continuation.usageBaseline;
       instructionSources = continuation.instructionSources;
+      // Reuse is reported only after the mapped thread has passed preflight,
+      // resumed with the expected ID, and accepted its next turn.
+      threadReused = true;
     } else {
       instructionSources = await startFreshThread(
         request,
@@ -416,6 +421,7 @@ export async function execute(
       );
       // A thread this request created has provably consumed nothing yet.
       usageBaseline = ZERO_TOKEN_USAGE;
+      threadReused = false;
     }
   } catch (error) {
     // Setup failures occur before HTTP headers, but still must release any
@@ -624,7 +630,7 @@ export async function execute(
         await cleanup();
       }
     })();
-  return { events, instructionSources, dispose: cleanup };
+  return { events, instructionSources, threadReused, dispose: cleanup };
 }
 
 /**

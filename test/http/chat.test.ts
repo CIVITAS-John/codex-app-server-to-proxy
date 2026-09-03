@@ -58,7 +58,7 @@ interface StreamedChunk {
     finish_reason?: string | null;
   }>;
   usage?: Usage;
-  x_codex?: { instructionSources?: string[] };
+  x_codex?: { instructionSources?: string[]; threadReused?: boolean };
 }
 
 /** In-memory structured logs and the logger that appends to them. */
@@ -2054,10 +2054,13 @@ test("returns loaded instruction sources in aggregate and streaming metadata", a
     assert.deepEqual(
       (
         (await aggregate.json()) as {
-          x_codex?: { instructionSources?: string[] };
+          x_codex?: {
+            instructionSources?: string[];
+            threadReused?: boolean;
+          };
         }
       ).x_codex,
-      { instructionSources },
+      { instructionSources, threadReused: false },
     );
 
     useTransport(fakeAppServer({ instructionSources }));
@@ -2072,7 +2075,10 @@ test("returns loaded instruction sources in aggregate and streaming metadata", a
     });
     assert.equal(streaming.status, 200);
     const chunks = streamedChunks(await streaming.text());
-    assert.deepEqual(chunks[0]?.x_codex, { instructionSources });
+    assert.deepEqual(chunks[0]?.x_codex, {
+      instructionSources,
+      threadReused: false,
+    });
     assert.equal(
       chunks.slice(1).some((chunk) => chunk.x_codex !== undefined),
       false,

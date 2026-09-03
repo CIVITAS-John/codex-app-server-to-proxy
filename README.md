@@ -174,7 +174,10 @@ Successful responses also include response-level
 paths app-server reports as loaded for the Codex thread. Aggregate responses
 include it once; streaming responses include it on the first chunk. An empty
 array means app-server reported no loaded instruction files. Treat these paths
-as sensitive plaintext.
+as sensitive plaintext. The same response-level object includes
+`x_codex.threadReused`: `true` means the request successfully resumed an
+existing Codex thread, while `false` means it started a new thread. For streams,
+this field likewise appears only on the first chunk.
 
 Reasoning deltas stream as they arrive. If app-server supplies reasoning only in
 the completed item, the proxy emits that final text without repeating any
