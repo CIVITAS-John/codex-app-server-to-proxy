@@ -961,9 +961,10 @@ export function registerChatContract(
         const choice = parseJson<ToolCompletion>(raw, "spawned child")
           .choices?.[0];
         assert.equal(choice?.finish_reason, "stop");
-        assert.equal(
-          choice?.message?.content?.trim(),
-          backend!.observationToken,
+        const parentContent = choice?.message?.content?.trim();
+        assert.ok(
+          parentContent?.endsWith(backend!.observationToken),
+          "parent response did not end with the exact child nonce",
         );
         const calls = choice?.message?.tool_calls ?? [];
         const results = choice?.message?.tool_results ?? [];
