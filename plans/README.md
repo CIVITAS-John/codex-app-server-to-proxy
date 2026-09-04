@@ -6,6 +6,8 @@ This directory is the source of truth for product decisions, implementation stat
 
 ## Product decisions
 
+These decisions describe the implemented Stage 08 behavior. [Stage 09](09-thread-continuity.md) plans fresh fallback for locally unavailable continuations; those changes are not current runtime behavior.
+
 - Provide `POST /v1/chat/completions` and `GET /v1/models` to generic HTTP clients.
     - The model route aggregates visible entries from the active authenticated pinned app-server. When installed, the temporary Responses Lite override supplies its frozen catalog; otherwise app-server's ordinary catalog is exposed. It starts no Codex thread or turn; `created: 0` and `owned_by: "openai"` are synthetic compatibility placeholders because app-server has no equivalents. This adds a standard client-discovery route without exposing hidden or full app-server catalog metadata.
 - Ship only an npm CLI named `codex-openai-proxy`.
@@ -51,17 +53,17 @@ This directory is the source of truth for product decisions, implementation stat
 | [06](06-policies.md) | Per-request cwd, sandbox, approvals, and web search | Policy matrix tests pass |
 | [07](07-quality-and-ci.md) | Security, compatibility, observability, and CI | Release test matrix passes |
 | [08](08-packaging-and-release.md) | Publishable npm artifact and release runbook | Packed-install smoke test passes |
-| [09](09-thread-continuity.md) | Safe same-thread reuse, native branching, and continuity outcomes | Acceptance matrix, in-place schema v2 migration, and bounded live gate pass |
+| [09](09-thread-continuity.md) | Fresh fallback at local continuation admission | Focused regression checks and bounded tool/restart live gate pass; no migration |
 
 ## Current status
 
 ### Implemented locally
 
-Stages 01 through 08 are implemented in the source tree. Stage 08 includes the package metadata, deterministic packed-package smoke, registry-backed smoke workflow, trusted-publishing prerelease workflow, published-user README, changelog, and release runbook. The exact Codex dependency and generated contract remain pinned to `0.146.0`. Stage 09 is planned only; its continuity enum, native branching, in-place schema v2 migration, and one-shot redirect-based fresh fallback are not implemented.
+Stages 01 through 08 are implemented in the source tree. Stage 08 includes the package metadata, deterministic packed-package smoke, registry-backed smoke workflow, trusted-publishing prerelease workflow, published-user README, changelog, and release runbook. The exact Codex dependency and generated contract remain pinned to `0.146.0`. Stage 09 is planned only; local admission fallback and pre-emptive tool-capability checks are not implemented. It retains the existing boolean reuse field and schema v0.
 
-Stage 09 uses one routing table and a shared fresh fallback. Its simplified design keeps five checkpoint states, leaves fork sources unchanged, and replaces tail deduplication with conservative fallback from unresolved checkpoints.
+Stage 09 makes one local admission decision before any setup RPC, then runs the existing fresh or native path once. Matching available client tools may reuse a current thread only with proven raw-response capability on the current transport; after restart, missing capability selects fresh execution. Locally unavailable selectors, changed bindings, and local contention can use the supplied complete transcript on a new thread. Remote setup and execution failures remain errors. Source records remain unchanged on fallback, so separate requests may execute equivalent work on different threads. No native fork, new checkpoint states, or retry-after-dispatch machinery is included.
 
-Until Stage 09 is implemented, the cross-stage continuation rules below describe the Stage 08 runtime (including its boolean reuse field and newest-response restriction). [Stage 09](09-thread-continuity.md) is the planned replacement design and is not current product behavior.
+Until Stage 09 is implemented, the product decisions above and cross-stage continuation rules below describe the Stage 08 runtime (including its boolean reuse field and newest-response restriction). [Stage 09](09-thread-continuity.md) is the planned replacement design and is not current product behavior.
 
 The default TypeScript/Vitest configuration is deterministic and offline; opt-in live-test filenames are excluded. The expanded serial live contract retains its existing compatibility scenarios and adds disk-verified `workspace-write` command/file-change coverage, isolated live web search, and an exactly-one-child nonce handoff. It uses only `gpt-5.6-luna` and enforces a hard maximum of 32 deduplicated upstream model responses across parent and child threads; its normal count remains unknown until live calibration. On 2026-07-16, `npm run check` passed 19 files and 155 tests with coverage thresholds, the offline `npm run test:package` and local `--registry-install` mode passed, and the final dry pack contained 51 files at 71,939 bytes packed and 295,941 bytes unpacked.
 
