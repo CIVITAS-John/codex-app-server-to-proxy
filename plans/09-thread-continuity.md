@@ -8,6 +8,39 @@ the "newest response only" restriction, and the Stage 05 rule that a request wit
 and acceptance gate; it does not change runtime source, tests, schemas, or user-facing
 documentation yet.
 
+Revised after plan review: uncertainty and replay errors were replaced by at-least-once fresh
+fallbacks. See "Review decisions".
+
+## Review decisions
+
+The proxy prioritizes serving downstream over preventing reruns. A retried request is the
+client's decision, and the ordinary fresh path already lets a client retry run the same turn
+twice, so continuity paths are held to the same at-least-once standard. The review decisions:
+
+1. Ambiguous native side effects no longer error. A lost `turn/start` acknowledgement, an
+   uncertain `thread/inject_items` outcome, a crash with a live claim, a concurrent duplicate
+   tail, and an exact-tail retry against an unresolved claim all redirect once through the
+   fresh path instead of returning HTTP 502 `continuation_outcome_unknown`. The error type and
+   the claim-retention retry gate are removed from the public contract.
+2. Tool tombstones gate native routes only. `tool_injection_claimed` and `tool_consumed`
+   records never produce the typed non-replayable error; the matching native route is blocked
+   and the request redirects fresh, re-injecting the transcript into a new thread.
+3. A model failure after an accepted native turn start makes one fresh attempt instead of
+   surfacing the model error. If model output was already emitted downstream over SSE, the
+   stream ends with the error so downstream can retry whole.
+4. A response whose final durable mapping write fails is still emitted with its standard `id`;
+   the model's completed output is not hostage to a state-file write, and the unmapped ID
+   simply will not resolve for later continuation.
+
+What is preserved: a claim or tombstone durably fences its native thread from resumed direct
+reuse, re-injection, or a new turn start, because re-delivering terminal content to the same
+thread can corrupt it. Every fallback targets a new thread, so a rerun is an accepted duplicate
+elsewhere, never a second delivery to one thread. The single `failed` outcome is split into two
+continuity states: `failed` when no prior delivery of the request's terminal content occurred,
+and `rerun` when a prior attempt already delivered or may have delivered it — an unresolved
+claim, a claimed or consumed tombstone, an ambiguous acknowledgement, or a turn that started
+and then failed. No separate diagnostics are added.
+
 ## Summary
 
 Thread continuity lets a client submit its complete intended Chat Completions transcript while
@@ -21,16 +54,20 @@ nonstandard response-level `x_codex.threadContinuity` extension enum:
 | `none` | No selector was supplied; a fresh thread ran. |
 | `reuse` | The selected current tip continued the same Codex thread. |
 | `fork` | The selected retained older response created a native Codex child thread. |
-| `failed` | Continuity was selected or inferred but was not established. A successful HTTP 200 with this value is the result of the one-shot fresh redirect; an error with this value means no fresh result completed. |
+| `failed` | Continuity was selected or inferred but was not established, and no prior delivery of the request's terminal content occurred. A successful HTTP 200 with this value is the result of the one-shot fresh redirect; an error with this value means no fresh result completed. |
+| `rerun` | A prior attempt already delivered or may have delivered the request's terminal content to Codex: an unresolved claim, a claimed or consumed tombstone, an ambiguous acknowledgement or injection, a concurrent duplicate tail, or a turn that started and then failed. A successful HTTP 200 with this value is an at-least-once fresh rerun, so a logically identical turn may already have executed; an error with this value means the rerun's fresh pass failed. |
 
 `x_codex.threadReused` is removed; there is no alias. The extension is nonstandard and appears
 once on an aggregate response, or only on the first SSE chunk. Every successful response has an
-`id`, including a redirected fresh response.
+`id`, including a redirected fresh response and a response whose durable mapping write failed.
 
 Once routing is classified, every pre-header JSON error carries the actual top-level
 `x_codex.threadContinuity` outcome. `reuse` and `fork` are reported only after their turn start
-is accepted. A continuity attempt that redirects or ends in a typed setup/uncertainty error is
-`failed`; client-validation errors raised before routing omit the field. Preserve nested
+is accepted. Every continuity failure — known, uncertain, or already accepted — redirects once
+through the fresh path: the redirected response reports `failed` when no prior delivery of its
+terminal content occurred, or `rerun` when a prior attempt already delivered or may have
+delivered it, and a failed fresh pass carries the same state as its error.
+Client-validation errors raised before routing omit the field. Preserve nested
 `error.x_codex.reset_at` metadata. SSE emits continuity only on its first chunk; a later error
 event never repeats it. A setup failure before the first chunk follows the JSON rule.
 
@@ -44,10 +81,10 @@ event never repeats it. A setup failure before the first chunk follows the JSON 
 2. Without `previous_response_id`, a valid terminal tool block uses implicit continuation when
    that mode is enabled. Resolve exactly one unexpired pending mapping; a unique current-tip
    mapping follows same-thread reuse. If any matching call ID belongs to
-   `tool_injection_claimed` or `tool_consumed`, return the typed non-replayable error with
-   `"failed"`; this replay gate precedes fallback. Only an otherwise unresolved, expired, or
-   ambiguous lookup redirects once to a forced-fresh pass over the complete transcript and
-   reports `"failed"`.
+   `tool_injection_claimed` or `tool_consumed`, the replay gate blocks the native route and the
+   request redirects once to a forced-fresh pass over the complete transcript with `"rerun"`;
+   the tombstone still forbids any further native injection into that thread. An unresolved,
+   expired, or ambiguous lookup redirects the same way with `"failed"`.
 3. With implicit mode disabled, that terminal-tool shape remains the pre-routing client error
    requiring `previous_response_id`; it carries no continuity metadata. Malformed, orphaned,
    mismatched, or otherwise unrepresentable tool input likewise remains a typed pre-routing
@@ -67,11 +104,20 @@ event never repeats it. A setup failure before the first chunk follows the JSON 
 
 ### Redirect fallback and errors
 
-When selected or inferred continuity fails in a safely known state before the side-effect
-boundary, the proxy redirects the request once through the fresh path. This includes an unknown,
-evicted, or expired cursor; binding mismatch; a busy tip; a missing or non-resumable thread;
-malformed or mismatched setup responses; invalid fork-child fields; known setup rejection;
-claim-write failure before the dependent side effect; and an unavailable dynamic-tool boundary.
+Whenever native continuity is not established — known failure, uncertain outcome, or an already
+accepted side effect — the proxy redirects the request once through the fresh path. Known
+failures include an unknown, evicted, or expired cursor; binding mismatch; a busy tip; a missing
+or non-resumable thread; malformed or mismatched setup responses; invalid fork-child fields;
+known setup rejection; claim-write failure before the dependent native side effect; and an
+unavailable dynamic-tool boundary. Uncertain or already accepted outcomes redirect the same way:
+a lost `turn/start` acknowledgement, an ambiguous `thread/inject_items` result, a replay gate
+hit on a claimed or consumed mapping, or an exact tail whose claim is unresolved. The fresh path
+always targets a new thread, so re-delivering the same terminal content is an accepted
+at-least-once rerun rather than a second delivery to one thread; the affected native thread is
+fenced by its retained claim or tombstone and is never resumed, re-injected, or turn-started
+while the fence holds. A redirect whose prior attempt already delivered or may have delivered
+the terminal content reports `rerun`; every other redirect reports `failed`.
+
 The redirect removes the internal selector and sets a non-public `forceFresh`/`redirected` guard
 that bypasses both explicit and implicit continuity. That guard is required for a terminal tool
 block: merely deleting `previous_response_id` would repeat implicit lookup and could loop.
@@ -80,7 +126,8 @@ The forced-fresh pass receives the complete validated transcript. A user-ending 
 the ordinary history-plus-user-input path. A tool-ending transcript injects every complete
 assistant call/output pair, including its terminal block, then invokes the ordinary empty-input
 `turn/start`. A successful redirect returns HTTP 200 with a new reusable response ID, adopts the
-request's effective policy, and reports `x_codex.threadContinuity: "failed"`. If a source or
+request's effective policy, and reports `x_codex.threadContinuity: "failed"`, or `"rerun"` when
+a prior attempt had already delivered the terminal content. If a source or
 child lease was acquired, release it before entering the fresh path.
 
 Concrete example: two clients select current response R1 while its Codex thread is already
@@ -91,15 +138,12 @@ same failure happens while the transcript ends in a complete assistant-call/tool
 the fresh pass injects that block as history and uses an empty-input turn instead of rejecting
 the request solely because its last message has role `tool`.
 
-The redirect has three deliberate limits:
+The redirect has two deliberate limits:
 
 - Client syntax, policy, and transcript-representability failures are still typed client errors;
   fallback does not reinterpret malformed or unsafe input.
 - The redirect guard permits exactly one fresh attempt. A failure in that pass returns the
   ordinary fresh-path error with top-level `"failed"`; it never redirects again.
-- After `turn/start` or `thread/inject_items` may have been accepted, an ambiguous outcome
-  returns HTTP 502 `continuation_outcome_unknown` with top-level `"failed"` and is never
-  redirected or retried.
 
 An explicit native `turn/start` rejection known not to have been accepted is safe: for direct
 reuse, atomically restore `ready` and clear the tail claim; for a fork, remove that tail's fork
@@ -109,16 +153,22 @@ native rejection is known. An explicit injection rejection known not to have bee
 similarly attempts to restore `pending_tool`, releases the lease, and redirects; if restoration
 fails, leave the durable claim conservative and still make the one safe fresh attempt. After
 confirmed pending-tool injection, the checkpoint remains `tool_consumed`; a subsequent start
-failure does not replay that already accepted injection through fallback.
+failure never re-injects into that same thread, and its fresh fallback re-injects the pair into
+a new thread instead.
 
-A later model failure after reuse or fork has already succeeded does not rewrite `reuse` or
-`fork` to `failed`; the continuity result describes thread setup, not model completion. Existing
-nested error metadata, such as `reset_at`, remains unchanged. A failure inside the redirected
-fresh path surfaces as the ordinary fresh-path error with top-level `"failed"`; there is no
-second redirect. A source thread remains unchanged after a fork, and its retention timestamp is
-changed only by the mandatory pre-fork claim: reserving a tail extends the shared retention
-deadline, and that monotonic extension is not rolled back when the claim resolves. Later child
-activity does not refresh the source again.
+A model failure after reuse or fork has already been established makes one fresh attempt over
+the complete transcript, and a successful result reports `"rerun"` because the failed turn had
+already started; if that pass also fails,
+its ordinary error is returned with top-level `"rerun"` and no second redirect. For SSE, the
+attempt is made only while no model output has been emitted downstream; once deltas have been
+sent, the stream ends with the terminal error and downstream retries the whole request. The
+abandoned native turn is a logged orphan, and claim resolution follows the transition table.
+Existing nested error metadata, such as `reset_at`, remains unchanged. A failure inside the
+redirected fresh path surfaces as the ordinary fresh-path error with top-level `"failed"`; there
+is no second redirect. A source thread remains unchanged after a fork, and its retention
+timestamp is changed only by the mandatory pre-fork claim: reserving a tail extends the shared
+retention deadline, and that monotonic extension is not rolled back when the claim resolves.
+Later child activity does not refresh the source again.
 
 ### Dynamic-tool boundary
 
@@ -165,15 +215,14 @@ flowchart TD
     U -- No --> X
     U -- Yes --> P[Resolve exactly one pending mapping]
     P --> PG{Any matching claimed or consumed tool state?}
-    PG -- Yes --> X4[Typed non-replayable error]
-    PG -- No; unresolved, expired, or ambiguous --> RD[Forced-fresh pass; failed]
+    PG -- Yes --> RD[Forced-fresh pass; failed or rerun]
+    PG -- No; unresolved, expired, or ambiguous --> RD
     PG -- No; unique current-tip pending --> D[Acquire source lease; reread tip]
     P -- Invalid transcript --> X
     S -- Yes --> C[Resolve response record and normalize tail]
     C -- Unknown --> RD
     C -- Found --> CG{Unresolved claim or consumed tombstone?}
-    CG -- Same tail is unresolved --> Z[502 continuation_outcome_unknown]
-    CG -- Tool state is consumed or claimed --> X4
+    CG -- Unresolved claim or tombstone --> RD
     CG -- No blocking claim --> VQ{Binding, expiry, and route valid?}
     VQ -- No --> RD
     VQ -- Current selectable tip --> D
@@ -193,7 +242,7 @@ flowchart TD
     E --> K{Stored turnId and no client dynamic tools?}
     K -- No --> LR
     K -- Yes --> RC[Atomically reserve fork tail]
-    RC -- Concurrent duplicate --> Z
+    RC -- Concurrent duplicate --> RD
     RC -- Claim write fails --> LR
     RC -- Reserved --> L[thread/fork; validate child]
     L -- Known setup failure --> LC[Clear reservation when durable]
@@ -210,14 +259,14 @@ flowchart TD
     V --> Y[Aggregate or stream; report continuity once]
 ```
 
-## Side-effect boundary
+## Side-effect fence
 
 ```mermaid
 flowchart TD
     A[Preflight and replay gate] --> T{Native route}
     T -- Fork --> FC[Atomically reserve tail on source]
-    FC -- Claim write fails --> C[Release lease; forced-fresh pass; failed]
-    FC -- Concurrent duplicate --> Z[502 continuation_outcome_unknown]
+    FC -- Claim write fails --> C[Release lease; forced-fresh pass; failed or rerun]
+    FC -- Concurrent duplicate --> C
     FC --> F[thread/fork with deferred child]
     F -- Rejected, malformed, or lost ACK --> F2[Clear claim if durable; release lease]
     F2 --> C
@@ -233,9 +282,11 @@ flowchart TD
     R -- Restore succeeds --> C
     R -- Restore fails --> R2[Keep claim; release lease]
     R2 --> C
-    I -- Ambiguous --> Z
+    I -- Ambiguous --> AM[Keep claim as fence; log orphan]
+    AM --> C
     I -- Accepted --> W[Durable tool_consumed]
-    W -- Write fails --> S3[Keep claim; typed error; no turn or replay]
+    W -- Write fails --> W2[Keep claim; no same-thread start]
+    W2 --> C
     W --> V[Source turn/start]
     T -- Direct user --> N[User path]
     N --> N2[Claim: ready to turn_start_claimed with tail hash]
@@ -245,34 +296,50 @@ flowchart TD
     N2 --> K
     K -- Explicit reject, user route --> C2[Restore ready or clear fork claim; release lease]
     C2 --> C
-    K -- Explicit reject, pending route --> XT2[Keep tool_consumed; typed error]
-    K -- Ambiguous ACK --> Z
+    K -- Explicit reject, pending route --> XT2[Keep tool_consumed; same thread fenced]
+    XT2 --> C
+    K -- Ambiguous ACK --> AM2[Keep claim as fence; log orphan]
+    AM2 --> C
     K -- Accepted --> E[Continuity established]
+    E --> O[Run model]
+    O -- Model fails before any downstream output --> C
+    O -- Model fails after SSE deltas --> TE[Terminal SSE error; no redirect]
+    O -- Completes --> FM[Final mapping write]
+    FM -- Fails --> EM[HTTP 200; id kept; reuse or fork]
+    FM -- Commits --> OK[HTTP 200; reusable id; reuse or fork]
     C --> H[Fresh thread/start; inject full history; turn/start]
-    H -- Failure --> BE[Ordinary fresh-path error; failed]
-    H -- Accepted --> HF[HTTP 200; new response id; failed]
-    E --> O[Run model; preserve reuse or fork]
+    H -- Failure --> BE[Ordinary fresh-path error; failed or rerun]
+    H -- Accepted --> HF[HTTP 200; new response id; failed or rerun]
 ```
 
-Fork is not the unsafe side-effect boundary: `deferGoalContinuation: true` prevents automatic
-execution, so an explicit fork rejection, malformed fork response, or lost fork acknowledgement
-before child turn start clears its reserved tail when durable and redirects fresh with `failed`
-(leaving a possible orphan). The unsafe boundary is the first point at which app-server may have
-accepted `turn/start` or `thread/inject_items`. Before that boundary, failure may redirect. At or
-after it, an ambiguous outcome is an error and must not execute the same side effect again. This
-includes a child `turn/start` acknowledgement lost after a valid fork.
+The only hard safety rule is same-thread fencing: terminal content must never be re-delivered
+to a native thread that may already have accepted it, because a second injection or turn start
+against the same history corrupts it. Durable claims and tombstones enforce the fence — a
+fenced thread is never resumed, re-injected, or turn-started while the fence holds. Fork is
+outside the fence: `deferGoalContinuation: true` prevents automatic execution, so an explicit
+fork rejection, malformed fork response, or lost fork acknowledgement before child turn start
+clears its reserved tail when durable and redirects fresh with `failed` (leaving a possible
+orphan). A lost or ambiguous child `turn/start` acknowledgement keeps the fork tail claim as
+the fence and also redirects fresh with `rerun`; the
+possibly running child is a logged orphan.
 
-The pending path has an additional durable guard. Never call `thread/inject_items` unless the
+The pending path keeps its durable guard. Never call `thread/inject_items` unless the
 `pending_tool` to `tool_injection_claimed` write committed. A claim-write failure occurs before
-the dependent side effect and therefore redirects fresh. If injection is explicitly rejected as
+the dependent native side effect and redirects fresh. If injection is explicitly rejected as
 not accepted, attempt to restore `pending_tool`; a failed restore keeps disk and memory
 conservatively claimed, but the known-not-accepted result still permits the one fresh attempt.
-After confirmed injection, `tool_consumed` must commit before `turn/start`; a write failure
-keeps the claim, prevents start and replay, and returns the typed backend/state error. A
-successful response is not terminally emitted until its response mapping is durable. If final
-mapping fails, an aggregate returns a typed error; an SSE response ends with a terminal error
-and its response ID is explicitly non-reusable. Downstream commits IDs only after terminal
-success.
+An ambiguous injection keeps the claim fencing that thread and redirects fresh with
+`rerun`. After confirmed injection, `tool_consumed` must commit
+before `turn/start`; a write failure keeps the claim, prevents any same-thread start, and
+redirects fresh, re-injecting the pair into a new thread.
+
+A completed response is emitted even when its final durable mapping write fails. The response
+keeps its standard `id` and its already classified continuity value; no new ready tip is
+created, and the unmapped ID simply will not resolve for later continuation. The
+unmapped ghost turn cannot leak: the failed mapping write is also the claim-cleanup write, so
+the predecessor keeps its unresolved claim and direct resume stays blocked, while forks cut at
+the stored `turnId` and exclude later source turns. The stale-looking tip routes later requests
+fresh until retention expires. Downstream commits IDs only after terminal success.
 
 ## Branch topology
 
@@ -307,12 +374,13 @@ Two concrete races are normative:
 2. Load the opaque response mapping from the authoritative store. A selector maps to a
    response, thread, source turn, and continuity binding; raw Codex identifiers never appear in
    the public API. Normalize the submitted native tail and check unresolved claims and
-   non-replayable tool tombstones before binding, expiry, or tip/fork classification. The same
-   tail as an unresolved direct or fork attempt returns `continuation_outcome_unknown`; it must
-   never be converted into a fresh redirect merely because the record later became historical
-   or the submitted binding differs. Selectorless implicit lookup applies the same precedence:
-   any matching `tool_injection_claimed` or `tool_consumed` record blocks replay before an
-   unresolved/expired/ambiguous result is allowed to redirect.
+   non-replayable tool tombstones before binding, expiry, or tip/fork classification. A claim
+   or tombstone hit blocks the matching native route and redirects fresh, reporting
+   `rerun` when the claim is unresolved; the fence holds even if
+   the record later became historical or the submitted binding differs. Selectorless implicit
+   lookup applies the same precedence: any matching `tool_injection_claimed` or
+   `tool_consumed` record blocks the native route before an unresolved, expired, or ambiguous
+   result is allowed to redirect.
 3. Classify the request as `none`, current-tip `reuse`, older-response `fork`, or redirect the
    request fresh with `failed`. The redirect constructs a derived internal request with no
    `previousResponseId` and a one-shot force-fresh guard; it does not re-enter implicit lookup.
@@ -326,8 +394,9 @@ Two concrete races are normative:
    advanced to R2.
 5. For a native fork, first verify a stored `turnId` and no client-defined dynamic tools, then
    atomically add the normalized tail hash to the source record before calling `thread/fork`.
-   The compare-and-set rejects a same-hash winner from a concurrent request with
-   `continuation_outcome_unknown`; different hashes can proceed without lost updates. Call
+    The compare-and-set rejects a same-hash winner from a concurrent request by redirecting
+    that loser fresh with `rerun`; different hashes can proceed
+    without lost updates. Call
    `thread/fork` with `threadId`, `lastTurnId` set to the selected response's stored `turnId`
    (inclusive), `excludeTurns: true`, `deferGoalContinuation: true`, `ephemeral: false`, `model`,
    and only validated supported thread-policy fields. Deliberately omit `path`, `beforeTurnId`,
@@ -347,12 +416,14 @@ Two concrete races are normative:
    the replayed transcript prefix to a reused or forked native thread. For pending results,
    atomically transition `pending_tool` to `tool_injection_claimed` before `thread/inject_items`,
    inject each complete call/output pair once, and transition to `tool_consumed` before
-   `turn/start`. An uncertain injection crosses the side-effect boundary and cannot redirect to
-   a fresh replay. A redirect sends the full transcript, including representable paired
-   historical and terminal tool rounds; the forced-fresh path injects them and starts an
-   empty-input turn when the transcript ends in tools.
+   `turn/start`. An uncertain injection keeps the claim fencing that thread and redirects
+   fresh with `rerun`. A redirect sends the full transcript,
+   including representable paired historical and terminal tool rounds; the forced-fresh path
+   injects them and starts an empty-input turn when the transcript ends in tools.
 7. Aggregate or stream standard output. Suppress native history and internal tool events from
-   downstream output. Persist a new response mapping only after the response is reusable.
+   downstream output. Persist a new response mapping only after the response is reusable; if
+   that final write fails, emit the completed response anyway — no new ready tip is created and
+   the ID does not resolve for continuation.
 8. Add `x_codex.threadContinuity` at the response envelope boundary. For SSE, emit it only in
    the first chunk; subsequent chunks do not repeat it.
 
@@ -365,8 +436,8 @@ relation, or a lost fork acknowledgement before child turn start can clear the c
 fresh with `failed`; an abandoned pre-turn child can remain as a logged orphan. If claim cleanup
 cannot commit, preserve it conservatively and still redirect because no child turn was started.
 Do not attempt deletion merely to tidy state. A lost or ambiguous child `turn/start`
-acknowledgement is different: it is after the executable side-effect boundary and returns HTTP
-502 `continuation_outcome_unknown` without retry.
+acknowledgement keeps the fork tail claim as the fence and redirects fresh with `rerun`; the
+possibly running child is a logged orphan.
 
 `runtimeWorkspaceRoots`, `activePermissionProfile`, `serviceTier`, `historyMode`, and other
 informational metadata are not equality-gated: there is no public selector or stored comparator
@@ -385,16 +456,18 @@ optional claim fields. Checkpoint records use these lifecycle states:
   at most one of either exists for a thread.
 - `superseded` retains an older forkable checkpoint, except that consumed-tool tombstones are
   never converted into branchable history.
-- `tool_injection_claimed` and `tool_consumed` are non-replayable tombstones. A claim is made
-  before injection and is never erased merely because a process crashed or disconnected.
+- `tool_injection_claimed` and `tool_consumed` are non-replayable tombstones: they fence the
+  native route, and a request that hits one redirects fresh. A claim is made before injection
+  and is never erased merely because a process crashed or disconnected.
 - `turn_start_claimed` marks a current ready source whose direct reuse start is guarded by a
-  claim; it is non-replayable until terminal resolution.
+  claim; it blocks direct native resume until terminal resolution, and requests that select it
+  redirect fresh.
 - Natural TTL expiry is derived from `expiresAt`; `expired` is not a persisted state. An
   unresolved claim overrides ordinary cursor expiry until the claim-retention window ends, and
   taking or preserving a claim durably sets `expiresAt` to at least `now + retentionMs`. That
   record-level deadline is shared and monotonic: a later fork claim may extend all older claims,
-  and clearing a claim does not restore an earlier expiry. This deliberately favors replay safety
-  over prompt reclamation without adding per-claim records or deadlines.
+  and clearing a claim does not restore an earlier expiry. This keeps fences durable across
+  restart without adding per-claim records or deadlines.
 - `failed` is a response outcome, never a persisted state.
 
 Records gain one field and two optional claim fields:
@@ -424,8 +497,9 @@ preserve array order and JSON primitive encoding, serialize with `canonicalJson`
 UTF-8 bytes. `normalizedTail` is exactly the validated terminal user input or the ordered
 terminal tool outputs passed to the native route. The hash is deliberately independent of
 whether the request was initially classified as reuse or fork, so an unresolved direct start
-still blocks the same tail after its source becomes a historical fork boundary. Check existing
-claims before binding/expiry fallback; the source record itself supplies identity and claim kind.
+still fences the same tail's native route after its source becomes a historical fork boundary;
+the request itself redirects fresh. Check existing claims before binding/expiry fallback; the
+source record itself supplies identity and claim kind.
 
 | Transition | Durable ordering and result |
 | --- | --- |
@@ -434,33 +508,33 @@ claims before binding/expiry fallback; the source record itself supplies identit
 | Known direct-start rejection | Atomically restore `ready` and clear `claimedTailHash`, then apply the redirect. |
 | Known fork-child start rejection | Remove that tail hash from `activeForkTailHashes`, then apply the redirect; source remains selectable. |
 | Rejection cleanup-write failure | Preserve the conservative claim, release the lease, and make the one safe fresh attempt because native rejection is known; do not pretend the source became reusable. |
-| Ambiguous direct start or crash | Keep the claimed checkpoint and `claimedTailHash`; return non-retryable `continuation_outcome_unknown`. |
-| Ambiguous child start or crash | Keep the tail hash in `activeForkTailHashes`; return non-retryable `continuation_outcome_unknown`. |
+| Ambiguous direct start or crash | Keep the claimed checkpoint and `claimedTailHash` as the native fence; redirect fresh with `rerun`. |
+| Ambiguous child start or crash | Keep the tail hash in `activeForkTailHashes` as the native fence; redirect fresh with `rerun`. |
 | Accepted direct-reuse start | Keep the claim until terminal resolution; a successful final mapping atomically supersedes the source, creates the new tip, and clears the claim. |
 | Accepted fork-child start | Keep the fork tail claim until terminal resolution; a successful final mapping creates the child tip and removes only that hash from the source, leaving the source otherwise unchanged. |
-| Known terminal model failure | Resolve by route and clear the claim: direct ready reuse supersedes its claimed predecessor; a pending-tool route retains its non-branchable `tool_consumed` tombstone; a fork leaves its source checkpoint unchanged. A later deliberate retry or branch is allowed only through the resulting route rules. |
+| Known terminal model failure | Resolve by route and clear the claim: direct ready reuse supersedes its claimed predecessor; a pending-tool route retains its non-branchable `tool_consumed` tombstone; a fork leaves its source checkpoint unchanged. Then make the one fresh attempt, reported as `rerun`, unless SSE deltas were already emitted; the abandoned native turn is a logged orphan. A later deliberate retry or branch is allowed only through the resulting route rules. |
 | Pending tool injection | Claim `pending_tool` before injection; after confirmed injection, set `tool_consumed` before the subsequent `turn/start`. |
-| Native fork | Atomically append the tail hash to `activeForkTailHashes` before `thread/fork`; a same-hash concurrent loser returns uncertainty, while other tails remain selectable. |
+| Native fork | Atomically append the tail hash to `activeForkTailHashes` before `thread/fork`; a same-hash concurrent loser redirects fresh with `rerun`, while other tails remain selectable. |
 | Fork claim-write or child-lease failure | Do not start the child, clear a written tail claim when durable, release any lease, and redirect fresh; a validated unused child may remain. |
 | New response on same thread | Add the new `ready`/`pending_tool` tip and supersede an eligible ready predecessor; never erase an uncertain claim, tail hash, or turn-start claim. |
 
-Exact-retry semantics: a selector whose record carries a matching tail hash within its
-claim-retention window — either claim kind — returns non-retryable HTTP 502
-`continuation_outcome_unknown`, even if ordinary cursor retention would have expired. A different tail may
-fork the same source independently. This blocks a proxy/client retry from silently duplicating
-an ambiguous attempt without blocking independent branches. A resolved attempt has no remaining
-tail hash and does not block a later deliberate retry. While its checkpoint is
-`turn_start_claimed`, a source is eligible only as an older fork boundary, never for direct
-resume. Once a native start may have advanced T1, old R1 is never restored to direct-reusable
-state; only a known explicit rejection restores it.
+Exact-retry semantics: a selector whose record carries a matching unresolved tail hash — either
+claim kind — cannot take the matching native route and redirects fresh with
+`rerun`, even if ordinary cursor retention would have expired,
+because the prior attempt may already be running elsewhere. A different tail may fork the same
+source independently. A resolved attempt has no remaining tail hash and does not block a later
+deliberate native retry. While its checkpoint is `turn_start_claimed`, a source is eligible only
+as an older fork boundary, never for direct resume. Once a native start may have advanced T1,
+old R1 is never restored to direct-reusable state; only a known explicit rejection restores it.
 
 Pending-tool transitions are durable and ordered: atomically move `pending_tool` to
 `tool_injection_claimed` before `thread/inject_items`; on an explicit injection rejection known
 not to have been accepted, restore `pending_tool` when durable and redirect fresh; a failed
 restore leaves the conservative claim in place but does not make the known-not-accepted
 injection ambiguous. On successful injection, move to `tool_consumed` before `turn/start`. An
-ambiguous injection or crash while claimed keeps the non-replayable claim and returns a typed
-`continuation_outcome_unknown` error. Consumed-tool tombstones never become branchable
+ambiguous injection or crash while claimed keeps the non-replayable claim fencing that thread
+and redirects fresh with `rerun`. Consumed-tool tombstones never
+become branchable
 `superseded` records: a new response on that thread leaves `tool_injection_claimed` and
 `tool_consumed` unchanged and adds the new ready/pending tip.
 
@@ -477,16 +551,17 @@ overwrite or split brain. A syntactically recognized version 2 file that fails t
 also fails startup as described above rather than being treated as a foreign file.
 
 Fork usage starts from the source `usageTotal` baseline. Omit usage if exact subtraction is not
-possible. Fresh `none` and `failed` responses use a zero baseline.
+possible. Fresh `none`, `failed`, and `rerun` responses use a zero baseline.
 
 Every mutation uses commit-then-publish: build a candidate snapshot, atomically persist it,
 then replace the in-memory map. On write failure, retain the last durable in-memory view. This
 snapshot is committed before any dependent side effect. A response mapping is the commit point
-for reusability: no downstream response ID is committed until terminal success and durable
-mapping, and a failed final mapping never exposes a new ready state. The aggregate returns a
-typed error or the SSE stream a terminal error with a non-reusable ID. These mapping/state
-errors retain the already classified top-level continuity outcome: `failed` for a redirected
-path, or `reuse`/`fork` after continuity was established.
+for reusability, not for emission: a failed final mapping never exposes a new ready state, but
+the completed response is still emitted with its `id`. The ghost
+turn is fenced by the predecessor's retained claim, and forks exclude it through the stored
+`turnId` boundary. An emitted response after a mapping failure retains the already classified
+top-level continuity outcome — `failed` or `rerun` for a redirected path, or `reuse`/`fork`
+after continuity was established.
 
 Caching is orthogonal to continuity. Report exact cached-token counts when app-server supplies
 them; never promise positive cache reuse because a thread was reused or forked.
@@ -502,7 +577,7 @@ re-runs through the fresh path. Success is HTTP 200 with a new reusable response
 | ---: | --- | --- |
 | 1 | No selector and no terminal tool block | Fresh thread; `none`. |
 | 2 | Current tip | Direct same-thread reuse; `reuse` after turn start. |
-| 3 | No selector with terminal tool block | If valid and implicit mode is enabled, first reject any matching claimed/consumed tombstone with a top-level `failed`; otherwise a unique current-tip pending mapping follows reuse and an unresolved, expired, or ambiguous lookup redirects fresh with `failed`. If implicit mode is disabled, return the pre-routing error requiring `previous_response_id`. Malformed or unrepresentable input is also a typed pre-routing client error. |
+| 3 | No selector with terminal tool block | If valid and implicit mode is enabled, a matching claimed/consumed tombstone blocks the native route and redirects fresh with top-level `rerun`; otherwise a unique current-tip pending mapping follows reuse and an unresolved, expired, or ambiguous lookup redirects fresh with `failed`. If implicit mode is disabled, return the pre-routing error requiring `previous_response_id`. Malformed or unrepresentable input is also a typed pre-routing client error. |
 | 4 | Retained older response | Native fork at its stored boundary; `fork`. |
 | 5 | Branch of branch | Fork from the selected retained response's own source boundary; never include later sibling history. |
 | 6 | Concurrent forks or advancing source | Lease each child only; atomically mutate only the source's claim set. The source may advance while a child forks through its stored `lastTurnId`; exclude later source turns from the child. |
@@ -523,29 +598,29 @@ re-runs through the fresh path. Success is HTTP 200 with a new reusable response
 | 21 | Fork-shaped request with client dynamic tools | Redirect fresh; `failed`; native fork never carries dynamic tools. |
 | 22 | Pending tool-result mismatch | If the complete transcript is independently representable, release the lease and redirect fresh; otherwise return the typed validation error with top-level `failed`. Never reinterpret a tool result as user text. |
 | 23 | Unrepresentable terminal tool block | Typed unrepresentable-client-request error before routing; no redirect. |
-| 24 | Uncertain pending-tool injection | 502 `continuation_outcome_unknown` with top-level `failed`; claim stays non-replayable; no redirect or fresh replay. |
+| 24 | Uncertain pending-tool injection | Keep the claim fencing that thread; redirect fresh with top-level `rerun`; never re-inject the same thread. |
 | 25 | Native `turn/start` explicit rejection, user tail | Known safe: restore `ready` or clear the fork tail claim, then redirect fresh; `failed`. |
-| 26 | Native `turn/start` explicit rejection after confirmed pending injection | Keep `tool_consumed`; typed tool-tail error with top-level `failed`; never restore or replay the accepted injection. |
+| 26 | Native `turn/start` explicit rejection after confirmed pending injection | Keep `tool_consumed`; never restore or re-inject the same thread; redirect fresh with top-level `rerun`. |
 | 27 | Explicit injection rejection known not accepted | Restore `pending_tool` when durable, release the lease, and redirect fresh. If restoration fails, keep the claim and still make the one safe fresh attempt. |
-| 28 | Ambiguous source `turn/start` ACK | 502 `continuation_outcome_unknown` with top-level `failed`; claim stays; exact-tail retry blocked. |
-| 29 | Lost child `turn/start` ACK | 502 `continuation_outcome_unknown` with top-level `failed`; fork tail hash stays; no redirect and no fresh replay. |
-| 30 | Post-acceptance model failure | Preserve established `reuse`/`fork` and report the model error normally. Direct ready reuse supersedes its predecessor; pending-tool continuation retains `tool_consumed`; fork leaves its source unchanged. Clear the resolved claim. |
+| 28 | Ambiguous source `turn/start` ACK | Keep the claim fencing the thread; redirect fresh with top-level `rerun`; same-tail native use stays blocked. |
+| 29 | Lost child `turn/start` ACK | Keep the fork tail hash fencing the boundary; redirect fresh with top-level `rerun`; the possibly running child is a logged orphan. |
+| 30 | Post-acceptance model failure | Resolve the claim by route (direct ready reuse supersedes its predecessor; pending-tool continuation retains `tool_consumed`; fork leaves its source unchanged), then make the one fresh attempt and report `rerun` on success. For SSE with deltas already emitted, end with the terminal error instead and let downstream retry. A fresh-pass failure returns the ordinary error with `rerun`. |
 | 31 | Client disconnect | Cancel lifecycle and lease safely; do not leak active turns or erase an uncertain claim. |
-| 32 | Redirected fresh-path failure | Ordinary fresh-path typed error with top-level `failed`; no second redirect. |
+| 32 | Redirected fresh-path failure | Ordinary fresh-path typed error with the redirect's top-level state (`failed` or `rerun`); no second redirect. |
 | 33 | Redirected response ID reuse | Allocate a unique reusable response ID; never overwrite the selected mapping. |
 | 34 | Prefix disagrees with selected boundary | Ignore the prefix for reuse/fork; use only the selected native boundary and trailing input. |
 | 35 | Usage reset or unknown baseline | Use zero for fresh `none`/`failed`; omit fork usage unless exact subtraction succeeds. |
 | 36 | Zero cache | Report exact zero/omitted cached tokens; never infer cache reuse. |
 | 37 | Invalid request syntax or policy | Typed OpenAI-shaped error before routing and before any redirect. |
-| 38 | Replay of claimed or consumed tool mapping | Typed non-replayable-continuation error with top-level `failed`; never inject again. |
+| 38 | Replay of claimed or consumed tool mapping | Tombstone blocks the native route; redirect fresh with top-level `rerun`; never inject into that thread again. |
 | 39 | `pending_tool` claim write failure | Do not inject; release the lease and redirect fresh with `failed`. |
-| 40 | `tool_consumed` write failure after confirmed injection | Keep the claim; typed backend/state error with top-level `failed`; do not turn-start or redirect. |
-| 41 | Final response-mapping write failure | Aggregate gets a typed error; SSE emits a terminal error and marks its ID non-reusable; downstream commits no ID. |
+| 40 | `tool_consumed` write failure after confirmed injection | Keep the claim; never turn-start that thread; redirect fresh with top-level `rerun`. |
+| 41 | Final response-mapping write failure | Emit the completed response with its `id` for aggregate and SSE; create no new ready tip; the ID does not resolve for continuation; the ghost turn is fenced by the predecessor's retained claim and fork boundary exclusion. |
 | 42 | Direct reuse claim write failure | Do not call native `turn/start`; release the lease and redirect fresh with `failed`. |
 | 43 | Fork tail-claim write failure | Do not call `thread/fork`; redirect fresh with `failed`. |
-| 44 | Claim after crash/restart | An exact-tail retry within refreshed claim retention returns 502 `continuation_outcome_unknown` with top-level `failed`, even if direct reuse would now classify as fork; a different tail may fork; a consumed pending mapping returns the typed non-replayable error. |
+| 44 | Claim after crash/restart | An exact-tail retry within refreshed claim retention is blocked from the native route and redirects fresh with top-level `rerun`, even if direct reuse would now classify as fork; a different tail may fork; a consumed pending mapping likewise redirects fresh with `rerun`. |
 | 45 | Consumed tool tombstone with a new response | Leave `tool_injection_claimed`/`tool_consumed` unchanged; add the new tip without making the tombstone branchable. |
-| 46 | Commit-then-publish failure | Keep the last durable disk and memory snapshot; failed writes expose no new ready state. |
+| 46 | Commit-then-publish failure | Keep the last durable disk and memory snapshot; failed writes expose no new ready state; the in-flight response is still emitted when its final mapping fails. |
 | 47 | Corrupt or foreign state file | Empty, untrusted store; file untouched until the first write; existing behavior. |
 | 48 | Future schema version | Startup failure with a clear error; no downgrade overwrite. |
 | 49 | v0-to-v2 in-place import mappings | Persisted `expired` maps to `tool_injection_claimed`; `superseded` with `pendingCalls` maps to `tool_consumed`; others migrate directly; claim mutations preserve absent/null `turnId`, while newly created response mappings require a nonempty value. |
@@ -554,7 +629,7 @@ re-runs through the fresh path. Success is HTTP 200 with a new reusable response
 | 52 | Fork child lease failure after claim | Durably remove that fork tail claim, release any lease, and redirect fresh. If cleanup fails, preserve the claim conservatively and still make the one safe fresh attempt. |
 | 53 | Claim taken near ordinary expiry | Extend shared `expiresAt` to at least one full configured retention period from claim time. Later claims may extend older claims; cleanup never rolls the deadline back. |
 | 54 | Known rejection but claim cleanup cannot commit | Keep the source conservatively claimed, release its lease, and redirect fresh; do not expose the source as reusable. |
-| 55 | Concurrent fork-claim add/remove operations | Serialize or compare-and-swap source-record mutations so one child cannot erase another child's unresolved hash; a same-tail loser returns 502 with top-level `failed` without forking or redirecting, and the unique sorted set persists atomically. |
+| 55 | Concurrent fork-claim add/remove operations | Serialize or compare-and-swap source-record mutations so one child cannot erase another child's unresolved hash; a same-tail loser redirects fresh with top-level `rerun` without forking natively, and the unique sorted set persists atomically. |
 | 56 | Resume/fork emits retained historical events | Correlate output to the newly accepted turn ID and suppress all replayed history, reasoning, command deltas, and internal tool events from downstream output. |
 | 57 | Recognized v2 file violates a claim/state invariant | Fail startup without changing the file; never drop only the invalid record or erase its replay guard. |
 
@@ -565,7 +640,7 @@ re-runs through the fresh path. Success is HTTP 200 with a new reusable response
 Add offline fake app-server cases for every edge-case register row, including:
 
 - aggregate metadata placement and first-chunk-only SSE metadata;
-- success and error envelopes, including `continuation_outcome_unknown` and preserved nested
+- success and error envelopes, including the `failed`/`rerun` state split and preserved nested
   `reset_at`;
 - in-place schema migration: the three conservative v0 state mappings, absent/null `turnId`
   preservation through legacy claim mutations, the v1 reservation and v2 rewrite, nonempty
@@ -574,14 +649,17 @@ Add offline fake app-server cases for every edge-case register row, including:
 - current-tip reuse, native fork arguments and child validation without a pre-fork
   `thread/read`, branch-of-branch and concurrent-fork isolation, atomic lease/recheck races,
   busy redirect behavior, and lease release on every redirect path;
-- claim lifecycle: direct-claim restore on known rejection, fork tail claims, exact-retry 502,
-  different-tail branching, crash/restart recovery, resolved-claim clearing after success or
-  terminal model failure, route-specific direct/fork cleanup, retention refresh, and consumed
-  tombstones; include concurrent fork-claim mutations without lost hashes;
-- redirect behavior: every safely known continuity failure with an independently representable
-  user or tool tail, including busy and pre-side-effect claim-write failures, makes exactly one
-  forced-fresh attempt; success yields HTTP 200 with `failed` and a new reusable ID, while a
-  redirected fresh-path failure surfaces the ordinary error with no recursion;
+- claim lifecycle: direct-claim restore on known rejection, fork tail claims, exact-retry
+  redirects with `rerun`, different-tail branching, crash/restart
+  recovery, resolved-claim clearing after success or terminal model failure, route-specific
+  direct/fork cleanup, retention refresh, and consumed tombstones; include concurrent
+  fork-claim mutations without lost hashes;
+- redirect behavior: every continuity failure — known, uncertain, or already accepted — with
+  an independently representable user or tool tail, including busy, ambiguous-ACK,
+  uncertain-injection, replay-gate, and claim-write failures, makes exactly one forced-fresh
+  attempt; success yields HTTP 200 with the correct `failed` or `rerun` state and a new
+  reusable ID, while a redirected
+  fresh-path failure surfaces the ordinary error with no recursion;
 - dynamic tools on fresh/reuse/fork/restart paths, boundary capability absence, implicit ID
   expiry/ambiguity, implicit-disabled pre-routing errors, pending mismatch, terminal tool-block
   validation, fresh terminal-tool history injection plus empty-input start, state transitions,
@@ -589,16 +667,18 @@ Add offline fake app-server cases for every edge-case register row, including:
   and consumed-write failures; explicitly cover pending injection followed by an accepted start
   and model failure, and pending injection followed by an explicit start rejection;
 - exact usage baselines, fork subtraction, usage reset, and cached-token reporting; and
-- disconnect, process failure, explicit rejection, lost ACK, post-acceptance model failure, and
-  final response-mapping failure for aggregate and SSE, including commit-then-publish
-  memory/disk consistency; and
+- disconnect, process failure, explicit rejection, lost ACK, post-acceptance model failure
+  (fresh redirect before emission, terminal SSE error after emission), and final
+  response-mapping failure still emitted for aggregate and SSE,
+  including commit-then-publish memory/disk consistency; and
 - resume/fork notification filtering that proves retained historical reasoning, command output,
   and internal tool events are never emitted as deltas for the new HTTP response.
 
 The fake server must assert that a reused or forked request does not receive the replayed
 prefix, that a redirected fresh request receives the complete transcript, that terminal-tool
 redirects bypass implicit lookup and make one empty-input turn, and that uncertain side effects
-are never retried.
+are never re-delivered to the same native thread while every uncertainty still yields exactly
+one fresh attempt.
 
 ### Opt-in live verification
 
@@ -620,9 +700,9 @@ calls.
 
 Stage 09 is complete only when the design above is reflected in the runtime contract and
 schemas, every register row has deterministic success/failure coverage, metadata is stable for
-aggregate and SSE responses, side-effect uncertainty cannot duplicate commands, and the bounded
-three-call live scenario passes. A provider limitation leaves Stage 09 incomplete unless this
-plan is separately reviewed and revised.
+aggregate and SSE responses, no uncertain or accepted side effect is ever re-delivered to the
+same native thread, and the bounded three-call live scenario passes. A provider limitation
+leaves Stage 09 incomplete unless this plan is separately reviewed and revised.
 
 ## Documentation and compatibility work
 
@@ -634,7 +714,8 @@ Implementation must update, in one reviewed change:
   the implicit-disabled terminal-tool rejection, and the item 14 superseded-reference decision;
 - `protocol/schemas/response-mapping.schema.json` and its version fixtures for the in-place
   version 2 bump, `turnId`, and claim fields while retaining version 1 as untrusted;
-- the changelog with the removal of `x_codex.threadReused` and the additive continuity behavior;
+- the changelog with the removal of `x_codex.threadReused`, the non-error handling of
+  uncertain and replayed continuity, and the additive continuity behavior;
 - quality/CI documentation with deterministic register coverage and the opt-in three-call live
   test; and
 - any generated protocol or fixture documentation required by the implementation review.
@@ -644,9 +725,15 @@ to `x_codex.threadContinuity`; a selector on an older response that previously r
 superseded-reference error can now receive a native fork; continuity failures on user tails that
 previously received typed errors can now receive HTTP 200 `failed` from a redirected fresh
 thread; valid tool-tail continuity failures and current-tip contention can likewise receive a
-fresh HTTP 200 `failed`. Malformed input and ambiguous side effects retain typed errors. No
-standard Chat Completions field is redefined: `previous_response_id` is a nonstandard proxy
-request extension, and `x_codex.threadContinuity` is a nonstandard response extension.
+fresh HTTP 200 `failed`. After the review revision, ambiguous side effects that would have
+returned HTTP 502 `continuation_outcome_unknown`, replays of claimed or consumed tool mappings
+that would have returned the typed non-replayable error, and post-start model failures now also
+return a redirected HTTP 200 — `rerun` when a prior delivery occurred, `failed` otherwise — or
+an ordinary fresh-path error when the fresh pass fails, and a
+response whose final mapping write fails is emitted with its `id` instead of
+erroring. Malformed input retains typed errors. No standard Chat Completions field is redefined:
+`previous_response_id` is a nonstandard proxy request extension, and `x_codex.threadContinuity`
+is a nonstandard response extension.
 
 ## Assumptions and non-goals
 
@@ -657,6 +744,9 @@ request extension, and `x_codex.threadContinuity` is a nonstandard response exte
 - A successful response can be mapped to a durable nonempty `turnId`; legacy records are the only
   records that may lack one.
 - The proxy can distinguish explicit rejection from an accepted-but-unacknowledged side effect.
+- Downstream accepts at-least-once delivery: a retried or uncertainty-redirected request may
+  re-execute a logically identical turn in another thread, reported through the `rerun`
+  continuity state rather than prevented.
 - The JavaScript request scheduler can perform lease acquisition and the immediate mapping reread
   without an intervening `await`, and listener startup waits for the in-place schema rewrite.
 - Full transcript conversion remains subject to existing representability and policy checks.
@@ -665,7 +755,9 @@ request extension, and `x_codex.threadContinuity` is a nonstandard response exte
 
 - No force-fork request extension, raw thread-ID exposure, or downstream replay of native history.
 - No attempt to delete uncertain or abandoned children.
+- No exactly-once delivery guarantee, request deduplication, or suppression of client retries.
 - No second state file, import marker, or quarantine mechanism.
 - No approximation of token usage or cache reuse.
-- No relaxation of policy, malformed-input validation, dynamic-tool correlation, or typed errors.
+- No relaxation of policy, malformed-input validation, or dynamic-tool correlation; pre-routing
+  client errors remain typed.
 - No implementation, schema migration, runtime behavior, or live test in this documentation stage.
