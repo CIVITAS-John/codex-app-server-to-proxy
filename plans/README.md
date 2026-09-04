@@ -51,13 +51,13 @@ This directory is the source of truth for product decisions, implementation stat
 | [06](06-policies.md) | Per-request cwd, sandbox, approvals, and web search | Policy matrix tests pass |
 | [07](07-quality-and-ci.md) | Security, compatibility, observability, and CI | Release test matrix passes |
 | [08](08-packaging-and-release.md) | Publishable npm artifact and release runbook | Packed-install smoke test passes |
-| [09](09-thread-continuity.md) | Safe same-thread reuse, native branching, and continuity outcomes | Continuity register, schema migration, and bounded live gate pass |
+| [09](09-thread-continuity.md) | Safe same-thread reuse, native branching, and continuity outcomes | Continuity register, in-place schema v2 migration, and bounded live gate pass |
 
 ## Current status
 
 ### Implemented locally
 
-Stages 01 through 08 are implemented in the source tree. Stage 08 includes the package metadata, deterministic packed-package smoke, registry-backed smoke workflow, trusted-publishing prerelease workflow, published-user README, changelog, and release runbook. The exact Codex dependency and generated contract remain pinned to `0.146.0`. Stage 09 is planned only; its continuity enum, native branching, schema v2 migration, and safe-fallback behavior are not implemented.
+Stages 01 through 08 are implemented in the source tree. Stage 08 includes the package metadata, deterministic packed-package smoke, registry-backed smoke workflow, trusted-publishing prerelease workflow, published-user README, changelog, and release runbook. The exact Codex dependency and generated contract remain pinned to `0.146.0`. Stage 09 is planned only; its continuity enum, native branching, in-place schema v2 migration, and one-shot redirect-based fresh fallback are not implemented.
 
 Until Stage 09 is implemented, the cross-stage continuation rules below describe the Stage 08 runtime (including its boolean reuse field and newest-response restriction). [Stage 09](09-thread-continuity.md) is the planned replacement design and is not current product behavior.
 
