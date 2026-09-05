@@ -45,6 +45,8 @@ The maintained TypeScript modules are grouped by domain so the public HTTP contr
 | `npm run format` | Apply Prettier formatting |
 | `npm run generate:protocol` | Refresh generated app-server protocol structures |
 | `npm run check:protocol` | Regenerate in a temporary root and reject checked-in protocol drift |
+| `npm run update:codex` | Attempt an upstream Codex update and run offline compatibility gates |
+| `npm run update:codex -- --check` | Repeat upgrade validation after agent repairs without reinstalling |
 | `npm run models:live` | List the authenticated live Codex model catalog without starting a model turn |
 | `npm run test:live` | Run the opt-in live contract suite |
 
@@ -53,6 +55,20 @@ The default local test command excludes `*.live.test.ts`, never makes a model ca
 The protocol cleanliness check seeds a temporary protocol root, regenerates there with the package-owned executable and version pin, compares the complete file set and contents, and removes the temporary root in a `finally` path. It never rewrites checked-in artifacts; `npm run generate:protocol` remains the explicit mutating command.
 
 `GET /v1/models` is the public compatibility route. It queries the active authenticated pinned app-server, aggregates all `model/list` pages, exposes visible model slugs accepted by Codex, and starts zero Codex threads or turns. When the temporary Responses Lite override is installed, it reflects that frozen catalog; otherwise it reflects app-server's ordinary catalog. The OpenAI-shaped `created: 0` and `owned_by: "openai"` fields are synthetic compatibility placeholders because app-server does not provide them. From a repository checkout, `npm run models:live` remains the hidden/full-metadata diagnostic: add `-- --include-hidden` for hidden entries or `-- --json` for complete metadata. It also starts zero model turns.
+
+## Updating upstream Codex
+
+Use the repository-local `$update-codex` skill (`.agents/skills/update-codex/SKILL.md`) to update the pin and handle compatibility repairs. Its automated first attempt is:
+
+```sh
+npm run update:codex
+```
+
+This resolves the npm `latest` release to an exact version; pass `-- <exact-version>` to choose a target. The command requires clean package manifests, generated protocol trees, and `protocol/VERSION.json`, installs with dependency lifecycle scripts disabled, regenerates the contract, and runs formatting, lint, protocol drift, offline tests, and packed-CLI checks. It makes zero live model calls. Installation requires registry access; all subsequent gates are offline.
+
+Failures return a nonzero exit code and leave the attempted update available for agent inspection. The script does not launch an agent: invoke `$update-codex` to diagnose and repair compatibility, then run `npm run update:codex -- --check` to repeat validation without reinstalling or regenerating the working tree. Installation or generation failures stop immediately; independent validation gates all run even if one fails.
+
+Even a green run requires review of upstream protocol changes, policy behavior, existing proxy homes and continuation stores, and the version-specific Responses Lite workaround. Record the compatibility decision in the relevant plan and update current-version documentation before release. The normal pull-request OS matrix remains required; live verification is a separate opt-in below.
 
 ## Continuous integration
 

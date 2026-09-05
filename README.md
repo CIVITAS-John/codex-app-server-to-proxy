@@ -287,6 +287,7 @@ npm uninstall codex-openai-proxy
 ## Documentation
 
 - [Development guide](https://github.com/CIVITAS-John/codex-app-server-to-proxy/blob/main/docs/development.md) — source layout, commands, tests, and verification modes
+- [Upstream Codex updates](https://github.com/CIVITAS-John/codex-app-server-to-proxy/blob/main/docs/development.md#updating-upstream-codex) — automated update checks and agent-guided compatibility repairs
 - [Security model](https://github.com/CIVITAS-John/codex-app-server-to-proxy/blob/main/docs/security.md) — threat model and audit boundary
 - [Implementation plan](https://github.com/CIVITAS-John/codex-app-server-to-proxy/blob/main/plans/README.md) — decisions and remaining work
 - [App-server protocol reference](https://github.com/CIVITAS-John/codex-app-server-to-proxy/blob/main/docs/codex-app-server.md)

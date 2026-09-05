@@ -23,6 +23,8 @@ These decisions make the prerelease intentionally narrow: users get a reproducib
 
 ## Implemented in the source tree
 
+- Upstream Codex updates use the repository-local `update-codex` agent skill and `npm run update:codex` helper. The helper pins one exact release, regenerates protocol artifacts, and runs offline gates; failures preserve the attempt for agent repair, with `--check` available for validation after repairs. Passing checks does not establish persistence or live compatibility: the agent must review the protocol diff, existing homes/stores, policies, and version-specific workarounds before recording the release decision. No automatic merge or publication is introduced.
+
 - npm metadata identifies the repository, homepage, issue tracker, author, MIT license, prerelease version, supported Node.js range, CLI bin, and exact Codex runtime dependency.
 - The package allow-list excludes source-only generated protocol trees and retains the request-extension and continuation-state JSON Schemas referenced by the published README.
 - `--version` reports the package version, and `--help` succeeds before or after `serve`.
