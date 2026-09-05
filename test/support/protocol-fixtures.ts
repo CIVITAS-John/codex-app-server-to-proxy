@@ -71,11 +71,13 @@ export function protocolModel(
     availabilityNux: null,
     displayName: model,
     description: "Synthetic model fixture.",
+    modelSpecialty: null,
     hidden,
     supportedReasoningEfforts: [],
     defaultReasoningEffort: "medium",
     inputModalities: ["text"],
     supportsPersonality: false,
+    multiAgentVersion: null,
     additionalSpeedTiers: [],
     serviceTiers: [],
     defaultServiceTier: null,
@@ -109,7 +111,13 @@ export function protocolRateLimitsResponse(
   },
   rateLimitResetCredits: GetAccountRateLimitsResponse["rateLimitResetCredits"] = null,
 ): GetAccountRateLimitsResponse {
-  return { rateLimits: snapshot, rateLimitsByLimitId, rateLimitResetCredits };
+  return {
+    rateLimits: snapshot,
+    rateLimitsByLimitId,
+    rateLimitResetCredits,
+    accountId: null,
+    rateLimitUpsell: null,
+  };
 }
 
 /** Builds a complete generated thread/start response for fake transports. */
@@ -174,9 +182,13 @@ export function protocolThread(
     parentThreadId: null,
     preview: "",
     ephemeral: false,
-    isPinned: false,
+    section: null,
+    sectionEnteredAt: null,
+    projectId: null,
     historyMode: "paginated",
     modelProvider: "openai",
+    model: null,
+    reasoningEffort: null,
     createdAt: 0,
     updatedAt: 0,
     recencyAt: null,

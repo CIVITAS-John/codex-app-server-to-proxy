@@ -191,6 +191,7 @@ class ContinuationAppServer {
               turnId,
               responseId: `raw_${turnId}`,
               usage: null,
+              usageMetadata: null,
             },
           }),
         );

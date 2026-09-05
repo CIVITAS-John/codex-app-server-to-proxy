@@ -76,6 +76,7 @@ const embeddedProtocolResults = {
         turnId: "turn_shutdown",
         responseId: "raw_turn_shutdown",
         usage: null,
+        usageMetadata: null,
       },
     }),
   ),

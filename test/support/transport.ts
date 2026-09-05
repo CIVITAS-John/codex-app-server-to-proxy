@@ -224,6 +224,7 @@ export function completeRawResponseBatch(
         turnId,
         responseId: `raw_${turnId}`,
         usage: null,
+        usageMetadata: null,
       },
     }),
   );

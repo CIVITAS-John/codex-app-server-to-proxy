@@ -136,12 +136,12 @@ function fakeRpc(
           setImmediate(() => input.end());
         else if (kind === "early")
           input.write(
-            `${JSON.stringify(protocolNotification({ method: "account/login/completed", params: { loginId: "login", success: true, error: null } }))}\n`,
+            `${JSON.stringify(protocolNotification({ method: "account/login/completed", params: { loginId: "login", success: true, error: null, onboardingEntrypoint: null } }))}\n`,
           );
         else if (kind !== "timeout")
           setImmediate(() =>
             input.write(
-              `${JSON.stringify(protocolNotification({ method: "account/login/completed", params: { loginId: "login", success: kind !== "failure", error: kind === "failure" ? "denied" : null } }))}\n`,
+              `${JSON.stringify(protocolNotification({ method: "account/login/completed", params: { loginId: "login", success: kind !== "failure", error: kind === "failure" ? "denied" : null, onboardingEntrypoint: null } }))}\n`,
             ),
           );
       }

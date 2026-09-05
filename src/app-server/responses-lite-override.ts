@@ -116,7 +116,7 @@ function renderConfig(existing: string, catalogPath: string): string {
   const remainder = withoutCatalogKey.replace(/^(?:\r?\n)+/u, "");
   const managedBlock = [
     CONFIG_BLOCK_START,
-    "# Temporary workaround for the Codex 0.146.0 Responses request framing.",
+    "# Temporary workaround for the Codex 0.153.4 Responses request framing.",
     `model_catalog_json = ${JSON.stringify(catalogPath)}`,
     CONFIG_BLOCK_END,
     "",

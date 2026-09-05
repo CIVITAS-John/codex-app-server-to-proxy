@@ -516,6 +516,7 @@ function lateFailureAppServer(mode: "transport" | "event"): FakeTransport {
                   message: "turn failed",
                   codexErrorInfo: null,
                   additionalDetails: null,
+                  misalignment: null,
                 },
               },
             }),
@@ -548,6 +549,7 @@ function terminalFailureAppServer({
     message,
     codexErrorInfo,
     additionalDetails: null,
+    misalignment: null,
   };
   const fake = createFakeTransport({
     onMessage(rawMessage, send) {
@@ -1162,6 +1164,7 @@ test("normalizes interleaved text, reasoning, internal items, tools, usage, and 
         message: "failed",
         codexErrorInfo: null,
         additionalDetails: null,
+        misalignment: null,
       },
     },
   });

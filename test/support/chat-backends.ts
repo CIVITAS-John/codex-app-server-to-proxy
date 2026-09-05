@@ -614,6 +614,7 @@ function createScriptedTransport(
                 turnId,
                 responseId: `raw_contract_${turnId}_${batchIndex}`,
                 usage: null,
+                usageMetadata: null,
               },
             }),
           );
@@ -650,6 +651,7 @@ function createScriptedTransport(
                 turnId,
                 responseId: `raw_contract_${turnId}_restart`,
                 usage: null,
+                usageMetadata: null,
               },
             }),
           );
@@ -915,6 +917,7 @@ function createScriptedTransport(
                 turnId: "turn_contract_child",
                 responseId: `raw_contract_child_${childThreadId}`,
                 usage: null,
+                usageMetadata: null,
               },
             }),
           );

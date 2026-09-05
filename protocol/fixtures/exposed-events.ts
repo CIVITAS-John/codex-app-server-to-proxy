@@ -125,6 +125,7 @@ export const exposedEvents = [
       turnId: "turn_fixture",
       responseId: "resp_fixture",
       usage: null,
+      usageMetadata: null,
     },
   },
   {
@@ -183,6 +184,7 @@ export const exposedEvents = [
         message: "fixture failure",
         codexErrorInfo: null,
         additionalDetails: null,
+        misalignment: null,
       },
       willRetry: false,
       threadId: "thr_fixture",
@@ -209,6 +211,7 @@ export const exposedEvents = [
       turnId: "turn_fixture",
       itemId: "item_command",
       startedAtMs: 0,
+      kind: "command",
       environmentId: null,
       reason: "fixture",
     },

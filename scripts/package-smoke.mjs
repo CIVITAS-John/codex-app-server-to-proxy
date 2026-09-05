@@ -212,10 +212,11 @@ const cwd = process.cwd();
 const thread = {
   id: "thr_package_smoke", extra: null, sessionId: "session_package_smoke",
   forkedFromId: null, parentThreadId: null, preview: "", ephemeral: false,
-  isPinned: false,
-  historyMode: "paginated", modelProvider: "openai", createdAt: 0, updatedAt: 0,
+  section: null, sectionEnteredAt: null, projectId: null,
+  historyMode: "paginated", modelProvider: "openai", model: null, reasoningEffort: null,
+  createdAt: 0, updatedAt: 0,
   recencyAt: null, status: { type: "idle" }, path: null, cwd, cliVersion: "${codexVersion}",
-  source: "unknown", threadSource: null, agentNickname: null, agentRole: null,
+  source: "unknown", canAcceptDirectInput: null, threadSource: null, agentNickname: null, agentRole: null,
   gitInfo: null, name: null, turns: []
 };
 const turn = (status) => ({
@@ -225,8 +226,9 @@ const turn = (status) => ({
 const model = {
   id: "gpt-5.6-luna", model: "gpt-5.6-luna", upgrade: null, upgradeInfo: null,
   availabilityNux: null, displayName: "Package smoke model", description: "",
-  hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "low", description: "" }],
+  modelSpecialty: null, hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "low", description: "" }],
   defaultReasoningEffort: "low", inputModalities: ["text"], supportsPersonality: false,
+  multiAgentVersion: null,
   additionalSpeedTiers: [], serviceTiers: [], defaultServiceTier: null, isDefault: true
 };
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
