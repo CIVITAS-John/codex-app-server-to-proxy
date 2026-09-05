@@ -10,6 +10,19 @@ import {
   HANDLED_NOTIFICATION_METHODS,
   type Usage,
 } from "../../src/http/chat-normalize.js";
+import {
+  execute,
+  type ChatHandlerOptions,
+} from "../../src/http/chat-execute.js";
+import {
+  validateRequest,
+  type ChatRequest,
+} from "../../src/http/chat-validate.js";
+import { HttpError } from "../../src/http/errors.js";
+import {
+  ContinuationCoordinator,
+  ResponseStore,
+} from "../../src/continuation/state.js";
 import { createLogger, type Logger } from "../../src/core/logger.js";
 import type { ProxyServer } from "../../src/http/server.js";
 import {
@@ -24,6 +37,7 @@ import {
   protocolTurn,
 } from "../support/protocol-fixtures.js";
 import {
+  resolveEffectivePolicy,
   UNRESTRICTED_POLICY_REQUIREMENTS,
   type PolicyRequirements,
 } from "../../src/core/policy.js";
@@ -94,6 +108,7 @@ interface FakeAppServerOptions {
   collabAgentLifecycle?: boolean;
   complete?: boolean;
   onInterrupt?: () => void;
+  onMethod?: (method: string) => void;
   requestTool?: boolean;
   usageOrder?: UsageWireOrder;
   usageOnCompletion?: boolean;
@@ -107,6 +122,7 @@ function fakeAppServer({
   collabAgentLifecycle = false,
   complete = true,
   onInterrupt = () => {},
+  onMethod,
   requestTool = false,
   usageOrder = "before_completion",
   usageOnCompletion = true,
@@ -123,6 +139,7 @@ function fakeAppServer({
         method: string;
         params: Record<string, unknown>;
       };
+      onMethod?.(message.method);
       if (message.method === "thread/start") {
         thread = "thr_test";
         send(
@@ -246,24 +263,39 @@ function policyCapturingAppServer(): {
   messages: Array<Record<string, unknown>>;
 } {
   const messages: Array<Record<string, unknown>> = [];
-  let priorRequests = 0;
+  // Attributed model requests are counted per thread: a fallback's fresh
+  // thread must not inherit the source thread's attributed requests.
+  const requestsByThread = new Map<string, number>();
+  // A fixed thread id would make every fallback completion's recordReady
+  // supersede the ready record of the very selector a later sub-case still
+  // reuses, degrading its admission to a superseded fallback and masking the
+  // binding comparison, so each start allocates a distinct thread id.
+  let started = 0;
+  /** Reads the thread id one captured method's params requested. */
+  const requestedThreadId = (message: Record<string, unknown>): string =>
+    String((message.params as { threadId?: unknown } | undefined)?.threadId);
   const fake = createFakeTransport({
     onMessage(message, send) {
       if (typeof message.method !== "string") return;
       messages.push(message);
       const id = message.id as number;
-      if (message.method === "thread/start")
+      if (message.method === "thread/start") {
+        started += 1;
         send(
           protocolResponse(
             "thread/start",
             id,
-            protocolThreadStartResponse(protocolThread("thr_policy")),
+            protocolThreadStartResponse(
+              protocolThread(
+                started === 1 ? "thr_policy" : `thr_policy_${started}`,
+              ),
+            ),
           ),
         );
-      else if (message.method === "thread/read")
+      } else if (message.method === "thread/read")
         send(
           protocolResponse("thread/read", id, {
-            thread: protocolThread("thr_policy"),
+            thread: protocolThread(requestedThreadId(message)),
           }),
         );
       else if (message.method === "thread/resume")
@@ -271,7 +303,9 @@ function policyCapturingAppServer(): {
           protocolResponse(
             "thread/resume",
             id,
-            protocolThreadResumeResponse(protocolThread("thr_policy")),
+            protocolThreadResumeResponse(
+              protocolThread(requestedThreadId(message)),
+            ),
           ),
         );
       else if (message.method === "thread/inject_items")
@@ -284,8 +318,14 @@ function policyCapturingAppServer(): {
         );
         // Policy assertions are unrelated to missing usage, so reproduce the
         // live terminal sequence and avoid the proxy's defensive grace period.
-        completeTurn(send, "thr_policy", "turn_policy", { priorRequests });
-        priorRequests += 1;
+        const threadId = requestedThreadId(message);
+        completeTurn(send, threadId, "turn_policy", {
+          priorRequests: requestsByThread.get(threadId) ?? 0,
+        });
+        requestsByThread.set(
+          threadId,
+          (requestsByThread.get(threadId) ?? 0) + 1,
+        );
       }
     },
   });
@@ -870,12 +910,16 @@ async function withChatServer(
       fake: ChatTestTransport,
       requirements?: PolicyRequirements,
     ) => void,
+    initialMethods: string[],
   ) => Promise<void>,
   requestTimeoutMs = 30_000,
   stateDir = `${tmpdir()}/codex-proxy-chat-tests-${process.pid}`,
   logger = silentLogger,
 ): Promise<void> {
-  const initial = fakeAppServer();
+  const initialMethods: string[] = [];
+  const initial = fakeAppServer({
+    onMethod: (method) => initialMethods.push(method),
+  });
   let proxy: ProxyServer | undefined;
   try {
     const started = await startProxyWithTransport(initial.rpc, {
@@ -891,7 +935,7 @@ async function withChatServer(
     ): void => {
       proxy!.setTransport(fake.rpc, requirements);
     };
-    await run(started.origin, proxy, useTransport);
+    await run(started.origin, proxy, useTransport, initialMethods);
   } finally {
     proxy?.setReady(false);
     proxy?.setTransport(undefined);
@@ -2771,17 +2815,40 @@ test("late streaming failures emit one error and close without DONE", async () =
       );
       if (mode === "event") {
         const first = JSON.parse(frames[0]!) as { id: string };
+        // The failed stream never persisted a mapping, so this selector is
+        // unknown: admission must execute the transcript on one fresh thread
+        // rather than reject the request, and the fresh turn fails the same
+        // way its transport does.
         const continuation = await fetch(`${origin}/v1/chat/completions`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           signal: AbortSignal.timeout(500),
           body: JSON.stringify({
             model: "m",
+            stream: true,
             previous_response_id: first.id,
             messages: [{ role: "user", content: "must be unknown" }],
           }),
         });
-        assert.equal(continuation.status, 404);
+        assert.equal(continuation.status, 200);
+        assert.equal(
+          continuation.headers.get("content-type"),
+          "text/event-stream; charset=utf-8",
+        );
+        const continuationText = await continuation.text();
+        const continuationFrames = parseSseFrames(continuationText);
+        assert.equal(continuationFrames.includes("[DONE]"), false);
+        const continuationChunks = continuationFrames.map(
+          (frame) =>
+            JSON.parse(frame) as StreamedChunk & {
+              error?: Record<string, unknown>;
+            },
+        );
+        assert.equal(continuationChunks[0]?.x_codex?.threadReused, false);
+        const continuationErrors = continuationChunks.filter(
+          (chunk) => chunk.error !== undefined,
+        );
+        assert.equal(continuationErrors.length, 1);
       }
     });
 });
@@ -3131,8 +3198,86 @@ test("names the unsupported message fields it rejects", async () => {
   });
 });
 
-test("rejects ambiguous history and unknown continuation before app-server work", async () => {
-  await withChatServer(async (origin) => {
+test("tool results without previous_response_id require enabled implicit continuation", async () => {
+  const request = {
+    model: "m",
+    messages: [
+      { role: "user", content: "run the tool" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_implicit_disabled",
+            type: "function",
+            function: { name: "lookup", arguments: "{}" },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        tool_call_id: "call_implicit_disabled",
+        content: "tool output",
+      },
+    ],
+  };
+  // Positive control: with the default enabled, the same shape executes fresh
+  // because its call IDs match no pending batch.
+  await withChatServer(async (origin, _proxy, _useTransport, methods) => {
+    const response = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(methods, [
+      "thread/start",
+      "thread/inject_items",
+      "turn/start",
+    ]);
+  });
+  await withTempDir(async (directory) => {
+    const methods: string[] = [];
+    const fake = createFakeTransport({
+      onMessage(message) {
+        if (typeof message.method === "string") methods.push(message.method);
+      },
+    });
+    let proxy: ProxyServer | undefined;
+    try {
+      const started = await startProxyWithTransport(fake.rpc, {
+        root: await realpath("."),
+        stateDir: join(directory, "state"),
+        implicitToolContinuation: false,
+      });
+      proxy = started.proxy;
+      const response = await fetch(`${started.origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request),
+      });
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), {
+        error: {
+          message:
+            "Tool results require previous_response_id when implicit tool continuation is disabled.",
+          type: "invalid_request_error",
+          param: "previous_response_id",
+          code: "invalid_request",
+        },
+      });
+      // Validation rejects before admission, so the app-server sees no frame.
+      assert.deepEqual(methods, []);
+    } finally {
+      proxy?.setReady(false);
+      proxy?.setTransport(undefined);
+      await proxy?.close();
+    }
+  }, "codex-implicit-disabled-");
+});
+
+test("rejects ambiguous history and executes an unknown continuation on a fresh thread", async () => {
+  await withChatServer(async (origin, _proxy, _useTransport, methods) => {
     for (const body of [
       { model: "m", messages: [{ role: "tool", content: "x" }] },
       {
@@ -3252,15 +3397,16 @@ test("rejects ambiguous history and unknown continuation before app-server work"
         previous_response_id: "chatcmpl_old",
       }),
     });
-    assert.equal(unknown.status, 404);
+    // An unknown selector is now a preference, not a requirement: the request
+    // executes its transcript on one fresh thread and completes normally.
+    assert.equal(unknown.status, 200);
     assert.equal(
       unknown.headers.get("content-type"),
-      "application/json; charset=utf-8",
+      "text/event-stream; charset=utf-8",
     );
-    assert.equal(
-      ((await unknown.json()) as { error: { code: string } }).error.code,
-      "unknown_previous_response_id",
-    );
+    const chunks = streamedChunks(await unknown.text());
+    assert.equal(chunks[0]?.x_codex?.threadReused, false);
+    assert.deepEqual(methods, ["thread/start", "turn/start"]);
   });
 });
 
@@ -3537,11 +3683,18 @@ test("request policies map exactly, bind continuations, and honor managed denial
     const root = await realpath(configuredRoot);
     const cwd = await realpath(configuredCwd);
     const fake = policyCapturingAppServer();
+    // The fallback reasons are info-level structured entries carrying only a
+    // request id and a fixed reason, so an in-memory capture can assert them.
+    const fallbackEntries: Array<Record<string, unknown>> = [];
+    const fallbackLogger = createLogger("info", (entry) =>
+      fallbackEntries.push(entry),
+    );
     let proxy: ProxyServer | undefined;
     try {
       const started = await startProxyWithTransport(fake.rpc, {
         root,
         stateDir: join(directory, "state"),
+        log: fallbackLogger,
       });
       proxy = started.proxy;
       const origin = started.origin;
@@ -3650,13 +3803,31 @@ test("request policies map exactly, bind continuations, and honor managed denial
           x_codex: { ...request.x_codex, sandbox: "read-only" },
         }),
       });
-      assert.equal(changed.status, 409);
+      // A changed policy binding selects one fresh thread under the requested
+      // settings instead of a 409, and never attempts a native resume.
+      assert.equal(changed.status, 200);
       assert.equal(
-        ((await changed.json()) as { error: { code: string } }).error.code,
-        "continuation_policy_mismatch",
+        ((await changed.json()) as { x_codex?: { threadReused?: boolean } })
+          .x_codex?.threadReused,
+        false,
       );
-      assert.equal(fake.messages.length, beforeContinuation);
+      const changedMessages = fake.messages.slice(beforeContinuation);
+      assert.deepEqual(
+        changedMessages.map((message) => message.method),
+        ["thread/start", "turn/start"],
+      );
+      assert.deepEqual(changedMessages[0]?.params, {
+        model: "m",
+        ephemeral: false,
+        experimentalRawEvents: true,
+        cwd,
+        sandbox: "read-only",
+        approvalPolicy: "never",
+        approvalsReviewer: "auto_review",
+        config: { web_search: "indexed" },
+      });
 
+      const beforeChangedWeb = fake.messages.length;
       const changedWeb = await fetch(`${origin}/v1/chat/completions`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -3666,12 +3837,27 @@ test("request policies map exactly, bind continuations, and honor managed denial
           x_codex: { ...request.x_codex, web_search: "disabled" },
         }),
       });
-      assert.equal(changedWeb.status, 409);
+      assert.equal(changedWeb.status, 200);
       assert.equal(
-        ((await changedWeb.json()) as { error: { code: string } }).error.code,
-        "continuation_policy_mismatch",
+        ((await changedWeb.json()) as { x_codex?: { threadReused?: boolean } })
+          .x_codex?.threadReused,
+        false,
       );
-      assert.equal(fake.messages.length, beforeContinuation);
+      const changedWebMessages = fake.messages.slice(beforeChangedWeb);
+      assert.deepEqual(
+        changedWebMessages.map((message) => message.method),
+        ["thread/start", "turn/start"],
+      );
+      assert.deepEqual(changedWebMessages[0]?.params, {
+        model: "m",
+        ephemeral: false,
+        experimentalRawEvents: true,
+        cwd,
+        sandbox: "workspace-write",
+        approvalPolicy: "never",
+        approvalsReviewer: "auto_review",
+        config: { web_search: "disabled" },
+      });
 
       const managedFake = policyCapturingAppServer();
       proxy.setTransport(managedFake.rpc, {
@@ -3690,16 +3876,49 @@ test("request policies map exactly, bind continuations, and honor managed denial
           }),
         },
       );
-      assert.equal(changedManagedPolicy.status, 409);
+      // Managed requirements change the effective binding, so the request
+      // still executes, but only on one fresh thread that carries the
+      // managed-selected approval settings.
+      assert.equal(changedManagedPolicy.status, 200);
       assert.equal(
         (
           (await changedManagedPolicy.json()) as {
-            error: { code: string };
+            x_codex?: { threadReused?: boolean };
           }
-        ).error.code,
-        "continuation_policy_mismatch",
+        ).x_codex?.threadReused,
+        false,
       );
-      assert.deepEqual(managedFake.messages, []);
+      assert.deepEqual(
+        managedFake.messages.map((message) => message.method),
+        ["thread/start", "turn/start"],
+      );
+      assert.deepEqual(managedFake.messages[0]?.params, {
+        model: "m",
+        ephemeral: false,
+        experimentalRawEvents: true,
+        cwd,
+        sandbox: "workspace-write",
+        approvalPolicy: "on-request",
+        approvalsReviewer: "user",
+        config: { web_search: "indexed" },
+      });
+      assert.deepEqual(managedFake.messages[1]?.params, {
+        threadId: "thr_policy",
+        model: "m",
+        effort: "high",
+        summary: "detailed",
+        input: [{ type: "text", text: "policy", text_elements: [] }],
+        cwd,
+        approvalPolicy: "on-request",
+        approvalsReviewer: "user",
+        sandboxPolicy: {
+          type: "workspaceWrite",
+          writableRoots: [cwd],
+          networkAccess: false,
+          excludeTmpdirEnvVar: false,
+          excludeSlashTmp: false,
+        },
+      });
 
       const defaultFake = policyCapturingAppServer();
       proxy.setTransport(defaultFake.rpc, UNRESTRICTED_POLICY_REQUIREMENTS);
@@ -3836,13 +4055,60 @@ test("request policies map exactly, bind continuations, and honor managed denial
           x_codex: { sandbox: "read-only" },
         }),
       });
-      assert.equal(changedDisabled.status, 409);
+      // Leaving the disabled sandbox binding selects a fresh thread whose
+      // settings realize the requested read-only sandbox, with no
+      // environments override and no native resume.
+      assert.equal(changedDisabled.status, 200);
       assert.equal(
-        ((await changedDisabled.json()) as { error: { code: string } }).error
-          .code,
-        "continuation_policy_mismatch",
+        (
+          (await changedDisabled.json()) as {
+            x_codex?: { threadReused?: boolean };
+          }
+        ).x_codex?.threadReused,
+        false,
       );
-      assert.equal(disabledFake.messages.length, beforeDisabledMismatch);
+      const changedDisabledMessages = disabledFake.messages.slice(
+        beforeDisabledMismatch,
+      );
+      assert.deepEqual(
+        changedDisabledMessages.map((message) => message.method),
+        ["thread/start", "turn/start"],
+      );
+      assert.deepEqual(changedDisabledMessages[0]?.params, {
+        model: "m",
+        ephemeral: false,
+        experimentalRawEvents: true,
+        cwd: root,
+        sandbox: "read-only",
+        approvalPolicy: "never",
+        approvalsReviewer: "auto_review",
+        config: { web_search: "disabled" },
+      });
+      assert.deepEqual(changedDisabledMessages[1]?.params, {
+        threadId: "thr_policy_2",
+        model: "m",
+        summary: "detailed",
+        input: [{ type: "text", text: "disabled", text_elements: [] }],
+        cwd: root,
+        approvalPolicy: "never",
+        approvalsReviewer: "auto_review",
+        sandboxPolicy: { type: "readOnly", networkAccess: false },
+      });
+
+      // Every mismatch fallback above reached the binding comparison on a live
+      // selector; a masked regression would show a superseded or unknown
+      // reason instead of the policy-mismatch reason logged here.
+      assert.deepEqual(
+        capturedEvent(fallbackEntries, "continuation_fresh_fallback").map(
+          (entry) => entry.reason,
+        ),
+        [
+          "continuation_policy_mismatch",
+          "continuation_policy_mismatch",
+          "continuation_policy_mismatch",
+          "continuation_policy_mismatch",
+        ],
+      );
 
       const defaultDeniedFake = policyCapturingAppServer();
       proxy.setTransport(defaultDeniedFake.rpc, {
@@ -3931,4 +4197,112 @@ test("refreshing managed requirements on an unchanged transport takes effect", a
       await proxy?.close();
     }
   }, "codex-policy-refresh-");
+});
+
+/** Direct-execute fixture: one recording fake, coordinator, and options. */
+interface ExecuteFixture {
+  fake: FakeTransport;
+  methods: string[];
+  continuations: ContinuationCoordinator;
+  options: ChatHandlerOptions;
+}
+
+/** Builds one validated fresh request over a recording fake and coordinator. */
+async function newExecuteFixture(
+  stateDirectory: string,
+  signal: AbortSignal,
+): Promise<{ request: ChatRequest; fixture: ExecuteFixture }> {
+  const methods: string[] = [];
+  const fake = createFakeTransport({
+    onMessage(message) {
+      if (typeof message.method === "string") methods.push(message.method);
+    },
+  });
+  const continuations = new ContinuationCoordinator(
+    new ResponseStore(stateDirectory),
+    fake.rpc,
+  );
+  const root = await realpath(".");
+  const { requestPolicy, ...parsed } = validateRequest(
+    { model: "m", messages: [{ role: "user", content: "unit" }] },
+    silentLogger,
+    "req_execute_unit",
+    false,
+  );
+  const request: ChatRequest = {
+    ...parsed,
+    policy: await resolveEffectivePolicy(
+      requestPolicy,
+      root,
+      UNRESTRICTED_POLICY_REQUIREMENTS,
+    ),
+  };
+  return {
+    request,
+    fixture: {
+      fake,
+      methods,
+      continuations,
+      options: {
+        rpc: fake.rpc,
+        log: silentLogger,
+        requestId: "req_execute_unit",
+        signal,
+        continuations,
+        root,
+        requirements: UNRESTRICTED_POLICY_REQUIREMENTS,
+        implicitToolContinuation: false,
+      },
+    },
+  };
+}
+
+test("a disposed coordinator rejects execution before any RPC", async () => {
+  await withTempDir(async (directory) => {
+    const { request, fixture } = await newExecuteFixture(
+      join(directory, "state"),
+      new AbortController().signal,
+    );
+    try {
+      // Disposal is a lifecycle error, never a fresh-fallback reason, so an
+      // otherwise open transport must not see a single frame.
+      fixture.continuations.dispose();
+      await assert.rejects(
+        execute(request, fixture.options, "chatcmpl_execute_unit"),
+        /Continuation coordinator is disposed\./,
+      );
+      assert.deepEqual(fixture.methods, []);
+    } finally {
+      fixture.continuations.dispose();
+      fixture.fake.close();
+    }
+  }, "codex-execute-disposed-");
+});
+
+test("an aborted request rejects execution before any RPC", async () => {
+  await withTempDir(async (directory) => {
+    const controller = new AbortController();
+    controller.abort();
+    const { request, fixture } = await newExecuteFixture(
+      join(directory, "state"),
+      controller.signal,
+    );
+    try {
+      // Cancellation likewise precedes admission, so no thread or turn is
+      // started for a request whose client is already gone.
+      await assert.rejects(
+        execute(request, fixture.options, "chatcmpl_execute_unit"),
+        (error: unknown) => {
+          assert.ok(error instanceof HttpError);
+          assert.equal(error.status, 408);
+          assert.equal(error.code, "request_timeout");
+          return true;
+        },
+      );
+      assert.deepEqual(fixture.methods, []);
+    } finally {
+      fixture.continuations.dispose();
+      fixture.fake.close();
+    }
+  }, "codex-execute-aborted-");
 });

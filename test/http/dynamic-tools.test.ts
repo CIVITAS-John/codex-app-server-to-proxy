@@ -76,11 +76,26 @@ interface ToolAppServerUsage {
 /** Scripted failure injection for the interrupt and injection RPCs. */
 interface ToolAppServerFailures {
   interruptError?: boolean;
+  /** One-shot: only the first `thread/inject_items` fails; later ones succeed. */
   injectError?: boolean;
   duplicateToolCallId?: boolean;
+  /** One-shot: only the first `thread/start` fails; later ones succeed. */
+  failThreadStart?: boolean;
 }
 
-/** Scriptable fake app-server that exercises fragmented frames and parallel tools. */
+/**
+ * Counts every `thread/start` across all fake instances, like a real
+ * app-server's globally unique thread ids. Restart tests share one
+ * continuation store, so a repeated id would let one thread's success
+ * supersede another thread's durable records.
+ */
+let startedThreadCount = 0;
+
+/**
+ * Scriptable fake app-server that exercises fragmented frames and parallel
+ * tools. Every `thread/start` allocates a distinct thread id; thread reads and
+ * resumes echo the requested id unless a test overrides the resumed identity.
+ */
 class ToolAppServer {
   readonly transport: FakeTransport;
   /** Rejections the proxy sent to the issued `item/tool/call` requests. */
@@ -106,18 +121,23 @@ class ToolAppServer {
   #turn = 0;
   /** The tool-call turn currently awaiting its interrupt, if any. */
   #toolTurnId: string | undefined;
+  /** Thread of the tool-call turn currently awaiting its interrupt. */
+  #toolTurnThread: string | undefined;
   /** Interrupted turn whose delayed callback is emitted on the next turn. */
   #delayedToolTurnId: string | undefined;
+  /** Thread of the delayed turn; its stale callback must cite it. */
+  #delayedToolTurnThread: string | undefined;
   #toolRequestIds = new Set([901, 902]);
   #rawResponseBoundaries = false;
-  // Counts the model requests app-server has already attributed to the thread,
-  // so a later turn's cumulative `total` covers every earlier request.
-  #priorRequests = 0;
+  // Counts the model requests app-server has already attributed to each
+  // thread, so a later turn's cumulative `total` covers every earlier request
+  // on that thread only — a fallback's fresh thread starts from zero.
+  readonly #requestsByThread = new Map<string, number>();
 
   constructor(
     private readonly toolsOnFirstTurn = true,
     private readonly failResume = false,
-    private readonly resumedThreadId = "thr_dynamic_tools",
+    private readonly resumedThreadId: string | undefined = undefined,
     private readonly internalBeforeTools = false,
     private readonly usage: ToolAppServerUsage = {},
     private readonly failures: ToolAppServerFailures = {},
@@ -126,6 +146,19 @@ class ToolAppServer {
       fragmentCount: 3,
       onMessage: (message) => this.#receive(message),
     });
+  }
+
+  /** Returns the model requests app-server already attributed to one thread. */
+  #attributedRequests(threadId: string): number {
+    return this.#requestsByThread.get(threadId) ?? 0;
+  }
+
+  /** Records one attributed model request for its owning thread. */
+  #attributeRequest(threadId: string): void {
+    this.#requestsByThread.set(
+      threadId,
+      this.#attributedRequests(threadId) + 1,
+    );
   }
 
   /**
@@ -140,7 +173,7 @@ class ToolAppServer {
       turnId,
       tokenUsageFixture(
         this.usage.reasoningOutputTokens ?? 0,
-        Math.max(this.#priorRequests - 1, 0),
+        Math.max(this.#attributedRequests(this.#thread) - 1, 0),
       ),
     );
   }
@@ -156,10 +189,25 @@ class ToolAppServer {
       this.methods.push(message.method);
       const id = message.id as number;
       if (message.method === "thread/start") {
+        if (this.failures.failThreadStart) {
+          // One-shot knob: the first start is rejected and later ones succeed.
+          this.failures.failThreadStart = false;
+          // JSON-RPC failures intentionally have no generated success type.
+          this.#send({
+            id,
+            error: { code: -32000, message: "thread start rejected" },
+          });
+          return;
+        }
         const params = message.params as Record<string, unknown>;
         this.#rawResponseBoundaries = params.experimentalRawEvents === true;
         if (!this.#rawResponseBoundaries)
           throw new Error("thread did not opt into raw response events");
+        startedThreadCount += 1;
+        this.#thread =
+          startedThreadCount === 1
+            ? "thr_dynamic_tools"
+            : `thr_dynamic_tools_${startedThreadCount}`;
         this.#send(
           protocolResponse(
             "thread/start",
@@ -170,7 +218,9 @@ class ToolAppServer {
       } else if (message.method === "thread/read")
         this.#send(
           protocolResponse("thread/read", id, {
-            thread: protocolThread(this.#thread),
+            thread: protocolThread(
+              String((message.params as { threadId?: unknown }).threadId),
+            ),
           }),
         );
       else if (message.method === "thread/resume") {
@@ -181,18 +231,24 @@ class ToolAppServer {
             error: { code: -32000, message: "thread changed" },
           });
         } else {
+          // The constructor override exists for identity-mismatch tests; a
+          // real app-server resumes the requested thread id.
+          const threadId =
+            this.resumedThreadId ??
+            String((message.params as { threadId?: unknown }).threadId);
           this.#send(
             protocolResponse(
               "thread/resume",
               id,
-              protocolThreadResumeResponse(
-                protocolThread(this.resumedThreadId),
-              ),
+              protocolThreadResumeResponse(protocolThread(threadId)),
             ),
           );
         }
       } else if (message.method === "thread/inject_items") {
         if (this.failures.injectError) {
+          // One-shot knob: only the first injection fails, so a retry that
+          // isolates on a fresh thread can inject its own history.
+          this.failures.injectError = false;
           this.#send({
             id,
             error: { code: -32000, message: "injection rejected" },
@@ -214,15 +270,19 @@ class ToolAppServer {
         }
         this.#send(protocolResponse("turn/interrupt", id, {}));
         const turnId = this.#toolTurnId;
-        if (!turnId) return;
+        const threadId = this.#toolTurnThread;
+        if (!turnId || !threadId) return;
         this.#toolTurnId = undefined;
-        if (this.sendLateToolCallDuringContinuation)
+        this.#toolTurnThread = undefined;
+        if (this.sendLateToolCallDuringContinuation) {
           this.#delayedToolTurnId = turnId;
+          this.#delayedToolTurnThread = threadId;
+        }
         if (this.sendLateToolCallAfterInterrupt) {
           this.#toolRequestIds.add(903);
           suspendWithTools(
             this.transport.send,
-            this.#thread,
+            threadId,
             turnId,
             [
               {
@@ -239,17 +299,22 @@ class ToolAppServer {
         }
         // Live app-server flushes the interrupted turn's usage within
         // milliseconds of the interrupt, before completion and idle.
-        interruptTurn(this.transport.send, this.#thread, turnId, {
+        interruptTurn(this.transport.send, threadId, turnId, {
           reasoningOutputTokens: this.usage.reasoningOutputTokens ?? 0,
-          priorRequests: this.#priorRequests - 1,
+          priorRequests: this.#attributedRequests(threadId) - 1,
           includeUsage: (this.usage.suspendOrder ?? "never") === "on_interrupt",
         });
       } else if (message.method === "turn/start") {
         this.#turn += 1;
         const turnId = `turn_${this.#turn}`;
-        const input =
-          ((message.params as { input?: unknown[] } | undefined)?.input as
-            unknown[] | undefined) ?? [];
+        const turnParams = (message.params ?? {}) as {
+          threadId?: unknown;
+          input?: unknown[];
+        };
+        // Every emission of this turn cites the thread that started it, so a
+        // fallback turn on a fresh thread cannot cite the superseded source.
+        const threadId = String(turnParams.threadId);
+        const input = turnParams.input ?? [];
         this.turnInputs.push(input);
         this.#send(
           protocolResponse("turn/start", id, {
@@ -257,12 +322,14 @@ class ToolAppServer {
           }),
         );
         const delayedToolTurnId = this.#delayedToolTurnId;
-        if (delayedToolTurnId) {
+        const delayedToolTurnThread = this.#delayedToolTurnThread;
+        if (delayedToolTurnId && delayedToolTurnThread) {
           this.#delayedToolTurnId = undefined;
+          this.#delayedToolTurnThread = undefined;
           this.#toolRequestIds.add(905);
           suspendWithTools(
             this.transport.send,
-            this.#thread,
+            delayedToolTurnThread,
             delayedToolTurnId,
             [
               {
@@ -281,7 +348,7 @@ class ToolAppServer {
               protocolNotification({
                 method: "item/started",
                 params: {
-                  threadId: this.#thread,
+                  threadId,
                   turnId,
                   startedAtMs: 0,
                   item: {
@@ -302,7 +369,7 @@ class ToolAppServer {
             protocolNotification({
               method: "item/agentMessage/delta",
               params: {
-                threadId: this.#thread,
+                threadId,
                 turnId,
                 itemId: "pre_tool_text",
                 delta: "before tools",
@@ -328,16 +395,17 @@ class ToolAppServer {
           const usageOptions = {
             usageOrder: suspendOrder,
             reasoningOutputTokens: this.usage.reasoningOutputTokens ?? 0,
-            priorRequests: this.#priorRequests,
+            priorRequests: this.#attributedRequests(threadId),
           };
           this.#toolTurnId = turnId;
+          this.#toolTurnThread = threadId;
           if (this.serializeParallelCallbacksFromRawBatch) {
             for (const call of parallelCalls)
               this.#send(
                 protocolNotification({
                   method: "rawResponseItem/completed",
                   params: {
-                    threadId: this.#thread,
+                    threadId,
                     turnId,
                     item: {
                       type: "function_call",
@@ -350,7 +418,7 @@ class ToolAppServer {
               );
             suspendWithTools(
               this.transport.send,
-              this.#thread,
+              threadId,
               turnId,
               [parallelCalls[0]!],
               {
@@ -361,7 +429,7 @@ class ToolAppServer {
           } else if (this.parallelToolGapMs > 0) {
             suspendWithTools(
               this.transport.send,
-              this.#thread,
+              threadId,
               turnId,
               [parallelCalls[0]!],
               { ...usageOptions, completeRawResponse: false },
@@ -370,7 +438,7 @@ class ToolAppServer {
               () =>
                 suspendWithTools(
                   this.transport.send,
-                  this.#thread,
+                  threadId,
                   turnId,
                   [parallelCalls[1]!],
                   {
@@ -382,7 +450,7 @@ class ToolAppServer {
           } else
             suspendWithTools(
               this.transport.send,
-              this.#thread,
+              threadId,
               turnId,
               parallelCalls,
               {
@@ -392,7 +460,7 @@ class ToolAppServer {
             );
           // The model request behind these calls ran whether or not app-server
           // attributed it, so every later cumulative total must include it.
-          this.#priorRequests += 1;
+          this.#attributeRequest(threadId);
         } else if (input.length === 0) {
           // A tool-result continuation starts its turn with no user input; the
           // injected function_call_output pairs are the model-visible input.
@@ -420,7 +488,7 @@ class ToolAppServer {
                 protocolNotification({
                   method: "rawResponseItem/completed",
                   params: {
-                    threadId: this.#thread,
+                    threadId,
                     turnId,
                     item: {
                       type: "function_call",
@@ -434,7 +502,7 @@ class ToolAppServer {
             this.#toolRequestIds.add(904);
             suspendWithTools(
               this.transport.send,
-              this.#thread,
+              threadId,
               turnId,
               [
                 {
@@ -447,17 +515,18 @@ class ToolAppServer {
               { completeRawResponse: this.#rawResponseBoundaries },
             );
             this.#toolTurnId = turnId;
+            this.#toolTurnThread = threadId;
             return;
           }
           if (this.replayAndRequestNewToolOnContinuation) {
-            this.#emitReplayedDynamicToolLifecycle(turnId);
+            this.#emitReplayedDynamicToolLifecycle(threadId, turnId);
             // The next tool-result continuation must finish so transcript
             // correlation tests prove the third request does not loop.
             this.replayAndRequestNewToolOnContinuation = false;
             this.#toolRequestIds.add(904);
             suspendWithTools(
               this.transport.send,
-              this.#thread,
+              threadId,
               turnId,
               [
                 {
@@ -472,13 +541,14 @@ class ToolAppServer {
               },
             );
             this.#toolTurnId = turnId;
+            this.#toolTurnThread = threadId;
             return;
           }
           this.#send(
             protocolNotification({
               method: "item/started",
               params: {
-                threadId: this.#thread,
+                threadId,
                 turnId,
                 startedAtMs: 0,
                 item: {
@@ -491,8 +561,8 @@ class ToolAppServer {
               },
             }),
           );
-          this.#complete(turnId, "after tools");
-        } else this.#complete(turnId, "continued");
+          this.#complete(threadId, turnId, "after tools");
+        } else this.#complete(threadId, turnId, "continued");
       }
       return;
     }
@@ -507,7 +577,7 @@ class ToolAppServer {
   }
 
   /** Replays the client-owned output app-server reports on a continuation. */
-  #emitReplayedDynamicToolLifecycle(turnId: string): void {
+  #emitReplayedDynamicToolLifecycle(threadId: string, turnId: string): void {
     const item = {
       type: "dynamicToolCall" as const,
       id: "call_b",
@@ -520,7 +590,7 @@ class ToolAppServer {
       protocolNotification({
         method: "item/started",
         params: {
-          threadId: this.#thread,
+          threadId,
           turnId,
           startedAtMs: 0,
           item: {
@@ -536,7 +606,7 @@ class ToolAppServer {
       protocolNotification({
         method: "item/completed",
         params: {
-          threadId: this.#thread,
+          threadId,
           turnId,
           completedAtMs: 1,
           item: {
@@ -556,12 +626,12 @@ class ToolAppServer {
   }
 
   /** Emits a typed assistant delta and successful turn completion. */
-  #complete(turnId: string, text: string): void {
+  #complete(threadId: string, turnId: string, text: string): void {
     this.#send(
       protocolNotification({
         method: "item/agentMessage/delta",
         params: {
-          threadId: this.#thread,
+          threadId,
           turnId,
           itemId: `item_${turnId}`,
           delta: text,
@@ -571,18 +641,18 @@ class ToolAppServer {
     if (this.usage.onCompletion) {
       // A completed turn reaches its idle boundary, so the shared builder emits
       // usage, completion, and the lifecycle transition in wire order.
-      completeTurn(this.transport.send, this.#thread, turnId, {
+      completeTurn(this.transport.send, threadId, turnId, {
         reasoningOutputTokens: this.usage.reasoningOutputTokens ?? 0,
-        priorRequests: this.#priorRequests,
+        priorRequests: this.#attributedRequests(threadId),
       });
-      this.#priorRequests += 1;
+      this.#attributeRequest(threadId);
       return;
     }
     this.#send(
       protocolNotification({
         method: "turn/completed",
         params: {
-          threadId: this.#thread,
+          threadId,
           turn: protocolTurn(turnId, "completed"),
         },
       }),
@@ -591,7 +661,7 @@ class ToolAppServer {
       protocolNotification({
         method: "thread/status/changed",
         params: {
-          threadId: this.#thread,
+          threadId,
           status: { type: "idle" },
         },
       }),
@@ -755,11 +825,38 @@ test("parallel fragmented tool calls interrupt the turn and continue by injectin
         previous_response_id: first.id,
         messages: toolTranscript(calls),
       });
-      assert.equal(replay.status, 409);
+      assert.equal(replay.status, 200);
+      const replayed = (await replay.json()) as CompletionBody;
+      // The consumed selector is superseded, so its complete transcript
+      // executes on one fresh thread instead of being rejected. The source
+      // mapping is never mutated and no fork is ever attempted.
+      assert.equal(replayed.x_codex?.threadReused, false);
       assert.equal(
-        await responseErrorCode(replay),
-        "superseded_previous_response_id",
+        fake.methods.filter((method) => method === "thread/start").length,
+        2,
       );
+      assert.equal(fake.methods.includes("thread/fork"), false);
+      // The never-mutated claim is durable state, not just RPC shape: the
+      // source record stays superseded by the successful native continuation
+      // instead of being rewritten again by this fallback.
+      assert.equal(
+        persistedRecords(directory).find(
+          (record) => record.responseId === first.id,
+        )?.state,
+        "superseded",
+      );
+      assert.deepEqual(
+        fake.injected.slice(4).map((item) => [item.type, item.call_id]),
+        [
+          ["function_call", "call_b"],
+          ["function_call_output", "call_b"],
+          ["function_call", "call_a"],
+          ["function_call_output", "call_a"],
+        ],
+      );
+      // The fallback turn also starts with no user input: the injected pairs
+      // are the model-visible input.
+      assert.deepEqual(fake.turnInputs.at(-1), []);
     } finally {
       await proxy.close();
     }
@@ -1239,7 +1336,7 @@ test("verbatim mixed internal and dynamic calls resolve only the pending batch",
   }, "codex-mixed-tool-replay-");
 });
 
-test("missing, foreign, and duplicate tool result IDs fail without consuming the pending batch", async () => {
+test("missing, foreign, and duplicate tool result IDs and changed tool call arguments fail without consuming the pending batch", async () => {
   await withTempDir(async (directory) => {
     const fake = new ToolAppServer();
     const { origin, proxy } = await startProxy(directory, fake);
@@ -1264,6 +1361,21 @@ test("missing, foreign, and duplicate tool result IDs fail without consuming the
           function: call.function,
         })),
       };
+      // Repeating the pending call IDs and names is not enough: the persisted
+      // arguments are byte-identical to what the tool-call response emitted,
+      // so an altered batch is a different batch even with complete results.
+      const tamperedAssistant = {
+        role: "assistant",
+        content: null,
+        tool_calls: calls.map((call) => ({
+          id: call.id,
+          type: "function",
+          function: {
+            name: call.function.name,
+            arguments: '{"fragment":"tampered"}',
+          },
+        })),
+      };
       const cases = [
         [
           assistant,
@@ -1278,6 +1390,11 @@ test("missing, foreign, and duplicate tool result IDs fail without consuming the
           assistant,
           { role: "tool", tool_call_id: "call_a", content: "x" },
           { role: "tool", tool_call_id: "call_a", content: "again" },
+          { role: "tool", tool_call_id: "call_b", content: "y" },
+        ],
+        [
+          tamperedAssistant,
+          { role: "tool", tool_call_id: "call_a", content: "x" },
           { role: "tool", tool_call_id: "call_b", content: "y" },
         ],
       ];
@@ -1310,68 +1427,94 @@ test("missing, foreign, and duplicate tool result IDs fail without consuming the
   }, "codex-tool-results-invalid-");
 });
 
-test("a pending tool continuation survives proxy restart", async () => {
-  await withTempDir(async (directory) => {
-    const firstFake = new ToolAppServer();
-    const firstServer = await startProxy(directory, firstFake);
-    let responseId = "";
-    let calls: CompletionBody["choices"][number]["message"]["tool_calls"];
-    try {
-      const initial = (await (
-        await postChatCompletion(firstServer.origin, {
-          model: "m",
-          tools: [
-            { type: "function", function: { name: "first", parameters: {} } },
-            { type: "function", function: { name: "second", parameters: {} } },
+test("a pending tool continuation falls back to a fresh thread after proxy restart", async () => {
+  for (const selection of ["explicit", "implicit"] as const) {
+    await withTempDir(async (directory) => {
+      const firstFake = new ToolAppServer();
+      const firstServer = await startProxy(directory, firstFake);
+      let responseId = "";
+      let calls: CompletionBody["choices"][number]["message"]["tool_calls"];
+      try {
+        const initial = (await (
+          await postChatCompletion(firstServer.origin, {
+            model: "m",
+            tools: [
+              { type: "function", function: { name: "first", parameters: {} } },
+              {
+                type: "function",
+                function: { name: "second", parameters: {} },
+              },
+            ],
+            messages: [{ role: "user", content: "tools" }],
+          })
+        ).json()) as CompletionBody;
+        responseId = initial.id;
+        calls = initial.choices[0]!.message.tool_calls;
+      } finally {
+        await firstServer.proxy.close();
+      }
+      // The restarted proxy cannot prove raw-response capability for a thread
+      // of the previous transport, so a tool-bearing continuation executes the
+      // full transcript on one fresh thread before any source RPC.
+      const secondFake = new ToolAppServer(false);
+      const secondServer = await startProxy(directory, secondFake);
+      try {
+        const continuedResponse = await postChatCompletion(
+          secondServer.origin,
+          {
+            model: "m",
+            tools: [
+              {
+                type: "function",
+                function: { name: "first", parameters: {} },
+              },
+              {
+                type: "function",
+                function: { name: "second", parameters: {} },
+              },
+            ],
+            // The explicit selector names the response; the implicit one is
+            // resolved from the terminal tool results alone.
+            ...(selection === "explicit"
+              ? { previous_response_id: responseId }
+              : {}),
+            messages: toolTranscript(calls),
+          },
+        );
+        assert.equal(continuedResponse.status, 200);
+        const continued = (await continuedResponse.json()) as CompletionBody;
+        assert.equal(continued.x_codex?.threadReused, false);
+        assert.deepEqual(secondFake.methods, [
+          "thread/start",
+          "thread/inject_items",
+          "turn/start",
+        ]);
+        assert.deepEqual(
+          secondFake.injected.map((item) => [item.type, item.call_id]),
+          [
+            ["function_call", "call_b"],
+            ["function_call_output", "call_b"],
+            ["function_call", "call_a"],
+            ["function_call_output", "call_a"],
           ],
-          messages: [{ role: "user", content: "tools" }],
-        })
-      ).json()) as CompletionBody;
-      responseId = initial.id;
-      calls = initial.choices[0]!.message.tool_calls;
-    } finally {
-      await firstServer.proxy.close();
-    }
-    // Nothing about the pending batch is process-local: the persisted call
-    // metadata rebuilds the injected pairs against a fresh app-server.
-    const secondFake = new ToolAppServer(false);
-    const secondServer = await startProxy(directory, secondFake);
-    try {
-      const continuedResponse = await postChatCompletion(secondServer.origin, {
-        model: "m",
-        tools: [
-          { type: "function", function: { name: "first", parameters: {} } },
-          { type: "function", function: { name: "second", parameters: {} } },
-        ],
-        previous_response_id: responseId,
-        messages: toolTranscript(calls),
-      });
-      assert.equal(continuedResponse.status, 200);
-      const continued = (await continuedResponse.json()) as CompletionBody;
-      assert.equal(continued.choices[0]!.message.content, "after tools");
-      assert.deepEqual(secondFake.methods, [
-        "thread/read",
-        "thread/resume",
-        "thread/inject_items",
-        "turn/start",
-      ]);
-      assert.deepEqual(
-        secondFake.injected.map((item) => [item.type, item.call_id]),
-        [
-          ["function_call", "call_b"],
-          ["function_call_output", "call_b"],
-          ["function_call", "call_a"],
-          ["function_call_output", "call_a"],
-        ],
-      );
-      assert.deepEqual(secondFake.turnInputs, [[]]);
-    } finally {
-      await secondServer.proxy.close();
-    }
-  }, "codex-tool-restart-");
+        );
+        assert.deepEqual(secondFake.turnInputs, [[]]);
+        // The fallback never touches its source: the pending record survives
+        // the restart for a later compatible request that can resume it.
+        assert.equal(
+          persistedRecords(directory).find(
+            (record) => record.responseId === responseId,
+          )?.state,
+          "pending_tool",
+        );
+      } finally {
+        await secondServer.proxy.close();
+      }
+    }, "codex-tool-restart-");
+  }
 });
 
-test("a post-restart dynamic tool fails without a raw batch boundary", async () => {
+test("a post-restart tool continuation falls back and still delivers a new tool batch", async () => {
   await withTempDir(async (directory) => {
     const firstFake = new ToolAppServer();
     const firstServer = await startProxy(directory, firstFake);
@@ -1407,18 +1550,97 @@ test("a post-restart dynamic tool fails without a raw batch boundary", async () 
         previous_response_id: responseId,
         messages: toolTranscript(calls),
       });
-      assert.equal(response.status, 502);
-      assert.equal(
-        await responseErrorCode(response),
-        "dynamic_tool_batch_boundary_unavailable",
+      assert.equal(response.status, 200);
+      const body = (await response.json()) as CompletionBody;
+      // Missing raw-response capability on the new transport selects a fresh
+      // thread before any source RPC, and that thread's raw boundaries make
+      // the newly requested batch deliverable.
+      assert.equal(body.x_codex?.threadReused, false);
+      assert.equal(body.choices[0]!.finish_reason, "tool_calls");
+      assert.deepEqual(
+        body.choices[0]!.message.tool_calls?.map((call) => call.id),
+        ["call_new"],
       );
+      // The delivered batch ends its turn through exactly one interrupt; no
+      // source read/resume and no fork ever precede it.
+      assert.deepEqual(resumedFake.methods, [
+        "thread/start",
+        "thread/inject_items",
+        "turn/start",
+        "turn/interrupt",
+      ]);
+      assert.equal(resumedFake.methods.includes("thread/fork"), false);
     } finally {
       await resumedServer.proxy.close();
     }
   }, "codex-tool-raw-resume-");
 });
 
-test("completed continuations survive restart, supersede old responses, and reject a resume race", async () => {
+test("a post-restart tool continuation falls back even when the next response is text-only", async () => {
+  await withTempDir(async (directory) => {
+    const firstFake = new ToolAppServer();
+    const firstServer = await startProxy(directory, firstFake);
+    let continuedId = "";
+    try {
+      const initial = (await (
+        await postChatCompletion(firstServer.origin, {
+          model: "m",
+          tools: [
+            { type: "function", function: { name: "first", parameters: {} } },
+            { type: "function", function: { name: "second", parameters: {} } },
+          ],
+          messages: [{ role: "user", content: "tools" }],
+        })
+      ).json()) as CompletionBody;
+      // Consume the batch natively so the restart continues from a ready
+      // record whose binding includes the active tools.
+      const continued = (await (
+        await postChatCompletion(firstServer.origin, {
+          model: "m",
+          tools: [
+            { type: "function", function: { name: "first", parameters: {} } },
+            { type: "function", function: { name: "second", parameters: {} } },
+          ],
+          previous_response_id: initial.id,
+          messages: toolTranscript(initial.choices[0]!.message.tool_calls),
+        })
+      ).json()) as CompletionBody;
+      continuedId = continued.id;
+    } finally {
+      await firstServer.proxy.close();
+    }
+
+    const secondFake = new ToolAppServer(false);
+    const secondServer = await startProxy(directory, secondFake);
+    try {
+      const response = await postChatCompletion(secondServer.origin, {
+        model: "m",
+        tools: [
+          { type: "function", function: { name: "first", parameters: {} } },
+          { type: "function", function: { name: "second", parameters: {} } },
+        ],
+        previous_response_id: continuedId,
+        messages: [{ role: "user", content: "just text" }],
+      });
+      assert.equal(response.status, 200);
+      const body = (await response.json()) as CompletionBody;
+      // Active tools without raw-response capability on the new transport
+      // select a fresh thread even though this response would be text-only.
+      // The fallback happens before any source RPC: one start and one turn,
+      // with the single user message as input and no history to inject.
+      assert.equal(body.x_codex?.threadReused, false);
+      assert.equal(body.choices[0]!.finish_reason, "stop");
+      assert.equal(body.choices[0]!.message.content, "continued");
+      assert.deepEqual(secondFake.methods, ["thread/start", "turn/start"]);
+      assert.equal(secondFake.injected.length, 0);
+      assert.equal(secondFake.methods.includes("thread/fork"), false);
+    } finally {
+      await secondServer.proxy.close();
+    }
+  }, "codex-tool-restart-text-");
+});
+
+test("completed continuations survive restart, fall back from superseded selectors, and reject a resume race", async () => {
   await withTempDir(async (directory) => {
     const firstFake = new ToolAppServer(false);
     const firstServer = await startProxy(directory, firstFake);
@@ -1458,11 +1680,19 @@ test("completed continuations survive restart, supersede old responses, and reje
         previous_response_id: firstId,
         messages: [{ role: "user", content: "branch" }],
       });
-      assert.equal(superseded.status, 409);
-      assert.equal(
-        await responseErrorCode(superseded),
-        "superseded_previous_response_id",
-      );
+      assert.equal(superseded.status, 200);
+      const branched = (await superseded.json()) as CompletionBody;
+      // The superseded selector is unavailable, so the branch executes its
+      // transcript on a fresh thread: one new start and turn, and never a
+      // second read/resume of the source thread.
+      assert.equal(branched.x_codex?.threadReused, false);
+      assert.deepEqual(resumedFake.methods, [
+        "thread/read",
+        "thread/resume",
+        "turn/start",
+        "thread/start",
+        "turn/start",
+      ]);
     } finally {
       await resumedServer.proxy.close();
     }
@@ -1525,7 +1755,7 @@ test("a mismatched resumed thread is rejected without starting a turn or leaking
   }, "codex-resume-id-");
 });
 
-test("a failed injection expires the pending continuation instead of risking replay", async () => {
+test("a failed injection tombstones the source and the retry isolates on a fresh thread", async () => {
   await withTempDir(async (directory) => {
     const fake = new ToolAppServer(
       true,
@@ -1564,8 +1794,10 @@ test("a failed injection expires the pending continuation instead of risking rep
         await responseErrorCode(failed),
         "tool_result_injection_failed",
       );
-      // The injection reached an unknowable state, so the record fails closed:
-      // a retry cannot risk duplicating results already in thread history.
+      // The injection reached an unknowable state, so the tombstone still
+      // prevents replay into the source thread. The retry instead executes
+      // the same transcript on a fresh thread, whose own injection succeeds.
+      const attemptsBeforeRetry = fake.methods.length;
       const retried = await postChatCompletion(origin, {
         model: "m",
         tools: [
@@ -1575,10 +1807,30 @@ test("a failed injection expires the pending continuation instead of risking rep
         previous_response_id: initial.id,
         messages: transcript,
       });
-      assert.equal(retried.status, 410);
+      assert.equal(retried.status, 200);
+      const isolated = (await retried.json()) as CompletionBody;
+      assert.equal(isolated.x_codex?.threadReused, false);
+      assert.deepEqual(fake.methods.slice(attemptsBeforeRetry), [
+        "thread/start",
+        "thread/inject_items",
+        "turn/start",
+      ]);
+      assert.deepEqual(
+        fake.injected.map((item) => [item.type, item.call_id]),
+        [
+          ["function_call", "call_b"],
+          ["function_call_output", "call_b"],
+          ["function_call", "call_a"],
+          ["function_call_output", "call_a"],
+        ],
+      );
+      // The tombstoned source stays tombstoned: the fallback never injects
+      // into it and never marks it consumed.
       assert.equal(
-        await responseErrorCode(retried),
-        "expired_tool_continuation",
+        persistedRecords(directory).find(
+          (record) => record.responseId === initial.id,
+        )?.state,
+        "expired",
       );
     } finally {
       await proxy.close();
@@ -1625,6 +1877,35 @@ test("a failed interrupt rejects the response and makes its batch non-replayable
       await proxy.close();
     }
   }, "codex-tool-interrupt-fail-");
+});
+
+test("a failed fresh fallback returns its error without a second attempt", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ToolAppServer(
+      true,
+      false,
+      undefined,
+      false,
+      {},
+      {
+        failThreadStart: true,
+      },
+    );
+    const { origin, proxy } = await startProxy(directory, fake);
+    try {
+      const response = await postChatCompletion(origin, {
+        model: "m",
+        messages: [{ role: "user", content: "fresh start" }],
+        previous_response_id: "chatcmpl_codex_unknown",
+      });
+      // The unknown selector selects fresh execution; a rejected thread/start
+      // fails the request exactly once, with no second execution attempt.
+      assert.ok(response.status >= 500);
+      assert.deepEqual(fake.methods, ["thread/start"]);
+    } finally {
+      await proxy.close();
+    }
+  }, "codex-tool-fallback-fail-");
 });
 
 test("duplicate app-server tool call IDs are deduplicated by first arrival", async () => {
@@ -1782,12 +2063,17 @@ test("post-handoff bookkeeping failures do not retract the response or permit re
         previous_response_id: initial.id,
         messages: toolTranscript(initial.choices[0]!.message.tool_calls),
       });
-      assert.equal(replay.status, 410);
+      assert.equal(replay.status, 200);
+      const isolated = (await replay.json()) as CompletionBody;
+      // The tombstoned selector cannot replay into the source thread, but the
+      // complete transcript still executes: the fallback injects its own copy
+      // into a new thread while the failed bookkeeping stays best-effort.
+      assert.equal(isolated.x_codex?.threadReused, false);
+      assert.equal(fake.injected.length, 8);
       assert.equal(
-        await responseErrorCode(replay),
-        "expired_tool_continuation",
+        fake.methods.filter((method) => method === "thread/start").length,
+        2,
       );
-      assert.equal(fake.injected.length, 4);
     } finally {
       update.mockRestore();
       await proxy.close();
@@ -1795,7 +2081,7 @@ test("post-handoff bookkeeping failures do not retract the response or permit re
   }, "codex-tool-best-effort-state-");
 });
 
-test("implicit tool continuation must repeat the original x_codex policy", async () => {
+test("implicit binding mismatches fall back and leave the pending source consumable", async () => {
   await withTempDir(async (directory) => {
     const fake = new ToolAppServer();
     const { origin, proxy } = await startProxy(directory, fake);
@@ -1815,22 +2101,24 @@ test("implicit tool continuation must repeat the original x_codex policy", async
       ).json()) as CompletionBody;
       const calls = first.choices[0]!.message.tool_calls;
 
-      // Implicit continuation (no previous_response_id) that drops x_codex resolves
-      // to the default disabled policy, so its binding no longer matches the
-      // suspension and the tool results are rejected without being delivered.
+      // An implicit continuation that drops x_codex no longer fails: its
+      // binding cannot resume the suspension, so the transcript executes on a
+      // fresh thread under the requested default policy instead.
       const dropped = await postChatCompletion(origin, {
         model: "m",
         reasoning_effort: "high",
         tools,
         messages: toolTranscript(calls),
       });
-      assert.equal(dropped.status, 409);
+      assert.equal(dropped.status, 200);
       assert.equal(
-        await responseErrorCode(dropped),
-        "continuation_policy_mismatch",
+        ((await dropped.clone().json()) as CompletionBody).x_codex
+          ?.threadReused,
+        false,
       );
-      assert.equal(fake.injected.length, 0);
 
+      // A changed reasoning effort is the same kind of binding mismatch: the
+      // full transcript runs on another fresh thread.
       const changedEffort = await postChatCompletion(origin, {
         model: "m",
         reasoning_effort: "low",
@@ -1838,15 +2126,28 @@ test("implicit tool continuation must repeat the original x_codex policy", async
         x_codex: { sandbox: "workspace-write" },
         messages: toolTranscript(calls),
       });
-      assert.equal(changedEffort.status, 409);
+      assert.equal(changedEffort.status, 200);
       assert.equal(
-        await responseErrorCode(changedEffort),
-        "continuation_reasoning_effort_mismatch",
+        ((await changedEffort.clone().json()) as CompletionBody).x_codex
+          ?.threadReused,
+        false,
       );
-      assert.equal(fake.injected.length, 0);
+      // Each mismatched continuation injected its own copy of the transcript
+      // into its own fresh thread; neither consumed the pending source.
+      assert.equal(fake.injected.length, 8);
+      assert.equal(
+        persistedRecords(directory).find(
+          (record) => record.responseId === first.id,
+        )?.state,
+        "pending_tool",
+      );
+      assert.equal(
+        fake.methods.filter((method) => method === "thread/start").length,
+        3,
+      );
 
       // Repeating the original x_codex on the implicit continuation matches the
-      // pending record and delivers the results.
+      // pending record and delivers the results natively on the source thread.
       const repeated = await postChatCompletion(origin, {
         model: "m",
         reasoning_effort: "high",
@@ -1860,6 +2161,68 @@ test("implicit tool continuation must repeat the original x_codex policy", async
           ?.threadReused,
         true,
       );
+      assert.equal(
+        fake.methods.filter((method) => method === "thread/resume").length,
+        1,
+      );
+      const expectedPairs = [
+        ["function_call", "call_b"],
+        ["function_call_output", "call_b"],
+        ["function_call", "call_a"],
+        ["function_call_output", "call_a"],
+      ];
+      assert.deepEqual(
+        fake.injected.map((item) => [item.type, item.call_id]),
+        [...expectedPairs, ...expectedPairs, ...expectedPairs],
+      );
+    } finally {
+      await proxy.close();
+    }
+  }, "codex-dynamic-tools-");
+});
+
+test("tool_choice none changes a tool-bearing binding and falls back", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ToolAppServer();
+    const { origin, proxy } = await startProxy(directory, fake);
+    const tools = [
+      { type: "function", function: { name: "first", parameters: {} } },
+      { type: "function", function: { name: "second", parameters: {} } },
+    ];
+    try {
+      const initial = (await (
+        await postChatCompletion(origin, {
+          model: "m",
+          tools,
+          messages: [{ role: "user", content: "tools" }],
+        })
+      ).json()) as CompletionBody;
+      const calls = initial.choices[0]!.message.tool_calls!;
+
+      // The tools are declared unchanged, but tool_choice "none" normalizes
+      // the request to zero active tools, so its toolsHash cannot match the
+      // pending record's tool-bearing binding and the transcript executes on
+      // a fresh thread instead of the suspended one.
+      const noneResponse = await postChatCompletion(origin, {
+        model: "m",
+        tools,
+        tool_choice: "none",
+        previous_response_id: initial.id,
+        messages: toolTranscript(calls),
+      });
+      assert.equal(noneResponse.status, 200);
+      const none = (await noneResponse.json()) as CompletionBody;
+      assert.equal(none.x_codex?.threadReused, false);
+      // The fresh thread replays the injected pairs as the model-visible
+      // input, so its empty-input turn completes like any result continuation.
+      assert.equal(none.choices[0]!.message.content, "after tools");
+      assert.equal(none.choices[0]!.finish_reason, "stop");
+      assert.equal(
+        fake.methods.filter((method) => method === "thread/start").length,
+        2,
+      );
+      assert.equal(fake.methods.includes("thread/resume"), false);
+      assert.equal(fake.methods.includes("thread/fork"), false);
       assert.deepEqual(
         fake.injected.map((item) => [item.type, item.call_id]),
         [
@@ -1869,10 +2232,18 @@ test("implicit tool continuation must repeat the original x_codex policy", async
           ["function_call_output", "call_a"],
         ],
       );
+      // The bypassed source is never consumed: its pending record stays
+      // selectable for a later request that repeats the tool-bearing binding.
+      assert.equal(
+        persistedRecords(directory).find(
+          (record) => record.responseId === initial.id,
+        )?.state,
+        "pending_tool",
+      );
     } finally {
       await proxy.close();
     }
-  }, "codex-dynamic-tools-");
+  }, "codex-tool-choice-none-");
 });
 
 /** Declares both scripted tools for one suspension-usage request. */

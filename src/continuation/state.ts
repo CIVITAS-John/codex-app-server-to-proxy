@@ -95,7 +95,10 @@ export class ResponseStore {
     };
     // Superseding pending_tool here is defense in depth behind the durable
     // pre-injection replay guard: no completed continuation may leave an
-    // older pending record selectable for the same thread.
+    // older pending record selectable for the same thread. This relies, like
+    // interrupted-turn keying, on app-server never reusing a thread id within
+    // one store's lifetime: a fresh fallback thread that repeated a bypassed
+    // source's id would supersede that source's still-consumable record.
     for (const prior of this.#records.values()) {
       if (
         prior.threadId === record.threadId &&
@@ -349,13 +352,18 @@ export class ContinuationCoordinator {
     this.#interruptedToolTurns.add(interruptedToolTurnKey(threadId, turnId));
   }
 
+  /** Throws when this transport generation no longer owns continuation state. */
+  assertActive(): void {
+    if (this.#disposed)
+      throw new Error("Continuation coordinator is disposed.");
+  }
+
   /** Atomically claims a thread and installs its dynamic-tool owner. */
   acquireThread(
     threadId: string,
     owner: (request: PendingToolCall) => void,
   ): ThreadLease | undefined {
-    if (this.#disposed)
-      throw new Error("Continuation coordinator is disposed.");
+    this.assertActive();
     if (this.#busy.has(threadId) || this.#toolOwners.has(threadId))
       return undefined;
     this.#busy.add(threadId);

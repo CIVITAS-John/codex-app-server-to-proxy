@@ -273,5 +273,9 @@ test("contract documents the implemented Stage 05 compatibility mappings", async
     "unsupported_parameter",
   ])
     assert(!contract.includes(unimplemented), `stale error: ${unimplemented}`);
-  assert.match(contract, /never falls back to `thread\/start`/);
+  assert.match(
+    contract,
+    /executes the supplied complete transcript on one `thread\/start`/,
+  );
+  assert.match(contract, /never trigger a second execution/);
 });

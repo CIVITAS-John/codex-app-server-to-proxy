@@ -13,6 +13,7 @@ import {
 import {
   type ContinuationCoordinator,
   type PendingToolCall,
+  type ResponseRecord,
   type StoredToolCall,
   type ThreadBinding,
   type ThreadLease,
@@ -27,9 +28,11 @@ import {
   type Usage,
 } from "./chat-normalize.js";
 import {
+  freshExecutionHistory,
   toFunctionCallItem,
   toFunctionCallOutputItem,
   toHistoryItems,
+  validateFallbackHistory,
   validateToolResults,
   type ChatRequest,
 } from "./chat-validate.js";
@@ -236,6 +239,22 @@ export interface ChatHandlerOptions {
   implicitToolContinuation: boolean;
 }
 
+/** Fixed local reasons a continuation admission selects fresh execution. */
+export type ContinuationFallbackReason =
+  | "unknown_previous_response_id"
+  | "unknown_tool_call_id"
+  | "expired_previous_response_id"
+  | "expired_tool_continuation"
+  | "superseded_previous_response_id"
+  | "ambiguous_tool_call_id"
+  | "continuation_model_mismatch"
+  | "continuation_reasoning_effort_mismatch"
+  | "continuation_cwd_mismatch"
+  | "continuation_tools_mismatch"
+  | "continuation_policy_mismatch"
+  | "raw_response_capability_unavailable"
+  | "thread_busy";
+
 /** One eagerly prepared execution with cleanup independent of generator startup. */
 export interface ExecutionSession {
   events: AsyncGenerator<NormalizedEvent>;
@@ -258,6 +277,20 @@ interface ContinuationSetup {
   usageBaseline: TokenUsageCounters | undefined;
   instructionSources: string[];
 }
+
+/** One synchronous local continuation decision made before any app-server RPC. */
+type ContinuationAdmission =
+  | { type: "fresh"; reason?: ContinuationFallbackReason }
+  | {
+      type: "reuse";
+      responseId: string;
+      record: ResponseRecord;
+      /** Validated terminal results for a pending batch, keyed by call ID. */
+      results?: Map<string, string>;
+    };
+
+/** The reuse branch of {@link ContinuationAdmission}. */
+type ReuseAdmission = Extract<ContinuationAdmission, { type: "reuse" }>;
 
 /**
  * Absolute deadline for terminal usage collection, normally a backstop for a
@@ -399,13 +432,20 @@ export async function execute(
   let instructionSources: string[];
   let threadReused: boolean;
   try {
-    if (request.previousResponseId) {
+    assertDispatchable(options);
+    const admission = prepareContinuation(
+      request,
+      options,
+      binding,
+      handle,
+      onToolRequest,
+    );
+    if (admission.type === "reuse") {
       const continuation = await resumeContinuation(
         request,
         options,
-        binding,
+        admission,
         handle,
-        onToolRequest,
       );
       usageBaseline = continuation.usageBaseline;
       instructionSources = continuation.instructionSources;
@@ -413,6 +453,19 @@ export async function execute(
       // resumed with the expected ID, and accepted its next turn.
       threadReused = true;
     } else {
+      assertDispatchable(options);
+      if (admission.reason) {
+        validateFallbackHistory(request.messages);
+        // One diagnostic per dispatched fallback: fixed reason and request ID
+        // only, so transcripts, tool arguments, and raw thread IDs stay out
+        // of logs. Emitted after the gates that can still reject the request,
+        // so a cancelled or unpaired fallback never logs an execution that
+        // never started.
+        options.log("info", "continuation_fresh_fallback", {
+          request_id: options.requestId,
+          reason: admission.reason,
+        });
+      }
       instructionSources = await startFreshThread(
         request,
         options,
@@ -827,85 +880,162 @@ function* emitCapturedBatch(
   }
 }
 
-/** Resumes and validates one durable continuation on the shared turn handle. */
-async function resumeContinuation(
+/**
+ * Decides synchronously, before any app-server RPC, whether this request
+ * continues a mapped thread or executes on a fresh one. Every named local
+ * unavailability selects fresh execution with a fixed reason; duplicate client
+ * IDs, results that fail validation against a live pending batch, and tool
+ * results against a live ready mapping remain typed client errors. The thread
+ * lease is claimed last, only for reuse, and is attached to the handle only
+ * after acquisition so a fresh result never retains the rejected source's
+ * thread or lease.
+ */
+function prepareContinuation(
   request: ChatRequest,
   options: ChatHandlerOptions,
   binding: ThreadBinding,
   handle: TurnHandle,
   onToolRequest: (toolRequest: PendingToolCall) => void,
-): Promise<ContinuationSetup> {
-  const stored = options.continuations.store.get(request.previousResponseId!);
-  if (!stored) continuationFailure(404, "unknown_previous_response_id");
-  if (stored.model !== binding.model)
-    continuationFailure(409, "continuation_model_mismatch");
-  if (stored.reasoningEffort !== binding.reasoningEffort)
-    continuationFailure(409, "continuation_reasoning_effort_mismatch");
-  if (stored.cwd !== binding.cwd)
-    continuationFailure(409, "continuation_cwd_mismatch");
-  if (stored.toolsHash !== binding.toolsHash)
-    continuationFailure(409, "continuation_tools_mismatch");
-  if (stored.policyHash !== binding.policyHash)
-    continuationFailure(409, "continuation_policy_mismatch");
-
-  // Set threadId first so cleanup can release it after setup failures.
-  handle.threadId = stored.threadId;
-  const { terminalToolResults } = request;
-  if (
-    stored.state === "expired" &&
-    stored.pendingCalls?.length &&
-    terminalToolResults.length
-  )
-    continuationFailure(410, "expired_tool_continuation");
-  if (stored.state === "pending_tool") {
-    if (!terminalToolResults.length)
-      continuationFailure(409, "tool_results_required");
-    const pending = stored.pendingCalls!;
-    const results = validateToolResults(
-      request.messages,
-      terminalToolResults,
-      pending,
+): ContinuationAdmission {
+  let responseId = request.previousResponseId;
+  if (!responseId && request.terminalToolResults.length) {
+    const callIds = request.terminalToolResults.map(
+      (message) => message.toolCallId!,
     );
-    // Claim before awaiting so concurrent continuations remain atomic.
-    acquireThread(handle, options, onToolRequest);
-    const instructionSources = await resumeIdleThread(request, options, handle);
-    const items = pending.flatMap((call) => [
-      // Inject the complete pair because an unpaired output is ignored.
-      toFunctionCallItem(call),
-      toFunctionCallOutputItem(call.callId, results.get(call.callId)!),
-    ]);
-    // Tombstone before injection to prevent replay after uncertain failure.
-    options.continuations.protectPendingFromReplay(request.previousResponseId!);
     try {
-      await options.rpc.request(
-        "thread/inject_items",
-        { threadId: handle.threadId, items },
-        options.signal,
-      );
+      responseId = options.continuations.findPendingResponse(callIds);
     } catch (error) {
-      // The tombstone blocks replay if the injection outcome is unknown.
-      if (error instanceof HttpError) throw error;
-      throw new HttpError(
-        502,
-        "The app-server could not accept the tool results.",
-        "server_error",
-        "tool_result_injection_failed",
-      );
+      const reason = implicitLookupFallbackReason(error);
+      if (reason === undefined) throw error;
+      return { type: "fresh", reason };
     }
-    // Mark success best-effort; the tombstone already blocks replay.
-    options.continuations.recordPendingConsumed(request.previousResponseId!);
+  }
+  if (!responseId) return { type: "fresh" };
+  const stored = options.continuations.store.get(responseId);
+  if (!stored) return { type: "fresh", reason: "unknown_previous_response_id" };
+  // Pending-result validation precedes binding, capability, and contention
+  // checks so a live mapping's client errors are reported exactly as before.
+  let results: Map<string, string> | undefined;
+  if (stored.state === "pending_tool") {
+    if (!request.terminalToolResults.length)
+      continuationFailure(409, "tool_results_required");
+    results = validateToolResults(
+      request.messages,
+      request.terminalToolResults,
+      stored.pendingCalls!,
+    );
+  } else if (stored.state === "expired") {
+    return stored.pendingCalls?.length && request.terminalToolResults.length
+      ? { type: "fresh", reason: "expired_tool_continuation" }
+      : { type: "fresh", reason: "expired_previous_response_id" };
+  } else if (stored.state === "superseded") {
+    return { type: "fresh", reason: "superseded_previous_response_id" };
+  } else if (request.terminalToolResults.length) {
+    continuationFailure(409, "tool_results_without_pending_call");
+  }
+  if (stored.model !== binding.model)
+    return { type: "fresh", reason: "continuation_model_mismatch" };
+  if (stored.reasoningEffort !== binding.reasoningEffort)
+    return { type: "fresh", reason: "continuation_reasoning_effort_mismatch" };
+  if (stored.cwd !== binding.cwd)
+    return { type: "fresh", reason: "continuation_cwd_mismatch" };
+  if (stored.toolsHash !== binding.toolsHash)
+    return { type: "fresh", reason: "continuation_tools_mismatch" };
+  if (stored.policyHash !== binding.policyHash)
+    return { type: "fresh", reason: "continuation_policy_mismatch" };
+  if (
+    request.dynamicTools.length &&
+    !rawResponseThreads(options.rpc).has(stored.threadId)
+  )
+    return { type: "fresh", reason: "raw_response_capability_unavailable" };
+  const lease = options.continuations.acquireThread(
+    stored.threadId,
+    onToolRequest,
+  );
+  if (!lease) return { type: "fresh", reason: "thread_busy" };
+  // threadId gates cleanup's lease release, so both attach together here,
+  // only after acquisition, and only on the reuse path.
+  handle.threadId = stored.threadId;
+  handle.lease = lease;
+  return {
+    type: "reuse",
+    responseId,
+    record: stored,
+    ...(results ? { results } : {}),
+  };
+}
+
+/**
+ * Classifies an implicit selector lookup failure into a fallback reason only
+ * for the named lookup-unavailability codes. Duplicate result IDs and generic
+ * store failures stay errors: neither means the requested continuation is
+ * merely unavailable.
+ */
+function implicitLookupFallbackReason(
+  error: unknown,
+): ContinuationFallbackReason | undefined {
+  if (!(error instanceof HttpError)) return undefined;
+  if (
+    error.code === "unknown_tool_call_id" ||
+    error.code === "expired_tool_continuation" ||
+    error.code === "ambiguous_tool_call_id"
+  )
+    return error.code;
+  return undefined;
+}
+
+/** Fails a request that can no longer execute before any RPC is issued. */
+function assertDispatchable(options: ChatHandlerOptions): void {
+  // Disposal and cancellation are lifecycle errors, never fallback reasons.
+  options.continuations.assertActive();
+  if (options.signal.aborted)
+    throw new HttpError(
+      408,
+      "The request timed out or was disconnected.",
+      "server_error",
+      "request_timeout",
+    );
+}
+
+/** Resumes and drives one admitted continuation on the shared turn handle. */
+async function resumeContinuation(
+  request: ChatRequest,
+  options: ChatHandlerOptions,
+  admission: ReuseAdmission,
+  handle: TurnHandle,
+): Promise<ContinuationSetup> {
+  const stored = admission.record;
+  const instructionSources = await resumeIdleThread(request, options, handle);
+  if (stored.state !== "pending_tool") {
     await startTurn(request, options, handle);
     return { usageBaseline: stored.usageTotal, instructionSources };
   }
-
-  if (stored.state === "expired")
-    continuationFailure(410, "expired_previous_response_id");
-  if (stored.state === "superseded")
-    continuationFailure(409, "superseded_previous_response_id");
-  if (terminalToolResults.length)
-    continuationFailure(409, "tool_results_without_pending_call");
-  acquireThread(handle, options, onToolRequest);
-  const instructionSources = await resumeIdleThread(request, options, handle);
+  const pending = stored.pendingCalls!;
+  const items = pending.flatMap((call) => [
+    // Inject the complete pair because an unpaired output is ignored.
+    toFunctionCallItem(call),
+    toFunctionCallOutputItem(call.callId, admission.results!.get(call.callId)!),
+  ]);
+  // Tombstone before injection to prevent replay after uncertain failure.
+  options.continuations.protectPendingFromReplay(admission.responseId);
+  try {
+    await options.rpc.request(
+      "thread/inject_items",
+      { threadId: handle.threadId, items },
+      options.signal,
+    );
+  } catch (error) {
+    // The tombstone blocks replay if the injection outcome is unknown.
+    if (error instanceof HttpError) throw error;
+    throw new HttpError(
+      502,
+      "The app-server could not accept the tool results.",
+      "server_error",
+      "tool_result_injection_failed",
+    );
+  }
+  // Mark success best-effort; the tombstone already blocks replay.
+  options.continuations.recordPendingConsumed(admission.responseId);
   await startTurn(request, options, handle);
   return { usageBaseline: stored.usageTotal, instructionSources };
 }
@@ -997,13 +1127,11 @@ async function startFreshThread(
   acquireThread(handle, options, onToolRequest);
   // Only a trailing user message becomes new turn input. Any other trailing
   // message joins the injected history and the empty-input turn asks the model
-  // to continue from it. A terminal tool-result block never reaches this
-  // fresh-thread path: it always resolves to a continuation or fails before
-  // execution, so every tool message here is a completed earlier round.
-  const last = request.messages.at(-1)!;
-  const history =
-    last.role === "user" ? request.messages.slice(0, -1) : request.messages;
-  const prior = toHistoryItems(history);
+  // to continue from it. A terminal tool-result block reaches this path only
+  // through fallback, whose admission check already required its complete
+  // preceding assistant batch; ordinary fresh requests keep their existing
+  // warn-and-drop handling of unpairable history.
+  const prior = toHistoryItems(freshExecutionHistory(request.messages));
   if (prior.unansweredCalls || prior.orphanResults)
     options.log("warn", "unpaired_history_tool_items_dropped", {
       request_id: options.requestId,

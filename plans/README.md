@@ -6,7 +6,7 @@ This directory is the source of truth for product decisions, implementation stat
 
 ## Product decisions
 
-These decisions describe the implemented Stage 08 behavior. [Stage 09](09-thread-continuity.md) plans fresh fallback for locally unavailable continuations; those changes are not current runtime behavior.
+These decisions describe the implemented Stage 09 behavior. [Stage 09](09-thread-continuity.md) added fresh fallback at continuation admission; deferred follow-up work is listed there.
 
 - Provide `POST /v1/chat/completions` and `GET /v1/models` to generic HTTP clients.
     - The model route aggregates visible entries from the active authenticated pinned app-server. When installed, the temporary Responses Lite override supplies its frozen catalog; otherwise app-server's ordinary catalog is exposed. It starts no Codex thread or turn; `created: 0` and `owned_by: "openai"` are synthetic compatibility placeholders because app-server has no equivalents. This adds a standard client-discovery route without exposing hidden or full app-server catalog metadata.
@@ -26,8 +26,10 @@ These decisions describe the implemented Stage 08 behavior. [Stage 09](09-thread
 - Disable subagent spawning at app-server startup unless the operator explicitly passes `--subagents true`; keep this process-wide control independent of per-request filesystem and web policy.
 - Expose each web-search mode the pinned app-server can enforce per request and reject the others.
 - Handle approvals non-interactively with `auto_review` where policy permits and decline any unexpected approval request.
-- On continuation, require the original tool set, model, reasoning effort, cwd, and policy.
-    - The pinned protocol cannot replace dynamic tools on a resumed thread; a changed set is rejected rather than applied approximately or placed on a silent replacement thread.
+- On continuation, prefer native reuse and fall back to one fresh execution when local admission shows the continuation is unavailable.
+    - Native reuse requires the original tool set, model, reasoning effort, cwd, and policy; the pinned protocol cannot replace dynamic tools on a resumed thread.
+    - Unknown, expired, or superseded selectors, implicit tool-call lookup reporting unknown, expired, or ambiguous IDs, changed bindings, active client tools lacking raw-response capability on the current transport, and local thread contention execute the supplied complete transcript on one new Codex thread with the requested settings, reported by `x_codex.threadReused: false`. The source mapping and its lease are unaffected.
+    - Remote failures after reuse is chosen remain errors, and no request ever executes twice.
 - Reject message history that cannot be represented faithfully.
 - Reject any request value the proxy cannot apply exactly. During v1 development, prefer a clear error over fallback or approximation.
 - Ignore harmless unsupported fields and log structured warnings.
@@ -59,11 +61,11 @@ These decisions describe the implemented Stage 08 behavior. [Stage 09](09-thread
 
 ### Implemented locally
 
-Stages 01 through 08 are implemented in the source tree. Stage 08 includes the package metadata, deterministic packed-package smoke, registry-backed smoke workflow, trusted-publishing prerelease workflow, published-user README, changelog, and release runbook. The exact Codex dependency and generated contract remain pinned to `0.146.0`. Stage 09 is planned only; local admission fallback and pre-emptive tool-capability checks are not implemented. It retains the existing boolean reuse field and schema v0.
+Stages 01 through 09 are implemented in the source tree. Stage 08 includes the package metadata, deterministic packed-package smoke, registry-backed smoke workflow, trusted-publishing prerelease workflow, published-user README, changelog, and release runbook. The exact Codex dependency and generated contract remain pinned to `0.146.0`.
 
-Stage 09 makes one local admission decision before any setup RPC, then runs the existing fresh or native path once. Matching available client tools may reuse a current thread only with proven raw-response capability on the current transport; after restart, missing capability selects fresh execution. Locally unavailable selectors, changed bindings, and local contention can use the supplied complete transcript on a new thread. Remote setup and execution failures remain errors. Source records remain unchanged on fallback, so separate requests may execute equivalent work on different threads. No native fork, new checkpoint states, or retry-after-dispatch machinery is included.
+Stage 09 makes one synchronous admission decision before any app-server setup RPC, then runs the existing fresh or native path exactly once. Native reuse requires a current mapping with matching available client tools, binding, and proven raw-response capability on the current transport; after a proxy or app-server restart, missing capability selects fresh execution whenever client tools are active, even for a text-only next response, while tool-free restart continuation remains native. Locally unavailable selectors, changed bindings, and local contention execute the supplied complete transcript on a new thread; a fallback transcript must be completely paired or the request fails with a typed 400 before any RPC. Retained errors — duplicate tool-call IDs, live-pending result mismatches, tool results against a live ready mapping, malformed input and policy validation, disposed coordinators, cancelled or elapsed requests, and remote failures after reuse is chosen — perform no fallback and never trigger a second execution. Source records remain unchanged on fallback, so separate requests may execute equivalent work on different threads. `x_codex.threadReused` keeps its boolean shape (`false` now also covers admission fallback), the store remains schema v0, and no native fork, new checkpoint states, or retry-after-dispatch machinery was added.
 
-Until Stage 09 is implemented, the product decisions above and cross-stage continuation rules below describe the Stage 08 runtime (including its boolean reuse field and newest-response restriction). [Stage 09](09-thread-continuity.md) is the planned replacement design and is not current product behavior.
+The product decisions above and cross-stage continuation rules below describe this implemented Stage 09 runtime. [Stage 09](09-thread-continuity.md) records the deferred follow-up work — native fork, remote-setup fallback, retry after dispatch, and hidden-history recovery — which is separate future work.
 
 The default TypeScript/Vitest configuration is deterministic and offline; opt-in live-test filenames are excluded. The expanded serial live contract retains its existing compatibility scenarios and adds disk-verified `workspace-write` command/file-change coverage, isolated live web search, and an exactly-one-child nonce handoff. It uses only `gpt-5.6-luna` and enforces a hard maximum of 32 deduplicated upstream model responses across parent and child threads; its normal count remains unknown until live calibration. On 2026-07-16, `npm run check` passed 19 files and 155 tests with coverage thresholds, the offline `npm run test:package` and local `--registry-install` mode passed, and the final dry pack contained 51 files at 71,939 bytes packed and 295,941 bytes unpacked.
 
@@ -84,16 +86,16 @@ No remote CI, live, npm publication, provenance, or stable-promotion check is cl
 - Standard Chat Completions fields take precedence over extensions where a faithful mapping exists.
 - Request-side additions live under `x_codex` except the agreed continuation field `previous_response_id`. Response-side `reasoning` and `tool_results` are explicitly allowed direct compatibility fields; they are nonstandard Chat Completions fields and must be documented as such.
 - A response ID maps to a Codex thread ID in a durable, versioned local store; raw thread IDs are not exposed.
-- Supplying `previous_response_id` requires continuation.
-    - The proxy must validate the local mapping and confirm that app-server can resume the mapped thread.
-    - It rejects any non-resumable reference and never falls back to a new thread.
+- Supplying `previous_response_id` prefers native continuation.
+    - The proxy validates the local mapping and reuses the mapped thread only when local admission permits it; locally unavailable selectors execute the supplied complete transcript on one fresh thread.
+    - Remote read/resume failures remain errors — only the named local conditions fall back, and no request executes twice.
 - Tool-result messages may omit `previous_response_id` when the default implicit-tool-continuation mode can correlate all `tool_call_id` values to exactly one unexpired pending mapping. Operators may disable this mode and require the extension explicitly.
-- A `previous_response_id` must reference its thread's newest completed response.
-    - Continuing from an older response is a branch; v1 rejects it with a distinct error rather than resuming a thread whose later turns would be silently included.
+- Native reuse requires the thread's newest completed response.
+    - An older or superseded selector executes the supplied transcript on a fresh thread without recovering hidden native history; the proxy never silently appends after later turns.
     - `thread/fork` with `lastTurnId` is the documented mechanism if branching is ever supported.
 - One HTTP completion corresponds to one externally visible response; a dynamic-tool turn ends with its response and later results continue on the persisted thread.
 - A Codex thread runs at most one active turn.
-    - A concurrent request targeting a thread another request owns is rejected immediately with an OpenAI-shaped HTTP 409 conflict.
+    - A concurrent request targeting a thread another request owns executes its supplied transcript on a fresh thread; 409 `thread_busy` remains for a thread app-server itself reports active.
     - Requests never queue or interleave.
 - An `item/tool/call` batch ends its turn immediately; pending tool mappings are durable and expire with normal continuation retention (decision reversed 2026-07-26; see plans/05).
     - Every other server-initiated app-server request must be answered or rejected within the owning HTTP request lifecycle.

@@ -458,6 +458,36 @@ export function toHistoryItems(messages: readonly ChatMessage[]): HistoryItems {
   return { items, unansweredCalls, orphanResults };
 }
 
+/**
+ * Returns the history slice a fresh execution replays: every message except a
+ * final user message, which becomes the new turn's input instead. Fallback
+ * validation and fresh setup must derive the identical slice so a validated
+ * fallback transcript is exactly what fresh setup replays.
+ */
+export function freshExecutionHistory(
+  messages: readonly ChatMessage[],
+): readonly ChatMessage[] {
+  return messages.at(-1)?.role === "user" ? messages.slice(0, -1) : messages;
+}
+
+/**
+ * Validates that a fallback transcript supplies complete tool pairing. Unlike
+ * an ordinary fresh request, which drops unpairable history with a warning, a
+ * fallback was selected because the requested continuation was unavailable, so
+ * silently discarding the client's calls or results would lose work the
+ * transcript claims to carry.
+ */
+export function validateFallbackHistory(
+  messages: readonly ChatMessage[],
+): void {
+  const prior = toHistoryItems(freshExecutionHistory(messages));
+  if (prior.unansweredCalls || prior.orphanResults)
+    invalid(
+      "A fresh continuation requires every assistant tool call to be answered and every tool result to follow the assistant message that requested it.",
+      "messages",
+    );
+}
+
 /** Builds the Responses API function_call item for one recorded dynamic call. */
 export function toFunctionCallItem(
   call: StoredToolCall,

@@ -137,7 +137,7 @@ Function tools follow the normal multi-request Chat Completions flow:
 3. Execute the functions in your client.
 4. Send the assistant tool-call message plus matching `role: "tool"` messages — repeating the same `tools`, `reasoning_effort`, and `x_codex` settings as the original request.
 
-Changing those settings between the call and its results is rejected (`continuation_reasoning_effort_mismatch` / `continuation_policy_mismatch`); the pending call stays intact so you can retry corrected. When your client replays a full transcript across multiple tool rounds, only its terminal contiguous `role: "tool"` block is correlated against the pending batch; earlier completed tool exchanges stay historical context. Resending such a transcript with a new trailing user message and no `previous_response_id` starts a fresh thread, and each earlier tool call is replayed into it paired with the result that answered it. A call no `role: "tool"` message answered and a result no immediately preceding assistant batch requested are dropped, reported once per request as `unpaired_history_tool_items_dropped`. Observational Codex activity is also omitted because it belongs to the original thread, but is recognized rather than reported as unpaired client history. The proxy ends the Codex turn the moment it captures the tool calls, so the `tool_calls` response returns promptly with exact usage; your later tool results are delivered into the persisted thread when you continue, but are never echoed back in response `tool_calls` or `tool_results`. Pending tool calls are durable — they survive a proxy restart and expire only with the normal continuation retention.
+Changing those settings between the call and its results no longer rejects the request: the proxy executes the supplied transcript on a fresh Codex thread with the requested settings (`x_codex.threadReused: false`), and the pending call record stays intact for a later matching request. Results that are missing, foreign, or duplicate against the live pending batch are still rejected before any work starts. When your client replays a full transcript across multiple tool rounds, only its terminal contiguous `role: "tool"` block is correlated against the pending batch; earlier completed tool exchanges stay historical context. Resending such a transcript with a new trailing user message and no `previous_response_id` starts a fresh thread, and each earlier tool call is replayed into it paired with the result that answered it. A call no `role: "tool"` message answered and a result no immediately preceding assistant batch requested are dropped, reported once per request as `unpaired_history_tool_items_dropped`. Observational Codex activity is also omitted because it belongs to the original thread, but is recognized rather than reported as unpaired client history. The proxy ends the Codex turn the moment it captures the tool calls, so the `tool_calls` response returns promptly with exact usage; your later tool results are delivered into the persisted thread when you continue, but are never echoed back in response `tool_calls` or `tool_results`. Pending tool calls are durable — they survive a proxy restart and expire only with the normal continuation retention — but a post-restart continuation with active tools runs on a fresh thread.
 
 ## Codex-specific extensions
 
@@ -145,7 +145,7 @@ These are additive but nonstandard. Strict Chat Completions clients should ignor
 
 ### Continue a Codex thread
 
-Pass the `id` of the newest completed response as top-level `previous_response_id` to continue its persisted Codex thread:
+Pass a completed response's `id` as top-level `previous_response_id` to prefer continuing its persisted Codex thread. `previous_response_id` is a nonstandard request extension; send your complete intended transcript with every request:
 
 ```json
 {
@@ -155,10 +155,11 @@ Pass the `id` of the newest completed response as top-level `previous_response_i
 }
 ```
 
-- Send only the new user message — the persisted thread already has the earlier turns.
-- A continuation must use the same model, `reasoning_effort`, tools, and `x_codex` settings as the original.
-- Only the newest response can be continued; unknown, expired, superseded, or busy IDs are rejected — the proxy never silently starts a new thread.
-- Completed threads survive a proxy restart.
+- Send the complete transcript you intend the model to see. Native continuation still uses only the new user message as turn input, but when the requested continuation is unavailable the proxy executes exactly the supplied transcript on a new Codex thread — it cannot recover earlier text you omitted.
+- Native reuse requires the same model, `reasoning_effort`, tools, and `x_codex` settings as the original. A changed setting instead executes the supplied transcript on a fresh thread with the requested settings.
+- Admission is synchronous and bounded: unknown, expired, superseded, or locally contended selectors and changed settings execute the supplied transcript on a new thread, reported by `x_codex.threadReused: false`. Failures app-server itself reports — a remotely active or non-resumable thread, or a resume or start failure — remain typed errors; the proxy never runs a second execution.
+- A fallback transcript must be completely paired — every assistant tool call answered by its immediately following `role: "tool"` results, and no orphan results — or the request fails with a typed 400 before any work starts.
+- Completed threads survive a proxy restart. A post-restart continuation with active client tools executes on a fresh thread because the resumed thread cannot expose new tool batches; tool-free restart continuation remains native.
 
 ### Receive Codex activity
 
@@ -255,7 +256,7 @@ Default limits (all configurable via CLI flags):
 | Request deadline                 | 30 s                                        |
 | Login / startup deadline (fixed) | 5 min                                       |
 
-A second request for an active Codex thread returns 409 `thread_busy`. If app-server crashes, the proxy retries with bounded backoff while `/ready` returns 503.
+A request contending with a locally active Codex thread executes on a fresh thread; 409 `thread_busy` remains for a thread app-server itself reports active. If app-server crashes, the proxy retries with bounded backoff while `/ready` returns 503.
 The request deadline aborts downstream work and closes any response that is still open, including a stream blocked by a client that stopped reading; its concurrency slot is then released.
 
 ## Troubleshooting

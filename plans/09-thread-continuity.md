@@ -2,7 +2,9 @@
 
 ## Status and goal
 
-Planned; runtime behavior remains Stage 08 until implementation.
+Implemented on 2026-09-04; the offline gates (`npm run check`), the restructured bounded tool/restart
+scenario, and documentation alignment pass. The live scenario is adapted but awaits its explicitly
+authorized run under the five-response maximum.
 
 Keep successful same-thread continuation as implemented. When local checks show that a requested
 continuation is unavailable, execute the supplied full transcript on one new Codex thread.

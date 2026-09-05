@@ -40,12 +40,6 @@ export async function handleChatCompletion(
     if (error instanceof PolicyError) throw policyHttpError(error);
     throw error;
   }
-  const { terminalToolResults } = request;
-  if (!request.previousResponseId && terminalToolResults.length) {
-    const callIds = terminalToolResults.map((message) => message.toolCallId!);
-    request.previousResponseId =
-      options.continuations.findPendingResponse(callIds);
-  }
   const responseId = `chatcmpl_codex_${randomUUID().replaceAll("-", "")}`;
   const created = Math.floor(Date.now() / 1_000);
   // Setup is eager so validation and RPC failures retain their HTTP status

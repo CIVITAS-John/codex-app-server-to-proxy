@@ -20,6 +20,7 @@ export interface StartProxyWithTransportOptions {
   shutdownTimeoutMs?: number | undefined;
   log?: Logger | undefined;
   requirements?: PolicyRequirements | undefined;
+  implicitToolContinuation?: boolean | undefined;
 }
 
 /** Running ready proxy and the fully resolved options used to create it. */
@@ -53,6 +54,10 @@ export async function startProxyWithTransport(
   ];
   addDurationArgument(args, "--request-timeout", settings.requestTimeoutMs);
   addDurationArgument(args, "--shutdown-timeout", settings.shutdownTimeoutMs);
+  // The flag defaults to true in the proxy, so only an explicit opt-out needs
+  // to reach the CLI argument list.
+  if (settings.implicitToolContinuation === false)
+    args.push("--implicit-tool-continuation", "false");
   const options = await resolveServeOptions(parseServeOptions(args));
   const proxy = createProxyServer(options, settings.log ?? silentLogger);
   proxy.setTransport(

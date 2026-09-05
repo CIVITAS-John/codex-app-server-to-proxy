@@ -911,6 +911,30 @@ test("a disposed coordinator cannot persist a stale completed response", async (
   }, "codex-proxy-state-");
 });
 
+test("assertActive passes on a live coordinator and fails after disposal", async () => {
+  await withTempDir(async (directory) => {
+    const rpc = new JsonRpcTransport(new PassThrough(), new PassThrough());
+    const coordinator = new ContinuationCoordinator(
+      new ResponseStore(directory),
+      rpc,
+    );
+
+    assert.doesNotThrow(() => coordinator.assertActive());
+
+    coordinator.dispose();
+
+    // Disposal is a lifecycle error, never a fallback reason, so admission
+    // must surface it before any app-server RPC.
+    assert.throws(
+      () => coordinator.assertActive(),
+      (error: unknown) =>
+        error instanceof Error &&
+        error.message === "Continuation coordinator is disposed.",
+    );
+    rpc.close();
+  }, "codex-proxy-state-");
+});
+
 test("a disposed coordinator rejects tool callbacks until transport close", async () => {
   await withTempDir(async (directory) => {
     const output = new PassThrough();

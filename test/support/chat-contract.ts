@@ -36,10 +36,11 @@ const MAX_OFFLINE_PROVIDER_CALLS = 18;
 const LIVE_FILESYSTEM_SCENARIO_TIMEOUT_MS = 260_000;
 
 /**
- * Maximum model turns allowed through the third tool-result continuation:
- * the initial tool call plus one turn for each supplied result.
+ * Maximum model turns allowed by the dynamic-tool restart scenario: the
+ * initial parallel batch, one turn for each of the three supplied result
+ * batches, and one fresh fallback batch after restart.
  */
-const MAX_TOOL_MODEL_CALLS = 4;
+const MAX_TOOL_MODEL_CALLS = 5;
 
 /** POSIX shell launchers recognized in app-server command display strings. */
 const POSIX_SHELL_LAUNCHERS = new Set([
@@ -346,7 +347,7 @@ export function registerChatContract(
       }, 130_000);
 
     if (scenarios.has("dynamic-tool-restart"))
-      test("issues parallel tools, continues three result batches, and resumes after restart", async () => {
+      test("issues parallel tools, continues three result batches natively, and falls back to a fresh batch after restart", async () => {
         const callsBefore = backend!.modelCalls();
         const tools = [
           {
@@ -368,21 +369,31 @@ export function registerChatContract(
             function: {
               name: "contract_lookup_secondary",
               description:
-                "Performs the independent spruce lookup. Include this direct function in the same response as the primary cedar lookup.",
+                "Performs the independent secondary lookup. Include this direct function in the same response as the primary lookup.",
               parameters: {
                 type: "object",
-                properties: { key: { type: "string", enum: ["spruce"] } },
+                properties: { key: { type: "string" } },
                 required: ["key"],
                 additionalProperties: false,
               },
             },
           },
         ];
+        // The synthetic completed round makes the initial request a fresh
+        // execution whose marker words reach the model only through injected
+        // history: the batch prompt names no keys, so a live model must fill
+        // its calls from the remembered code words.
         const transcript: Array<Record<string, unknown>> = [
           {
             role: "user",
             content:
-              "This is a tool-concurrency conformance check. In your next response, issue exactly two direct function calls: contract_lookup with key cedar and contract_lookup_secondary with key spruce. Put both independent calls in the same response without using exec, wait, or waiting for either result. After receiving every result, follow its instruction. Do not answer until the final result tells you to.",
+              "This is a tool-concurrency conformance check. Remember two code words for this session: the first is cedar and the second is spruce. Reply with only the word understood.",
+          },
+          { role: "assistant", content: "understood" },
+          {
+            role: "user",
+            content:
+              "In your next response, issue exactly two direct function calls: contract_lookup with the first remembered code word as its key and contract_lookup_secondary with the second remembered code word as its key. Put both independent calls in the same response without using exec, wait, or waiting for either result. After receiving every result, follow its instruction. Do not answer until the final result tells you to.",
           },
         ];
         const firstStarted = Date.now();
@@ -397,6 +408,11 @@ export function registerChatContract(
         let callBody = parseToolCompletion(
           firstRaw,
           "dynamic-tool completion 1",
+        );
+        assert.equal(
+          callBody.x_codex?.threadReused,
+          false,
+          "initial dynamic-tool request did not execute on a fresh thread",
         );
         let completedBody: ToolCompletion | undefined;
         for (const [
@@ -493,6 +509,11 @@ export function registerChatContract(
             resultRaw,
             `tool-result completion ${roundIndex + 1}`,
           );
+          assert.equal(
+            resultBody.x_codex?.threadReused,
+            true,
+            `tool-result continuation ${roundIndex + 1} did not reuse the native thread`,
+          );
           if (nextBatch !== undefined) {
             assert.equal(
               resultBody.choices?.[0]?.finish_reason,
@@ -524,35 +545,79 @@ export function registerChatContract(
           (completedUsage?.total_tokens ?? 0) > 0,
           "third tool-result completion reported no tokens",
         );
-        assert.ok(
-          backend!.modelCalls() - callsBefore <= MAX_TOOL_MODEL_CALLS,
-          `three-result tool round trip exceeded ${MAX_TOOL_MODEL_CALLS} model calls`,
-        );
 
+        // The restart continuation supplies the complete transcript, so the
+        // final assistant message joins the history a fallback would inject.
+        transcript.push({
+          role: "assistant",
+          content: completedBody.choices?.[0]?.message?.content,
+        });
         await backend!.restart();
-        const continued = await chat({
+        const resumesBefore = backend!.resumeCalls();
+        const restartCallsBefore = backend!.modelCalls();
+        const restarted = await chat({
           model: CONTRACT_MODEL,
           previous_response_id: completedBody.id,
           messages: [
+            ...transcript,
             {
               role: "user",
-              content: "Reply exactly with contract-resume-ok.",
+              content:
+                "This is the contract-restart-fallback check. Call contract_lookup exactly once with key pine. Do not answer yet.",
             },
           ],
           tools,
         });
-        const continuedRaw = await continued.text();
-        assert.equal(continued.status, 200, diagnostic(continuedRaw));
-        const continuedBody = parseToolCompletion(
-          continuedRaw,
-          "restart continuation",
+        const restartedRaw = await restarted.text();
+        assert.equal(restarted.status, 200, diagnostic(restartedRaw));
+        const restartedBody = parseToolCompletion(
+          restartedRaw,
+          "restart fallback batch",
+        );
+        assert.equal(
+          restartedBody.x_codex?.threadReused,
+          false,
+          "restart continuation did not fall back to a fresh thread",
+        );
+        const restartedChoice = restartedBody.choices?.[0];
+        assert.equal(
+          restartedChoice?.finish_reason,
+          "tool_calls",
+          "restart fallback did not deliver the requested tool batch",
+        );
+        const restartedCalls = restartedChoice?.message?.tool_calls ?? [];
+        assert.equal(
+          restartedCalls.length,
+          1,
+          "restart fallback batch did not contain exactly one call",
+        );
+        const restartedCall = restartedCalls[0];
+        assert.ok(restartedCall, "restart fallback omitted its tool call");
+        assert.equal(restartedCall.function.name, "contract_lookup");
+        assert.deepEqual(
+          parseJson<{ key?: string }>(
+            restartedCall.function.arguments,
+            "restart fallback arguments",
+          ),
+          { key: "pine" },
+          "restart fallback call used unexpected arguments",
+        );
+        assert.equal(
+          backend!.resumeCalls(),
+          resumesBefore,
+          "restart fallback issued a source-thread RPC after restart",
+        );
+        assert.equal(
+          backend!.modelCalls(),
+          restartCallsBefore + 1,
+          "restart fallback did not execute exactly one fresh model turn",
         );
         assert.ok(
-          /contract-resume-ok/i.test(
-            continuedBody.choices?.[0]?.message?.content ?? "",
-          ),
-          "restart continuation omitted the contract acknowledgment",
+          backend!.modelCalls() - callsBefore <= MAX_TOOL_MODEL_CALLS,
+          `tool round trip with restart fallback exceeded ${MAX_TOOL_MODEL_CALLS} model calls`,
         );
+        // The fallback batch's results are never submitted: the scenario
+        // ends with its pending record, cleaned up with the backend.
       }, 130_000);
 
     if (scenarios.has("disabled-sandbox-chat"))
@@ -1098,6 +1163,8 @@ export function registerChatContract(
     if (scenarios.has("invalid-input"))
       test("rejects invalid requests before starting model work", async () => {
         const callsBefore = backend!.modelCalls();
+        // Unknown selectors execute fresh under continuation admission, so
+        // only syntactically rejected bodies belong in this no-model-work set.
         for (const body of [
           {
             model: CONTRACT_MODEL,
@@ -1125,20 +1192,6 @@ export function registerChatContract(
           );
           assert.equal(error.error?.code, "invalid_request");
         }
-        const unknown = await fetch(`${backend!.origin}/v1/chat/completions`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            model: CONTRACT_MODEL,
-            messages: [{ role: "user", content: "x" }],
-            previous_response_id: "chatcmpl_old",
-          }),
-        });
-        assert.equal(unknown.status, 404);
-        assert.equal(
-          ((await unknown.json()) as { error?: { code?: string } }).error?.code,
-          "unknown_previous_response_id",
-        );
         assert.equal(
           backend!.modelCalls(),
           callsBefore,

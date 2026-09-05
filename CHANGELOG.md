@@ -2,6 +2,16 @@
 
 All notable user-facing changes are recorded here. This project follows semantic versioning once a version is published.
 
+## 0.1.0-rc.24 — September 4, 2026
+
+### Changed
+
+- **Breaking:** Continuation admission now decides synchronously, before any app-server setup RPC, between native reuse and one fresh execution. `previous_response_id` remains a nonstandard request extension but is now a preference for native continuation: when local admission shows the requested continuation is unavailable — an unknown, expired, or superseded selector; implicit tool-call lookup reporting unknown, expired, or ambiguous IDs; a changed model, reasoning effort, cwd, tools, or policy binding (`tool_choice: "none"` counts as a changed tool-bearing binding); active client tools lacking raw-response capability on the current transport; or local thread contention — the proxy executes the supplied complete transcript on one new Codex thread with the requested settings and reports `x_codex.threadReused: false`. This replaces the previous 404/409/410 rejections for those selectors. Send the complete intended transcript: an older selector does not recover hidden native history, and the source mapping and its lease are left unchanged.
+- `x_codex.threadReused: false` now covers both ordinary fresh execution and admission fallback; `true` still appears only after native continuation accepts its turn. The field's shape, the schema-version-0 store, and the error envelopes are unchanged, with no new public outcome enum or error codes.
+- A fallback transcript must be completely paired — every assistant tool call answered by its immediately following tool results, and no orphan results — or the request fails with a typed 400 before any RPC. Ordinary fresh requests keep their existing warn-and-drop history handling.
+- A continuation issued after a proxy or app-server restart now executes on a fresh thread whenever client tools are active, even when the next response would be text-only, because the reattached thread cannot expose new tool batches; tool-free restart continuation remains native.
+- Retained as typed errors with no fallback and never a second execution: duplicate tool-call IDs; results that are missing, invalid, incomplete, foreign, or duplicate against a live pending mapping (409 `tool_results_required` / 400s); tool results against a live ready mapping (409 `tool_results_without_pending_call`); remote failures after reuse is chosen (409 `thread_busy` for a thread app-server reports active, 409 `thread_not_resumable`, injection/start failures); malformed input and policy validation; disposed coordinators; and cancelled or elapsed requests.
+
 ## 0.1.0-rc.21 — September 2, 2026
 
 ### Changed

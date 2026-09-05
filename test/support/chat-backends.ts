@@ -618,6 +618,42 @@ function createScriptedTransport(
             }),
           );
         };
+        /**
+         * Emits the fixed single-call batch requested by the restart-fallback
+         * continuation. It registers the turn in the same maps as
+         * sendToolBatch so it parks at its batch until turn/interrupt and the
+         * proxy captures and interrupts it exactly like the other batches.
+         */
+        const sendRestartBatch = (): void => {
+          toolTurns.set(turnId, threadId);
+          const requestId = ++nextServerRequest;
+          pendingTools.set(requestId, { threadId, turnId });
+          send(
+            protocolServerRequest({
+              id: requestId,
+              method: "item/tool/call",
+              params: {
+                threadId,
+                turnId,
+                callId: "call_contract_restart_1",
+                namespace: null,
+                tool: "contract_lookup",
+                arguments: { key: "pine" },
+              },
+            }),
+          );
+          send(
+            protocolNotification({
+              method: "rawResponse/completed",
+              params: {
+                threadId,
+                turnId,
+                responseId: `raw_contract_${turnId}_restart`,
+                usage: null,
+              },
+            }),
+          );
+        };
         /** Emits one completed file-change lifecycle and performs its write. */
         const sendFilesystemWrite = (): void => {
           const change = {
@@ -961,6 +997,12 @@ function createScriptedTransport(
               },
             }),
           );
+        if (prompt.includes("contract-restart-fallback")) {
+          // One fresh-thread batch after restart: the fallback thread has raw
+          // boundaries, so the requested call is delivered like any live batch.
+          sendRestartBatch();
+          return;
+        }
         if (prompt.includes("contract_lookup")) {
           sendToolBatch(0);
           return;
