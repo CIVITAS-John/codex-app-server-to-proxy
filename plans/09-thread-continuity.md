@@ -31,6 +31,12 @@ intended transcript. An older selector does not recover hidden native history: f
 uses only that transcript. Continue with the new response ID returned by fresh execution.
 The proxy cannot detect omitted earlier text or compare replayed text with native history.
 
+> Note (2026-09-06): an explicit selector for a live pending batch additionally accepts a complete
+> `role: "tool"` result block followed by one or more consecutive user messages, per
+> [plans/10](10-tool-results-with-user-followup.md). The admission order is unchanged — batch
+> validation still precedes binding, capability, and contention fallback — and implicit selection
+> still resolves only a terminal tool block.
+
 The existing nonstandard response extension `x_codex.threadReused` remains unchanged:
 `true` after native continuation accepts its turn; `false` for ordinary fresh execution or
 fallback. Errors retain their current envelopes and metadata. No new public outcome enum is needed.

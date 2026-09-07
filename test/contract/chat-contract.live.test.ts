@@ -19,6 +19,7 @@ registerChatContract(
     scenarios: [
       "role-history-sse",
       "dynamic-tool-restart",
+      "tool-result-user-suffix",
       "disabled-sandbox-chat",
       "filesystem-read-write",
       "live-web-search",

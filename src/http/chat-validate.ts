@@ -62,6 +62,34 @@ function terminalToolResultBlock(
   return messages.slice(first);
 }
 
+/** The final tool batch selected for pending-batch correlation. */
+export interface ToolBatchSelection {
+  /** The assistant message immediately preceding the result block, if present. */
+  assistant: ChatMessage | undefined;
+  /** The contiguous `role: "tool"` block that must match a pending batch. */
+  results: ChatMessage[];
+  /** Consecutive user messages after the result block, in transcript order. */
+  suffixUsers: ChatMessage[];
+}
+
+/** Selects the final result block, its preceding assistant, and user suffix. */
+function selectToolBatch(messages: readonly ChatMessage[]): ToolBatchSelection {
+  // Walk backward over the final consecutive user messages, then over the
+  // contiguous tool-result block. Never search older rounds for matching IDs
+  // and never merge separated result blocks: only the terminal batch and its
+  // immediate suffix are continuation candidates.
+  let userStart = messages.length;
+  while (messages[userStart - 1]?.role === "user") userStart -= 1;
+  let resultStart = userStart;
+  while (messages[resultStart - 1]?.role === "tool") resultStart -= 1;
+  const preceding = messages[resultStart - 1];
+  return {
+    assistant: preceding?.role === "assistant" ? preceding : undefined,
+    results: messages.slice(resultStart, userStart),
+    suffixUsers: messages.slice(userStart),
+  };
+}
+
 /** The Stage 04 request subset after validation. */
 export interface ChatRequest {
   model: string;
@@ -69,10 +97,19 @@ export interface ChatRequest {
   messages: ChatMessage[];
   /**
    * The terminal contiguous `role: "tool"` block, derived once during
-   * validation. Continuation lookup, resume, and result correlation all read
-   * this single view rather than re-deriving it from `messages`.
+   * validation. Implicit continuation lookup, the expired-record fallback
+   * reason, and the ready-record tool-result rejection read this terminal
+   * view; explicit pending-batch correlation instead reads `toolBatch`.
    */
   terminalToolResults: ChatMessage[];
+  /**
+   * The final tool batch with its preceding assistant message and any user
+   * suffix, derived once during validation. Explicit pending-batch
+   * correlation reads this view, which permits consecutive user messages
+   * after the result block; a terminal tool block yields the same
+   * representation with an empty suffix.
+   */
+  toolBatch: ToolBatchSelection;
   stream: boolean;
   includeUsage: boolean;
   dynamicTools: Array<Record<string, unknown>>;
@@ -123,10 +160,14 @@ export function validateRequest(
   const messages = body.messages.map((entry, index) =>
     validateMessage(entry, index),
   );
-  // Only the terminal block can resolve a continuation. Tool messages before it
-  // are completed earlier rounds that `toHistoryItems` replays into a fresh
-  // thread, so a full transcript needs no continuation ID to be accepted.
+  // Only the terminal block can resolve an implicit continuation. Tool
+  // messages before it are completed earlier rounds that `toHistoryItems`
+  // replays into a fresh thread, so a full transcript needs no continuation
+  // ID to be accepted. Explicit pending-batch correlation instead reads the
+  // batch selection, which also admits a trailing user suffix after the
+  // results.
   const terminalToolResults = terminalToolResultBlock(messages);
+  const toolBatch = selectToolBatch(messages);
   if (
     !body.previous_response_id &&
     terminalToolResults.length &&
@@ -179,6 +220,7 @@ export function validateRequest(
     ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
     messages,
     terminalToolResults,
+    toolBatch,
     stream: body.stream === true,
     includeUsage,
     dynamicTools,
@@ -369,7 +411,7 @@ function validateTools(
 }
 
 /** Maps one prior message to raw Responses API history without flattening roles. */
-function toHistoryItem(
+export function toHistoryItem(
   message: ChatMessage,
 ): Record<string, unknown> | undefined {
   // A tool-only assistant response has no model-visible text to inject; its
@@ -514,11 +556,10 @@ export function toFunctionCallOutputItem(
 
 /** Validates a complete, single-use result set for a pending tool batch. */
 export function validateToolResults(
-  messages: ChatMessage[],
+  assistant: ChatMessage | undefined,
   toolResults: ChatMessage[],
   pending: StoredToolCall[],
 ): Map<string, string> {
-  const assistant = messages[messages.length - toolResults.length - 1];
   if (!assistant?.toolCalls)
     invalid("The assistant tool-call message is required.", "messages");
   const expected = new Map(pending.map((call) => [call.callId, call]));

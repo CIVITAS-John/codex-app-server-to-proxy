@@ -42,6 +42,12 @@ const LIVE_FILESYSTEM_SCENARIO_TIMEOUT_MS = 260_000;
  */
 const MAX_TOOL_MODEL_CALLS = 5;
 
+/**
+ * Maximum model turns allowed by the tool-result user-suffix scenario: one
+ * tool-call response and one results-plus-user continuation, with no retry.
+ */
+const MAX_SUFFIX_MODEL_CALLS = 2;
+
 /** POSIX shell launchers recognized in app-server command display strings. */
 const POSIX_SHELL_LAUNCHERS = new Set([
   "sh",
@@ -123,6 +129,7 @@ export type ChatContractScenario =
   | "aggregate"
   | "role-history-sse"
   | "dynamic-tool-restart"
+  | "tool-result-user-suffix"
   | "disabled-sandbox-chat"
   | "filesystem-read-write"
   | "live-web-search"
@@ -148,6 +155,7 @@ const OFFLINE_SCENARIOS: readonly ChatContractScenario[] = [
   "aggregate",
   "role-history-sse",
   "dynamic-tool-restart",
+  "tool-result-user-suffix",
   "disabled-sandbox-chat",
   "filesystem-read-write",
   "live-web-search",
@@ -618,6 +626,198 @@ export function registerChatContract(
         );
         // The fallback batch's results are never submitted: the scenario
         // ends with its pending record, cleaned up with the backend.
+      }, 130_000);
+
+    if (scenarios.has("tool-result-user-suffix"))
+      test("continues a pending tool batch with results followed by user messages", async () => {
+        const callsBefore = backend!.modelCalls();
+        const resumesBefore = backend!.resumeCalls();
+        const tools = [
+          {
+            type: "function",
+            function: {
+              name: "contract_lookup",
+              description:
+                "Looks up one fixed live-contract value. Include this direct function in the same response as any requested independent lookup.",
+              parameters: {
+                type: "object",
+                properties: { key: { type: "string" } },
+                required: ["key"],
+                additionalProperties: false,
+              },
+            },
+          },
+          {
+            type: "function",
+            function: {
+              name: "contract_lookup_secondary",
+              description:
+                "Performs the independent secondary lookup. Include this direct function in the same response as the primary lookup.",
+              parameters: {
+                type: "object",
+                properties: { key: { type: "string" } },
+                required: ["key"],
+                additionalProperties: false,
+              },
+            },
+          },
+        ];
+        const firstResponse = await chat({
+          model: CONTRACT_MODEL,
+          messages: [
+            {
+              role: "user",
+              content:
+                "This is the contract-tool-suffix check. In your next response, issue exactly two direct function calls: contract_lookup with key cedar and contract_lookup_secondary with key spruce. Put both independent calls in the same response without using exec, wait, or waiting for either result. Do not answer yet.",
+            },
+          ],
+          tools,
+        });
+        const firstRaw = await firstResponse.text();
+        assert.equal(firstResponse.status, 200, diagnostic(firstRaw));
+        const firstBody = parseToolCompletion(
+          firstRaw,
+          "tool-suffix batch completion",
+        );
+        assert.equal(
+          firstBody.x_codex?.threadReused,
+          false,
+          "initial tool-suffix request did not execute on a fresh thread",
+        );
+        const assistant = firstBody.choices?.[0]?.message;
+        const calls = assistant?.tool_calls ?? [];
+        assert.match(firstBody.id ?? "", /^chatcmpl_codex_/);
+        assert.equal(firstBody.choices?.[0]?.finish_reason, "tool_calls");
+        assert.equal(assistant?.role, "assistant");
+        assert.equal(
+          calls.length,
+          2,
+          "regular Responses framing did not issue both independent tool calls in parallel",
+        );
+        const actualCalls = calls.map((call) => {
+          assert.ok(call.id);
+          assert.equal(
+            call.type,
+            "function",
+            "dynamic tool call used an unsupported type",
+          );
+          const callArguments = parseJson<Record<string, unknown>>(
+            call.function.arguments,
+            "tool-suffix call arguments",
+          );
+          assert.equal(typeof callArguments.key, "string");
+          return {
+            name: call.function.name,
+            key: callArguments.key as string,
+          };
+        });
+        assert.deepEqual(
+          [...actualCalls].sort((left, right) =>
+            left.name.localeCompare(right.name),
+          ),
+          [...CONTRACT_TOOL_BATCHES[0]].sort((left, right) =>
+            left.name.localeCompare(right.name),
+          ),
+          "tool-suffix batch used unexpected calls",
+        );
+        const firstUsage = firstBody.usage;
+        assert.ok(
+          firstUsage,
+          "tool-suffix batch response omitted usage for an interrupted turn",
+        );
+        assertUsage(firstUsage);
+        assert.equal(
+          typeof firstUsage.completion_tokens_details?.reasoning_tokens,
+          "number",
+          "tool-suffix batch response omitted reasoning token detail",
+        );
+
+        // The continuation supplies the complete result block followed by
+        // two consecutive user messages: the native path must deliver the
+        // pairs, inject the earlier user as history, and keep the final
+        // user as the new turn's input, all on the same thread.
+        const continuedResponse = await chat({
+          model: CONTRACT_MODEL,
+          previous_response_id: firstBody.id,
+          tools,
+          messages: [
+            {
+              role: "assistant",
+              content: assistant?.content ?? null,
+              tool_calls: assistant!.tool_calls,
+            },
+            ...calls.map((call, callIndex) => ({
+              role: "tool",
+              tool_call_id: call.id,
+              content:
+                callIndex < calls.length - 1
+                  ? "This independent lookup succeeded. Wait for the other result before taking another action."
+                  : "The final lookup succeeded. The secret code word for this session is birch.",
+            })),
+            {
+              role: "user",
+              content: "Remember this additional code word: aspen.",
+            },
+            {
+              role: "user",
+              content:
+                "This is the contract-suffix acknowledgment. Without calling any tool, reply exactly with the two code words from this session — the secret code word reported by the final lookup result and the additional code word you were asked to remember — in alphabetical order, separated by one space, and nothing else.",
+            },
+          ],
+        });
+        const continuedRaw = await continuedResponse.text();
+        assert.equal(continuedResponse.status, 200, diagnostic(continuedRaw));
+        const continuedBody = parseToolCompletion(
+          continuedRaw,
+          "tool-suffix continuation",
+        );
+        assert.equal(
+          continuedBody.x_codex?.threadReused,
+          true,
+          "tool-suffix continuation did not reuse the native thread",
+        );
+        const continuedChoice = continuedBody.choices?.[0];
+        assert.equal(continuedChoice?.finish_reason, "stop");
+        const continuedContent = continuedChoice?.message?.content ?? "";
+        // Both code words must reach the reply: birch proves the injected
+        // result content reached the model, and aspen proves the earlier
+        // suffix user message did too instead of being dropped or turned
+        // into the turn input.
+        assert.ok(
+          /aspen/i.test(continuedContent),
+          "tool-suffix continuation omitted the injected suffix user's code word",
+        );
+        assert.ok(
+          /birch/i.test(continuedContent),
+          "tool-suffix continuation omitted the injected result's code word",
+        );
+        assert.ok(
+          (continuedChoice?.message?.tool_calls?.length ?? 0) === 0 &&
+            (continuedChoice?.message?.tool_results?.length ?? 0) === 0,
+          "tool-suffix continuation exposed unexpected tool activity",
+        );
+        const continuedUsage = continuedBody.usage;
+        assert.ok(
+          continuedUsage,
+          "tool-suffix continuation omitted usage for a completed turn",
+        );
+        assertUsage(continuedUsage);
+        // The continuation counts from the tool-call boundary, so a healthy
+        // native handoff never reports an empty token span.
+        assert.ok(
+          (continuedUsage.total_tokens ?? 0) > 0,
+          "tool-suffix continuation reported no tokens",
+        );
+        assert.equal(
+          backend!.resumeCalls(),
+          resumesBefore + 1,
+          "tool-suffix continuation did not resume the source thread exactly once",
+        );
+        assert.equal(
+          backend!.modelCalls() - callsBefore,
+          MAX_SUFFIX_MODEL_CALLS,
+          `tool-suffix round trip exceeded ${MAX_SUFFIX_MODEL_CALLS} model calls`,
+        );
       }, 130_000);
 
     if (scenarios.has("disabled-sandbox-chat"))

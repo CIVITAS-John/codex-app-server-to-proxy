@@ -31,9 +31,11 @@ import {
   freshExecutionHistory,
   toFunctionCallItem,
   toFunctionCallOutputItem,
+  toHistoryItem,
   toHistoryItems,
   validateFallbackHistory,
   validateToolResults,
+  type ChatMessage,
   type ChatRequest,
 } from "./chat-validate.js";
 import { HttpError, toolCorrelationErrorForStatus } from "./errors.js";
@@ -285,8 +287,13 @@ type ContinuationAdmission =
       type: "reuse";
       responseId: string;
       record: ResponseRecord;
-      /** Validated terminal results for a pending batch, keyed by call ID. */
+      /** Validated results for the selected pending batch, keyed by call ID. */
       results?: Map<string, string>;
+      /**
+       * User messages following the selected result block. The final one is
+       * the new turn's input; earlier ones are injected after the pairs.
+       */
+      suffixUsers?: ChatMessage[];
     };
 
 /** The reuse branch of {@link ContinuationAdmission}. */
@@ -497,7 +504,7 @@ export async function execute(
       let pendingFinishReason: NormalizedEvent["finishReason"];
       let pendingUsage: Usage | undefined;
       // Tracks whether this response persisted a pending tool batch.
-      let toolBatch: StoredToolCall[] | undefined;
+      let capturedBatch: StoredToolCall[] | undefined;
       try {
         while (!handle.terminal) {
           queue.assertHealthy();
@@ -549,7 +556,7 @@ export async function execute(
               binding,
               handle,
             );
-            toolBatch = stored;
+            capturedBatch = stored;
             // End the turn and flush usage even after client abort. The
             // tombstone precedes the round trip because a lost interrupt
             // response does not prove the turn survived, and this response
@@ -642,19 +649,19 @@ export async function execute(
             options.log("warn", "usage_unreported", {
               request_id: options.requestId,
               reason: collected.exitReason,
-              pending_tool_batch: Boolean(toolBatch),
+              pending_tool_batch: Boolean(capturedBatch),
             });
         }
         // Usage is optional output. Persisting the boundary for the next
         // response is best-effort and must never fail a tool handoff that is
         // already durable.
-        if (toolBatch && !failed)
+        if (capturedBatch && !failed)
           options.continuations.recordPendingUsage(
             responseId,
             normalizer.usageBoundary(),
           );
         if (
-          !toolBatch &&
+          !capturedBatch &&
           !failed &&
           handle.threadId &&
           !options.continuations.recordReady(
@@ -914,16 +921,24 @@ function prepareContinuation(
   const stored = options.continuations.store.get(responseId);
   if (!stored) return { type: "fresh", reason: "unknown_previous_response_id" };
   // Pending-result validation precedes binding, capability, and contention
-  // checks so a live mapping's client errors are reported exactly as before.
+  // checks so a live mapping's client errors surface before any fallback
+  // consideration.
   let results: Map<string, string> | undefined;
+  let suffixUsers: ChatMessage[] | undefined;
   if (stored.state === "pending_tool") {
-    if (!request.terminalToolResults.length)
+    // An explicit selector may continue a complete result block followed by
+    // consecutive user messages. The implicit selector resolves only a
+    // terminal block, which this same selection represents with an empty
+    // suffix, so one view serves both without broadening implicit selection.
+    const batch = request.toolBatch;
+    if (!batch.results.length)
       continuationFailure(409, "tool_results_required");
     results = validateToolResults(
-      request.messages,
-      request.terminalToolResults,
+      batch.assistant,
+      batch.results,
       stored.pendingCalls!,
     );
+    suffixUsers = batch.suffixUsers;
   } else if (stored.state === "expired") {
     return stored.pendingCalls?.length && request.terminalToolResults.length
       ? { type: "fresh", reason: "expired_tool_continuation" }
@@ -962,6 +977,7 @@ function prepareContinuation(
     responseId,
     record: stored,
     ...(results ? { results } : {}),
+    ...(suffixUsers ? { suffixUsers } : {}),
   };
 }
 
@@ -1011,11 +1027,26 @@ async function resumeContinuation(
     return { usageBaseline: stored.usageTotal, instructionSources };
   }
   const pending = stored.pendingCalls!;
-  const items = pending.flatMap((call) => [
-    // Inject the complete pair because an unpaired output is ignored.
-    toFunctionCallItem(call),
-    toFunctionCallOutputItem(call.callId, admission.results!.get(call.callId)!),
-  ]);
+  // The final suffix user message stays the turn input; every earlier suffix
+  // user joins the injection after the pairs, keeping its own message and
+  // order. No other transcript history is ever injected on the native path.
+  const earlierUsers = (admission.suffixUsers ?? []).slice(0, -1);
+  const items = [
+    ...pending.flatMap((call) => [
+      // Inject the complete pair because an unpaired output is ignored.
+      toFunctionCallItem(call),
+      toFunctionCallOutputItem(
+        call.callId,
+        admission.results!.get(call.callId)!,
+      ),
+    ]),
+    ...earlierUsers.flatMap((message) => {
+      const item = toHistoryItem(message);
+      // The role-preserving mapper skips content-less messages; validated
+      // user messages always carry string content, so nothing drops here.
+      return item ? [item] : [];
+    }),
+  ];
   // Tombstone before injection to prevent replay after uncertain failure.
   options.continuations.protectPendingFromReplay(admission.responseId);
   try {

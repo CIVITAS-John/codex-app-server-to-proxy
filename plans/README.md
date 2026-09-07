@@ -28,6 +28,7 @@ These decisions describe the implemented Stage 09 behavior. [Stage 09](09-thread
 - Handle approvals non-interactively with `auto_review` where policy permits and decline any unexpected approval request.
 - On continuation, prefer native reuse and fall back to one fresh execution when local admission shows the continuation is unavailable.
     - Native reuse requires the original tool set, model, reasoning effort, cwd, and policy; the pinned protocol cannot replace dynamic tools on a resumed thread.
+    - An explicit `previous_response_id` selecting a live pending tool batch may append one or more consecutive user messages after its complete `role: "tool"` result block: the results are injected as complete call/output pairs, every earlier suffix user message is injected after the pairs in order, and the final user message becomes the new turn's input on the same thread, reported by `x_codex.threadReused: true`, per [plans/10](10-tool-results-with-user-followup.md).
     - Unknown, expired, or superseded selectors, implicit tool-call lookup reporting unknown, expired, or ambiguous IDs, changed bindings, active client tools lacking raw-response capability on the current transport, and local thread contention execute the supplied complete transcript on one new Codex thread with the requested settings, reported by `x_codex.threadReused: false`. The source mapping and its lease are unaffected.
     - Remote failures after reuse is chosen remain errors, and no request ever executes twice.
 - Reject message history that cannot be represented faithfully.
@@ -88,6 +89,7 @@ No remote CI, live, npm publication, provenance, or stable-promotion check is cl
 - A response ID maps to a Codex thread ID in a durable, versioned local store; raw thread IDs are not exposed.
 - Supplying `previous_response_id` prefers native continuation.
     - The proxy validates the local mapping and reuses the mapped thread only when local admission permits it; locally unavailable selectors execute the supplied complete transcript on one fresh thread.
+    - An explicit selector for a live pending tool batch accepts a complete `role: "tool"` result block followed by consecutive user messages — the suffix users are delivered after the injected result pairs and the final one becomes the turn input — and only the terminal batch is correlated when the transcript contains earlier completed tool rounds.
     - Remote read/resume failures remain errors — only the named local conditions fall back, and no request executes twice.
 - Tool-result messages may omit `previous_response_id` when the default implicit-tool-continuation mode can correlate all `tool_call_id` values to exactly one unexpired pending mapping. Operators may disable this mode and require the extension explicitly.
 - Native reuse requires the thread's newest completed response.

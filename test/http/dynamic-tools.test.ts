@@ -81,6 +81,8 @@ interface ToolAppServerFailures {
   duplicateToolCallId?: boolean;
   /** One-shot: only the first `thread/start` fails; later ones succeed. */
   failThreadStart?: boolean;
+  /** Fails the turn/start whose 1-based turn number matches; 0 never fails. */
+  failTurnStartOnTurn?: number;
 }
 
 /**
@@ -306,6 +308,14 @@ class ToolAppServer {
         });
       } else if (message.method === "turn/start") {
         this.#turn += 1;
+        if (this.failures.failTurnStartOnTurn === this.#turn) {
+          // JSON-RPC failures intentionally have no generated success type.
+          this.#send({
+            id,
+            error: { code: -32000, message: "turn start rejected" },
+          });
+          return;
+        }
         const turnId = `turn_${this.#turn}`;
         const turnParams = (message.params ?? {}) as {
           threadId?: unknown;
@@ -1427,6 +1437,394 @@ test("missing, foreign, and duplicate tool result IDs and changed tool call argu
   }, "codex-tool-results-invalid-");
 });
 
+test("tool results followed by user messages continue natively with the final user as input", async () => {
+  const suffixes = [
+    ["only question"],
+    ["earlier note", "final question"],
+    ["first note", "second note", "final question"],
+  ];
+  for (const suffix of suffixes) {
+    for (const stream of [false, true]) {
+      await withTempDir(async (directory) => {
+        // The suffix behavior is unrelated to usage accounting. Match the
+        // live terminal flush so the loop's twelve requests do not each
+        // pay the trailing idle grace.
+        const fake = new ToolAppServer(true, false, undefined, false, {
+          suspendOrder: "on_interrupt",
+          onCompletion: true,
+        });
+        const { origin, proxy } = await startProxy(directory, fake);
+        const tools = [
+          { type: "function", function: { name: "first", parameters: {} } },
+          { type: "function", function: { name: "second", parameters: {} } },
+        ];
+        try {
+          const firstResponse = await postChatCompletion(origin, {
+            model: "m",
+            tools,
+            messages: [{ role: "user", content: "use tools" }],
+          });
+          assert.equal(firstResponse.status, 200);
+          const first = (await firstResponse.json()) as CompletionBody;
+          assert.equal(first.choices[0]!.finish_reason, "tool_calls");
+          assert.deepEqual(
+            first.choices[0]!.message.tool_calls?.map((call) => call.id),
+            ["call_b", "call_a"],
+          );
+          const calls = first.choices[0]!.message.tool_calls;
+
+          const continuedResponse = await postChatCompletion(origin, {
+            model: "m",
+            tools,
+            previous_response_id: first.id,
+            ...(stream ? { stream: true } : {}),
+            messages: [
+              ...toolTranscript(calls, "res"),
+              ...suffix.map((content) => ({ role: "user", content })),
+            ],
+          });
+          assert.equal(
+            continuedResponse.status,
+            200,
+            await continuedResponse.clone().text(),
+          );
+          if (stream) {
+            const chunks = parseSseChunks(await continuedResponse.text());
+            // Reuse is reported exactly once, on the first chunk, the same
+            // way a ready continuation reports it.
+            assert.deepEqual(chunks[0]?.x_codex, {
+              instructionSources: [],
+              threadReused: true,
+            });
+            assert.equal(
+              chunks.slice(1).some((chunk) => chunk.x_codex !== undefined),
+              false,
+            );
+            const choices = chunks.flatMap(
+              (chunk) =>
+                (chunk.choices as
+                  | Array<{
+                      delta: Record<string, unknown>;
+                      finish_reason: string | null;
+                    }>
+                  | undefined) ?? [],
+            );
+            assert.equal(
+              choices.map((choice) => choice.delta.content ?? "").join(""),
+              "continued",
+            );
+            // The replayed client calls and results are injected thread
+            // history, never new delta activity.
+            assert.equal(
+              choices.some((choice) => choice.delta.tool_calls !== undefined),
+              false,
+            );
+            assert.equal(
+              choices.some((choice) => choice.delta.tool_results !== undefined),
+              false,
+            );
+            assert.equal(choices.at(-1)?.finish_reason, "stop");
+          } else {
+            const continued =
+              (await continuedResponse.json()) as CompletionBody;
+            assert.equal(continued.x_codex?.threadReused, true);
+            assert.equal(continued.choices[0]!.message.content, "continued");
+            assert.equal(continued.choices[0]!.finish_reason, "stop");
+            // The replayed batch is not re-announced as new activity.
+            assert.equal(continued.choices[0]!.message.tool_calls, undefined);
+            assert.equal(continued.choices[0]!.message.tool_results, undefined);
+          }
+          // The suspension's start/turn/interrupt, then exactly one native
+          // read/resume/inject/start sequence and no second thread/start.
+          assert.deepEqual(fake.methods, [
+            "thread/start",
+            "turn/start",
+            "turn/interrupt",
+            "thread/read",
+            "thread/resume",
+            "thread/inject_items",
+            "turn/start",
+          ]);
+          // The pending pairs are injected first, in recorded call order.
+          assert.deepEqual(
+            fake.injected.slice(0, 4).map((item) => [item.type, item.call_id]),
+            [
+              ["function_call", "call_b"],
+              ["function_call_output", "call_b"],
+              ["function_call", "call_a"],
+              ["function_call_output", "call_a"],
+            ],
+          );
+          assert.equal(fake.injected[1]!.output, "res");
+          assert.equal(fake.injected[3]!.output, "x".repeat(256 * 1024));
+          // Every suffix user except the last is then injected, each keeping
+          // its own message and order as a Responses user-history item.
+          assert.deepEqual(
+            fake.injected.slice(4),
+            suffix.slice(0, -1).map((text) => ({
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text }],
+            })),
+          );
+          // The final suffix user is the turn input, exactly once: the
+          // suspension's own prompt is the only other recorded turn.
+          assert.deepEqual(fake.turnInputs, [
+            [{ type: "text", text: "use tools", text_elements: [] }],
+            [{ type: "text", text: suffix.at(-1), text_elements: [] }],
+          ]);
+        } finally {
+          await proxy.close();
+        }
+      }, "codex-tool-suffix-users-");
+    }
+  }
+});
+
+test("an explicit pending suffix continuation ignores an earlier completed round reusing a pending call ID", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ToolAppServer();
+    const { origin, proxy } = await startProxy(directory, fake);
+    const tools = [
+      { type: "function", function: { name: "first", parameters: {} } },
+      { type: "function", function: { name: "second", parameters: {} } },
+    ];
+    try {
+      const first = (await (
+        await postChatCompletion(origin, {
+          model: "m",
+          tools,
+          messages: [{ role: "user", content: "use tools" }],
+        })
+      ).json()) as CompletionBody;
+      const calls = first.choices[0]!.message.tool_calls!;
+      const response = await postChatCompletion(origin, {
+        model: "m",
+        tools,
+        previous_response_id: first.id,
+        messages: [
+          { role: "user", content: "history prompt" },
+          // The earlier completed round reuses the pending call_b ID with
+          // older arguments, so only positional selection can pick the
+          // final batch instead of this same-ID predecessor.
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_b",
+                type: "function",
+                function: { name: "second", arguments: '{"round":1}' },
+              },
+            ],
+          },
+          { role: "tool", tool_call_id: "call_b", content: "old result" },
+          ...toolTranscript(calls, "res"),
+          { role: "user", content: "final" },
+        ],
+      });
+      assert.equal(response.status, 200, await response.clone().text());
+      const continued = (await response.json()) as CompletionBody;
+      assert.equal(continued.x_codex?.threadReused, true);
+      assert.equal(continued.choices[0]!.message.content, "continued");
+      // Exactly one native continuation sequence follows the suspension.
+      assert.deepEqual(fake.methods, [
+        "thread/start",
+        "turn/start",
+        "turn/interrupt",
+        "thread/read",
+        "thread/resume",
+        "thread/inject_items",
+        "turn/start",
+      ]);
+      // Only the selected final batch is injected: the earlier round is
+      // already native history, and an older batch reusing a pending call
+      // ID is still never selected or injected.
+      assert.deepEqual(fake.injected, [
+        {
+          type: "function_call",
+          name: "second",
+          arguments: '{"fragment":"b"}',
+          call_id: "call_b",
+        },
+        { type: "function_call_output", call_id: "call_b", output: "res" },
+        {
+          type: "function_call",
+          name: "first",
+          arguments: '{"fragment":"a"}',
+          call_id: "call_a",
+        },
+        {
+          type: "function_call_output",
+          call_id: "call_a",
+          output: "x".repeat(256 * 1024),
+        },
+      ]);
+      // The final user message is the turn input, not injected history.
+      assert.deepEqual(fake.turnInputs.at(-1), [
+        { type: "text", text: "final", text_elements: [] },
+      ]);
+    } finally {
+      await proxy.close();
+    }
+  }, "codex-tool-suffix-history-");
+});
+
+test("invalid suffix continuations fail before any RPC and leave the pending batch consumable", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ToolAppServer();
+    const { origin, proxy } = await startProxy(directory, fake);
+    const tools = [
+      { type: "function", function: { name: "first", parameters: {} } },
+      { type: "function", function: { name: "second", parameters: {} } },
+    ];
+    try {
+      const initial = (await (
+        await postChatCompletion(origin, {
+          model: "m",
+          tools,
+          messages: [{ role: "user", content: "tools" }],
+        })
+      ).json()) as CompletionBody;
+      const calls = initial.choices[0]!.message.tool_calls!;
+      const assistant = {
+        role: "assistant",
+        content: null,
+        tool_calls: calls.map((call) => ({
+          id: call.id,
+          type: "function",
+          function: call.function,
+        })),
+      };
+      // Repeating the pending call IDs and names is not enough: the persisted
+      // arguments are byte-identical to what the tool-call response emitted,
+      // so an altered batch is a different batch even with complete results.
+      const tamperedAssistant = {
+        role: "assistant",
+        content: null,
+        tool_calls: calls.map((call) => ({
+          id: call.id,
+          type: "function",
+          function: {
+            name: call.function.name,
+            arguments: '{"fragment":"tampered"}',
+          },
+        })),
+      };
+      // The persisted name must match exactly, like the arguments.
+      const renamedAssistant = {
+        role: "assistant",
+        content: null,
+        tool_calls: calls.map((call) => ({
+          id: call.id,
+          type: "function",
+          function: {
+            name: call.id === "call_b" ? "third" : call.function.name,
+            arguments: call.function.arguments,
+          },
+        })),
+      };
+      const cases = [
+        // A partial result block cannot satisfy the parallel batch.
+        [
+          assistant,
+          { role: "tool", tool_call_id: "call_b", content: "only" },
+          { role: "user", content: "go" },
+        ],
+        // A result for a call the batch never issued is foreign.
+        [
+          assistant,
+          { role: "tool", tool_call_id: "foreign", content: "x" },
+          { role: "tool", tool_call_id: "call_b", content: "y" },
+          { role: "user", content: "go" },
+        ],
+        // Two results for one call are ambiguous even with the others present.
+        [
+          assistant,
+          { role: "tool", tool_call_id: "call_a", content: "x" },
+          { role: "tool", tool_call_id: "call_a", content: "again" },
+          { role: "tool", tool_call_id: "call_b", content: "y" },
+          { role: "user", content: "go" },
+        ],
+        // Changed arguments invalidate the batch even with complete results.
+        [
+          tamperedAssistant,
+          { role: "tool", tool_call_id: "call_a", content: "x" },
+          { role: "tool", tool_call_id: "call_b", content: "y" },
+          { role: "user", content: "go" },
+        ],
+        // A changed call name invalidates the batch like changed arguments.
+        [
+          renamedAssistant,
+          { role: "tool", tool_call_id: "call_a", content: "x" },
+          { role: "tool", tool_call_id: "call_b", content: "y" },
+          { role: "user", content: "go" },
+        ],
+      ];
+      // The suspension's own RPCs are the baseline: admission failures must
+      // add nothing, not even a thread/read of the source.
+      const afterSuspension = fake.methods.slice();
+      for (const messages of cases) {
+        const response = await postChatCompletion(origin, {
+          model: "m",
+          tools,
+          previous_response_id: initial.id,
+          messages,
+        });
+        assert.equal(response.status, 400);
+        assert.equal(await responseErrorCode(response), "invalid_request");
+        assert.deepEqual(fake.methods, afterSuspension);
+      }
+      // A user message splitting the result block leaves the final result
+      // group without its assistant message, so the separated blocks cannot
+      // be merged to satisfy the batch.
+      const split = await postChatCompletion(origin, {
+        model: "m",
+        tools,
+        previous_response_id: initial.id,
+        messages: [
+          assistant,
+          { role: "tool", tool_call_id: "call_b", content: "x" },
+          { role: "user", content: "split" },
+          { role: "tool", tool_call_id: "call_a", content: "y" },
+        ],
+      });
+      assert.equal(split.status, 400);
+      const splitBody = (await split.json()) as {
+        error: { code: string; message: string };
+      };
+      assert.equal(splitBody.error.code, "invalid_request");
+      assert.equal(
+        splitBody.error.message,
+        "The assistant tool-call message is required.",
+      );
+      assert.deepEqual(fake.methods, afterSuspension);
+      // No rejection consumed the source: its record is still pending and a
+      // corrected request continues it natively.
+      assert.equal(
+        persistedRecords(directory).find(
+          (record) => record.responseId === initial.id,
+        )?.state,
+        "pending_tool",
+      );
+      const success = await postChatCompletion(origin, {
+        model: "m",
+        tools,
+        previous_response_id: initial.id,
+        messages: [
+          ...toolTranscript(calls, "final"),
+          { role: "user", content: "fixed" },
+        ],
+      });
+      assert.equal(success.status, 200, await success.clone().text());
+      const continued = (await success.json()) as CompletionBody;
+      assert.equal(continued.x_codex?.threadReused, true);
+    } finally {
+      await proxy.close();
+    }
+  }, "codex-tool-suffix-invalid-");
+});
+
 test("a pending tool continuation falls back to a fresh thread after proxy restart", async () => {
   for (const selection of ["explicit", "implicit"] as const) {
     await withTempDir(async (directory) => {
@@ -1836,6 +2234,201 @@ test("a failed injection tombstones the source and the retry isolates on a fresh
       await proxy.close();
     }
   }, "codex-tool-inject-fail-");
+});
+
+test("a failed suffix injection tombstones the source and the retry carries the suffix onto a fresh thread", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ToolAppServer(
+      true,
+      false,
+      undefined,
+      false,
+      {},
+      {
+        injectError: true,
+      },
+    );
+    const { origin, proxy } = await startProxy(directory, fake);
+    const tools = [
+      { type: "function", function: { name: "first", parameters: {} } },
+      { type: "function", function: { name: "second", parameters: {} } },
+    ];
+    try {
+      const initial = (await (
+        await postChatCompletion(origin, {
+          model: "m",
+          tools,
+          messages: [{ role: "user", content: "tools" }],
+        })
+      ).json()) as CompletionBody;
+      const transcript = [
+        ...toolTranscript(initial.choices[0]!.message.tool_calls),
+        { role: "user", content: "earlier" },
+        { role: "user", content: "final" },
+      ];
+      const failed = await postChatCompletion(origin, {
+        model: "m",
+        tools,
+        previous_response_id: initial.id,
+        messages: transcript,
+      });
+      assert.equal(failed.status, 502);
+      assert.equal(
+        await responseErrorCode(failed),
+        "tool_result_injection_failed",
+      );
+      // The injection reached an unknowable state, so the tombstone still
+      // prevents replay into the source thread.
+      assert.equal(
+        persistedRecords(directory).find(
+          (record) => record.responseId === initial.id,
+        )?.state,
+        "expired",
+      );
+      const attemptsBeforeRetry = fake.methods.length;
+      const retried = await postChatCompletion(origin, {
+        model: "m",
+        tools,
+        previous_response_id: initial.id,
+        messages: transcript,
+      });
+      assert.equal(retried.status, 200);
+      const isolated = (await retried.json()) as CompletionBody;
+      assert.equal(isolated.x_codex?.threadReused, false);
+      // The retry executes the same transcript on one fresh thread, whose
+      // own injection succeeds.
+      assert.deepEqual(fake.methods.slice(attemptsBeforeRetry), [
+        "thread/start",
+        "thread/inject_items",
+        "turn/start",
+      ]);
+      // The failed attempt injected nothing; the fresh thread carries the
+      // pairs plus every suffix user except the final one.
+      assert.deepEqual(
+        fake.injected.slice(0, 4).map((item) => [item.type, item.call_id]),
+        [
+          ["function_call", "call_b"],
+          ["function_call_output", "call_b"],
+          ["function_call", "call_a"],
+          ["function_call_output", "call_a"],
+        ],
+      );
+      assert.deepEqual(fake.injected.slice(4), [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "earlier" }],
+        },
+      ]);
+      // The final suffix user remains the new turn's input.
+      assert.deepEqual(fake.turnInputs.at(-1), [
+        { type: "text", text: "final", text_elements: [] },
+      ]);
+    } finally {
+      await proxy.close();
+    }
+  }, "codex-tool-suffix-inject-fail-");
+});
+
+test("a failed suffix turn start never retries and the retry executes fresh", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ToolAppServer(
+      true,
+      false,
+      undefined,
+      false,
+      {},
+      {
+        failTurnStartOnTurn: 2,
+      },
+    );
+    const { origin, proxy } = await startProxy(directory, fake);
+    const tools = [
+      { type: "function", function: { name: "first", parameters: {} } },
+      { type: "function", function: { name: "second", parameters: {} } },
+    ];
+    try {
+      const initial = (await (
+        await postChatCompletion(origin, {
+          model: "m",
+          tools,
+          messages: [{ role: "user", content: "tools" }],
+        })
+      ).json()) as CompletionBody;
+      const transcript = [
+        ...toolTranscript(initial.choices[0]!.message.tool_calls),
+        { role: "user", content: "earlier" },
+        { role: "user", content: "final" },
+      ];
+      const failed = await postChatCompletion(origin, {
+        model: "m",
+        tools,
+        previous_response_id: initial.id,
+        messages: transcript,
+      });
+      // A raw app-server turn/start rejection surfaces as a 500-level
+      // JSON error before any header is committed.
+      assert.ok(failed.status >= 500);
+      // Exactly one continuation sequence: the failed turn/start is the
+      // last RPC, and nothing follows it in this request — no second
+      // execution and no fresh retry inside the request.
+      assert.deepEqual(fake.methods, [
+        "thread/start",
+        "turn/start",
+        "turn/interrupt",
+        "thread/read",
+        "thread/resume",
+        "thread/inject_items",
+        "turn/start",
+      ]);
+      // The pairs and the earlier suffix user were delivered before the
+      // failed start.
+      assert.deepEqual(
+        fake.injected.slice(0, 4).map((item) => [item.type, item.call_id]),
+        [
+          ["function_call", "call_b"],
+          ["function_call_output", "call_b"],
+          ["function_call", "call_a"],
+          ["function_call_output", "call_a"],
+        ],
+      );
+      assert.deepEqual(fake.injected.slice(4), [
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "earlier" }],
+        },
+      ]);
+      // The successful injection consumed the record before the failed
+      // start, so the source is superseded and can never be replayed.
+      assert.equal(
+        persistedRecords(directory).find(
+          (record) => record.responseId === initial.id,
+        )?.state,
+        "superseded",
+      );
+      // The retry of the same suffix continuation selects fresh execution
+      // for the superseded source: one new thread carries the transcript,
+      // and its turn number no longer matches the failure knob.
+      const attemptsBeforeRetry = fake.methods.length;
+      const retried = await postChatCompletion(origin, {
+        model: "m",
+        tools,
+        previous_response_id: initial.id,
+        messages: transcript,
+      });
+      assert.equal(retried.status, 200, await retried.clone().text());
+      const isolated = (await retried.json()) as CompletionBody;
+      assert.equal(isolated.x_codex?.threadReused, false);
+      assert.deepEqual(fake.methods.slice(attemptsBeforeRetry), [
+        "thread/start",
+        "thread/inject_items",
+        "turn/start",
+      ]);
+    } finally {
+      await proxy.close();
+    }
+  }, "codex-tool-suffix-turn-fail-");
 });
 
 test("a failed interrupt rejects the response and makes its batch non-replayable", async () => {

@@ -1006,6 +1006,44 @@ function createScriptedTransport(
           sendRestartBatch();
           return;
         }
+        if (prompt.includes("contract-suffix acknowledgment")) {
+          // The native suffix continuation delivers the result pairs and
+          // every earlier suffix user as injected thread history before this
+          // turn's input. The scripted answer repeats both code words only
+          // when the thread demonstrably received the injected result
+          // content and the injected suffix user, so the offline contract
+          // fails if the proxy drops either one.
+          const items = (injected.get(threadId) ?? []) as Array<
+            Record<string, unknown>
+          >;
+          const sawResultWord = items.some(
+            (item) =>
+              item.type === "function_call_output" &&
+              typeof item.output === "string" &&
+              item.output.includes("birch"),
+          );
+          const sawSuffixUser = items.some(
+            (item) =>
+              item.type === "message" &&
+              JSON.stringify(item.content ?? null).includes("aspen"),
+          );
+          send(
+            protocolNotification({
+              method: "item/agentMessage/delta",
+              params: {
+                threadId,
+                turnId,
+                itemId: "suffix-message",
+                delta:
+                  sawResultWord && sawSuffixUser
+                    ? "aspen birch"
+                    : "contract-suffix-incomplete",
+              },
+            }),
+          );
+          complete(threadId, turnId);
+          return;
+        }
         if (prompt.includes("contract_lookup")) {
           sendToolBatch(0);
           return;

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { mkdir, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -315,6 +316,51 @@ async function assertFreshFallback(
     false,
   );
   assert.deepEqual(fake.methods, ["thread/start", "turn/start"]);
+}
+
+/** Reads the persisted continuation records without disturbing the live store. */
+function persistedRecords(stateDir: string): Array<Record<string, unknown>> {
+  const state = JSON.parse(
+    readFileSync(join(stateDir, "continuations.json"), "utf8"),
+  ) as { records?: Array<Record<string, unknown>> };
+  return state.records ?? [];
+}
+
+/** Assistant message declaring exactly the seeded pending `weather` call. */
+const weatherAssistantMessage = {
+  role: "assistant",
+  content: null,
+  tool_calls: [
+    {
+      id: "call_x",
+      type: "function",
+      function: { name: "weather", arguments: '{"city":"Chicago"}' },
+    },
+  ],
+};
+
+/**
+ * Builds one live pending-tool record for the seeded weather call. The tools
+ * hash defaults to the tools-less binding a plain continuation request uses;
+ * passing a different hash selects the binding-mismatch fallback.
+ */
+function pendingWeatherRecord(
+  directory: string,
+  responseId: string,
+  toolsHash = bindingHash([]),
+): SeededRecord {
+  return {
+    responseId,
+    threadId: "thr_continuation",
+    state: "pending_tool",
+    model: "m",
+    cwd: join(directory, "workspace"),
+    toolsHash,
+    policyHash: defaultPolicyHash(join(directory, "workspace")),
+    pendingCalls: [
+      { callId: "call_x", name: "weather", arguments: '{"city":"Chicago"}' },
+    ],
+  };
 }
 
 test("ready continuations report resumed instruction sources and thread reuse", async () => {
@@ -873,6 +919,375 @@ test("ready continuation rejects trailing tool results before thread work", asyn
       await running.proxy.close();
     }
   }, "codex-ready-tool-");
+});
+
+test("pending tool results followed by user messages resume the source thread natively", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ContinuationAppServer();
+    const responseId = "response_pending_users";
+    const running = await startProxy(
+      directory,
+      fake,
+      pendingWeatherRecord(directory, responseId),
+    );
+    try {
+      const response = await postChatCompletion(running.origin, {
+        model: "m",
+        previous_response_id: responseId,
+        messages: [
+          weatherAssistantMessage,
+          { role: "tool", tool_call_id: "call_x", content: "sunny" },
+          { role: "user", content: "earlier" },
+          { role: "user", content: "final" },
+        ],
+      });
+      assert.equal(response.status, 200, await response.clone().text());
+      assert.equal(
+        ((await response.json()) as { x_codex?: { threadReused?: boolean } })
+          .x_codex?.threadReused,
+        true,
+      );
+      // One native continuation sequence: no thread/start ever runs.
+      assert.deepEqual(fake.methods, [
+        "thread/read",
+        "thread/resume",
+        "thread/inject_items",
+        "turn/start",
+      ]);
+      // The recorded pair is injected first, then every suffix user except
+      // the last, each keeping its own message as a Responses history item.
+      assert.deepEqual(fake.injected, [
+        {
+          threadId: "thr_continuation",
+          items: [
+            {
+              type: "function_call",
+              name: "weather",
+              arguments: '{"city":"Chicago"}',
+              call_id: "call_x",
+            },
+            {
+              type: "function_call_output",
+              call_id: "call_x",
+              output: "sunny",
+            },
+            {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "earlier" }],
+            },
+          ],
+        },
+      ]);
+      // The final suffix user is the new turn's input, exactly once.
+      assert.deepEqual(fake.turnInputs, [
+        [{ type: "text", text: "final", text_elements: [] }],
+      ]);
+    } finally {
+      await running.proxy.close();
+    }
+  }, "codex-pending-suffix-users-");
+});
+
+test("pending suffix admission errors precede any RPC and leave the record consumable", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ContinuationAppServer();
+    const responseId = "response_pending_users";
+    const running = await startProxy(
+      directory,
+      fake,
+      pendingWeatherRecord(directory, responseId),
+    );
+    const cases = [
+      // No results at all: the pending batch is still awaiting them.
+      {
+        status: 409,
+        code: "tool_results_required",
+        messages: [{ role: "user", content: "just words" }],
+      },
+      // Repeating the call ID and name is not enough: the persisted
+      // arguments are byte-identical to what the batch emitted.
+      {
+        status: 400,
+        code: "invalid_request",
+        messages: [
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_x",
+                type: "function",
+                function: { name: "weather", arguments: '{"city":"Tampa"}' },
+              },
+            ],
+          },
+          { role: "tool", tool_call_id: "call_x", content: "r" },
+          { role: "user", content: "go" },
+        ],
+      },
+      // The old-round shape from the compatibility note: the only result
+      // block belongs to a replayed earlier round while the pending batch's
+      // results are missing. The selected final block does not match the
+      // pending batch, so it keeps its typed 400 — only a suffix with no
+      // result block at all is 409 tool_results_required.
+      {
+        status: 400,
+        code: "invalid_request",
+        messages: [
+          { role: "user", content: "history" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_x",
+                type: "function",
+                function: { name: "weather", arguments: '{"city":"Miami"}' },
+              },
+            ],
+          },
+          { role: "tool", tool_call_id: "call_x", content: "old result" },
+          { role: "user", content: "go" },
+        ],
+      },
+      // A result without its assistant message cannot be correlated.
+      {
+        status: 400,
+        code: "invalid_request",
+        messages: [
+          { role: "tool", tool_call_id: "call_x", content: "r" },
+          { role: "user", content: "go" },
+        ],
+      },
+      // A user message splitting the result block leaves the final group
+      // without its assistant message, so the blocks cannot be merged.
+      {
+        status: 400,
+        code: "invalid_request",
+        messages: [
+          weatherAssistantMessage,
+          { role: "tool", tool_call_id: "call_x", content: "r" },
+          { role: "user", content: "split" },
+          { role: "tool", tool_call_id: "call_x", content: "again" },
+        ],
+      },
+      // A result for a call the batch never issued is foreign.
+      {
+        status: 400,
+        code: "invalid_request",
+        messages: [
+          weatherAssistantMessage,
+          { role: "tool", tool_call_id: "foreign", content: "x" },
+          { role: "user", content: "go" },
+        ],
+      },
+    ];
+    try {
+      for (const testCase of cases) {
+        const response = await postChatCompletion(running.origin, {
+          model: "m",
+          previous_response_id: responseId,
+          messages: testCase.messages,
+        });
+        assert.equal(response.status, testCase.status);
+        assert.equal(await responseErrorCode(response), testCase.code);
+        // Admission failures happen before any app-server RPC: not even a
+        // thread/read of the source runs.
+        assert.deepEqual(fake.methods, []);
+      }
+      // The source record survived every rejection: the corrected request
+      // still consumes it natively.
+      const fixed = await postChatCompletion(running.origin, {
+        model: "m",
+        previous_response_id: responseId,
+        messages: [
+          weatherAssistantMessage,
+          { role: "tool", tool_call_id: "call_x", content: "fixed result" },
+          { role: "user", content: "fixed question" },
+        ],
+      });
+      assert.equal(fixed.status, 200, await fixed.clone().text());
+      assert.equal(
+        ((await fixed.json()) as { x_codex?: { threadReused?: boolean } })
+          .x_codex?.threadReused,
+        true,
+      );
+    } finally {
+      await running.proxy.close();
+    }
+  }, "codex-pending-suffix-errors-");
+});
+
+test("a binding-mismatched pending suffix selector executes the transcript on a fresh thread", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ContinuationAppServer();
+    const responseId = "response_pending_mismatch";
+    const running = await startProxy(
+      directory,
+      fake,
+      pendingWeatherRecord(
+        directory,
+        responseId,
+        bindingHash([{ name: "other" }]),
+      ),
+    );
+    try {
+      // Batch validation precedes the binding check on the suffix shape:
+      // an invalid batch is a client error, never a silent fresh fallback.
+      const invalid = await postChatCompletion(running.origin, {
+        model: "m",
+        previous_response_id: responseId,
+        messages: [
+          weatherAssistantMessage,
+          { role: "tool", tool_call_id: "foreign", content: "x" },
+          { role: "user", content: "go" },
+        ],
+      });
+      assert.equal(invalid.status, 400);
+      assert.equal(await responseErrorCode(invalid), "invalid_request");
+      assert.deepEqual(fake.methods, []);
+      const response = await postChatCompletion(running.origin, {
+        model: "m",
+        previous_response_id: responseId,
+        messages: [
+          weatherAssistantMessage,
+          { role: "tool", tool_call_id: "call_x", content: "sunny" },
+          { role: "user", content: "earlier" },
+          { role: "user", content: "final" },
+        ],
+      });
+      assert.equal(response.status, 200, await response.clone().text());
+      assert.equal(
+        ((await response.json()) as { x_codex?: { threadReused?: boolean } })
+          .x_codex?.threadReused,
+        false,
+      );
+      // The mismatch is detected locally: one fresh execution of the
+      // complete transcript and no source RPC at all.
+      assert.deepEqual(fake.methods, [
+        "thread/start",
+        "thread/inject_items",
+        "turn/start",
+      ]);
+      // The fresh thread never recycles the seeded source id, and it carries
+      // the pair plus every suffix user except the final one.
+      assert.deepEqual(fake.injected, [
+        {
+          threadId: "thr_continuation_2",
+          items: [
+            {
+              type: "function_call",
+              name: "weather",
+              arguments: '{"city":"Chicago"}',
+              call_id: "call_x",
+            },
+            {
+              type: "function_call_output",
+              call_id: "call_x",
+              output: "sunny",
+            },
+            {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "earlier" }],
+            },
+          ],
+        },
+      ]);
+      assert.deepEqual(fake.turnInputs, [
+        [{ type: "text", text: "final", text_elements: [] }],
+      ]);
+      // The bypassed source is never consumed by the fallback.
+      assert.equal(
+        persistedRecords(directory).find(
+          (record) => record.responseId === responseId,
+        )?.state,
+        "pending_tool",
+      );
+    } finally {
+      await running.proxy.close();
+    }
+  }, "codex-pending-suffix-fallback-");
+});
+
+test("a completed tool round then a user message stays fresh with implicit continuation disabled", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ContinuationAppServer();
+    // The local startProxy helper does not expose the implicit-continuation
+    // flag, so this test boots the proxy exactly as the helper does.
+    const configuredRoot = join(directory, "workspace");
+    await mkdir(configuredRoot, { recursive: true });
+    const root = await realpath(configuredRoot);
+    const running = await startProxyWithTransport(fake.transport, {
+      root,
+      stateDir: directory,
+      implicitToolContinuation: false,
+    });
+    try {
+      const response = await postChatCompletion(running.origin, {
+        model: "m",
+        messages: [
+          { role: "user", content: "use tools" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_old",
+                type: "function",
+                function: { name: "first", arguments: '{"old":1}' },
+              },
+            ],
+          },
+          { role: "tool", tool_call_id: "call_old", content: "old result" },
+          { role: "user", content: "continue" },
+        ],
+      });
+      assert.equal(response.status, 200, await response.clone().text());
+      assert.equal(
+        ((await response.json()) as { x_codex?: { threadReused?: boolean } })
+          .x_codex?.threadReused,
+        false,
+      );
+      // The completed round is ordinary replayed history, never a tool
+      // continuation: one fresh thread, one injection, one turn.
+      assert.deepEqual(fake.methods, [
+        "thread/start",
+        "thread/inject_items",
+        "turn/start",
+      ]);
+      assert.deepEqual(fake.injected, [
+        {
+          threadId: "thr_continuation",
+          items: [
+            {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "use tools" }],
+            },
+            {
+              type: "function_call",
+              name: "first",
+              arguments: '{"old":1}',
+              call_id: "call_old",
+            },
+            {
+              type: "function_call_output",
+              call_id: "call_old",
+              output: "old result",
+            },
+          ],
+        },
+      ]);
+      // The trailing user message is the new turn's input.
+      assert.deepEqual(fake.turnInputs, [
+        [{ type: "text", text: "continue", text_elements: [] }],
+      ]);
+    } finally {
+      await running.proxy.close();
+    }
+  }, "codex-implicit-disabled-history-");
 });
 
 test("non-resumable thread/read states fail closed without resume, turn, or replacement thread", async () => {
