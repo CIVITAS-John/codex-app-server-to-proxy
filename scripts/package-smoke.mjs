@@ -243,6 +243,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   }});
   else if (message.method === "configRequirements/read")
     send({ id: message.id, result: { requirements: null }});
+  else if (message.method === "config/read")
+    send({ id: message.id, result: { config: { windows: null }, origins: {}, layers: null }});
   else if (message.method === "account/read") send({ id: message.id, result: {
     account: { type: "chatgpt", email: null, planType: "unknown" },
     requiresOpenaiAuth: true
@@ -266,6 +268,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       threadId: thread.id, turn: turn("completed")
     }});
   }
+  else if (message.id !== undefined)
+    send({ id: message.id, error: { code: -32601, message: "Unsupported package smoke RPC method" }});
 });
 process.on("SIGTERM", () => process.exit(0));
 `;
@@ -492,6 +496,7 @@ async function main() {
         "model/list",
         "model listing must not start a Codex thread or turn",
       );
+      await writeFile(rpcObservationPath, "", "utf8");
       const response = await fetch(`${origin}/v1/chat/completions`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -504,6 +509,15 @@ async function main() {
       const completion = await response.json();
       assert.equal(completion.choices[0].message.content, "packed smoke ok");
       assert.equal(completion.choices[0].finish_reason, "stop");
+      assert.deepEqual(
+        (await readFile(rpcObservationPath, "utf8")).trim().split("\n"),
+        [
+          ...(process.platform === "win32" ? ["config/read"] : []),
+          "thread/start",
+          "turn/start",
+        ],
+        "packed chat must resolve Windows config before starting its thread",
+      );
       smokePassed = true;
     } finally {
       await stopShim(server);
