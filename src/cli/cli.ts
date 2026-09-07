@@ -256,7 +256,11 @@ class AppServerSupervisor {
         throw this.#lifecycle.signal.reason;
       }
       this.#active = next;
-      this.#proxy.setTransport(next.rpc, next.requirements);
+      this.#proxy.setTransport(
+        next.rpc,
+        next.requirements,
+        next.resolveThreadConfig,
+      );
       this.#proxy.setReady(true);
     } finally {
       if (this.#initializing === initializing) this.#initializing = undefined;

@@ -435,6 +435,7 @@ let initialized = false;`,
           allowedApprovalPolicies: null,
           allowedApprovalsReviewers: null,
           allowedSandboxModes: null,
+          allowedWindowsSandboxImplementations: null,
           allowedWebSearchModes: null,
         });
         // The final response proves every preceding request was handled and

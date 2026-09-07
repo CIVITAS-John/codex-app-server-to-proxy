@@ -3693,11 +3693,16 @@ test("request policies map exactly, bind continuations, and honor managed denial
       fallbackEntries.push(entry),
     );
     let proxy: ProxyServer | undefined;
+    const resolvedCwds: string[] = [];
     try {
       const started = await startProxyWithTransport(fake.rpc, {
         root,
         stateDir: join(directory, "state"),
         log: fallbackLogger,
+        resolveThreadConfig: async (resolvedCwd) => {
+          resolvedCwds.push(resolvedCwd);
+          return { "windows.sandbox": "unelevated" };
+        },
       });
       proxy = started.proxy;
       const origin = started.origin;
@@ -3729,7 +3734,10 @@ test("request policies map exactly, bind continuations, and honor managed denial
         sandbox: "workspace-write",
         approvalPolicy: "never",
         approvalsReviewer: "auto_review",
-        config: { web_search: "indexed" },
+        config: {
+          web_search: "indexed",
+          "windows.sandbox": "unelevated",
+        },
       });
       const turn = fake.messages.find(
         (message) => message.method === "turn/start",
@@ -3773,7 +3781,10 @@ test("request policies map exactly, bind continuations, and honor managed denial
         sandbox: "workspace-write",
         approvalPolicy: "never",
         approvalsReviewer: "auto_review",
-        config: { web_search: "indexed" },
+        config: {
+          web_search: "indexed",
+          "windows.sandbox": "unelevated",
+        },
       });
       const continuedTurn = fake.messages
         .filter((message) => message.method === "turn/start")
@@ -3827,7 +3838,10 @@ test("request policies map exactly, bind continuations, and honor managed denial
         sandbox: "read-only",
         approvalPolicy: "never",
         approvalsReviewer: "auto_review",
-        config: { web_search: "indexed" },
+        config: {
+          web_search: "indexed",
+          "windows.sandbox": "unelevated",
+        },
       });
 
       const beforeChangedWeb = fake.messages.length;
@@ -3859,8 +3873,12 @@ test("request policies map exactly, bind continuations, and honor managed denial
         sandbox: "workspace-write",
         approvalPolicy: "never",
         approvalsReviewer: "auto_review",
-        config: { web_search: "disabled" },
+        config: {
+          web_search: "disabled",
+          "windows.sandbox": "unelevated",
+        },
       });
+      assert.deepEqual(resolvedCwds, [cwd, cwd, cwd, cwd]);
 
       const managedFake = policyCapturingAppServer();
       proxy.setTransport(managedFake.rpc, {
@@ -4150,6 +4168,22 @@ test("request policies map exactly, bind continuations, and honor managed denial
         "sandbox_not_allowed",
       );
       assert.deepEqual(deniedFake.messages, []);
+
+      const resolutionFailureFake = policyCapturingAppServer();
+      proxy.setTransport(
+        resolutionFailureFake.rpc,
+        UNRESTRICTED_POLICY_REQUIREMENTS,
+        async () => {
+          throw new Error("effective config unavailable");
+        },
+      );
+      const resolutionFailure = await fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(request),
+      });
+      assert.equal(resolutionFailure.status, 500);
+      assert.deepEqual(resolutionFailureFake.messages, []);
     } finally {
       proxy?.setReady(false);
       proxy?.setTransport(undefined);

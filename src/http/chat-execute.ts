@@ -1,4 +1,5 @@
 import type { JsonRpcTransport } from "../app-server/json-rpc.js";
+import type { ThreadConfigResolver } from "../app-server/windows-sandbox.js";
 import { bindingHash, record } from "../core/canonical.js";
 import type { Logger } from "../core/logger.js";
 import {
@@ -238,6 +239,7 @@ export interface ChatHandlerOptions {
   continuations: ContinuationCoordinator;
   root: string;
   requirements: PolicyRequirements;
+  resolveThreadConfig?: ThreadConfigResolver | undefined;
   implicitToolContinuation: boolean;
 }
 
@@ -1100,7 +1102,7 @@ async function resumeIdleThread(
         {
           threadId: handle.threadId,
           excludeTurns: true,
-          ...threadPolicyParams(request.policy),
+          ...(await threadPolicyParams(request.policy, options)),
         },
         options.signal,
       ),
@@ -1138,7 +1140,7 @@ async function startFreshThread(
         model: request.model,
         ephemeral: false,
         experimentalRawEvents: true,
-        ...threadPolicyParams(request.policy),
+        ...(await threadPolicyParams(request.policy, options)),
         ...environmentParams(request.policy),
         ...(request.dynamicTools.length
           ? { dynamicTools: request.dynamicTools }
@@ -1254,7 +1256,16 @@ function rawResponseThreads(rpc: JsonRpcTransport): Set<string> {
 }
 
 /** Builds native thread settings shared by thread start and resume. */
-function threadPolicyParams(policy: EffectivePolicy): Record<string, unknown> {
+async function threadPolicyParams(
+  policy: EffectivePolicy,
+  options: ChatHandlerOptions,
+): Promise<Record<string, unknown>> {
+  const config = {
+    web_search: policy.webSearch,
+    ...(options.resolveThreadConfig
+      ? await options.resolveThreadConfig(policy.cwd, options.signal)
+      : {}),
+  };
   return {
     cwd: policy.cwd,
     sandbox: policy.threadSandbox,
@@ -1262,7 +1273,7 @@ function threadPolicyParams(policy: EffectivePolicy): Record<string, unknown> {
     ...(policy.approvalsReviewer
       ? { approvalsReviewer: policy.approvalsReviewer }
       : {}),
-    config: { web_search: policy.webSearch },
+    config,
   };
 }
 

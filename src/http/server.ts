@@ -10,6 +10,7 @@ import { HttpError, writeError, writeJson } from "./errors.js";
 import type { ServeOptions } from "../core/config.js";
 import type { Logger } from "../core/logger.js";
 import type { JsonRpcTransport } from "../app-server/json-rpc.js";
+import type { ThreadConfigResolver } from "../app-server/windows-sandbox.js";
 import {
   UNRESTRICTED_POLICY_REQUIREMENTS,
   type PolicyRequirements,
@@ -35,6 +36,7 @@ export interface ProxyServer {
   setTransport(
     transport: JsonRpcTransport | undefined,
     requirements?: PolicyRequirements,
+    resolveThreadConfig?: ThreadConfigResolver,
   ): void;
 }
 
@@ -46,6 +48,7 @@ export function createProxyServer(
   let ready = false;
   let transport: JsonRpcTransport | undefined;
   let requirements = UNRESTRICTED_POLICY_REQUIREMENTS;
+  let resolveThreadConfig: ThreadConfigResolver | undefined;
   let continuations: ContinuationCoordinator | undefined;
   const continuationStore = new ResponseStore(options.stateDir);
   let active = 0;
@@ -137,6 +140,7 @@ export function createProxyServer(
       continuations,
       root: options.root,
       requirements,
+      resolveThreadConfig,
       implicitToolContinuation: options.implicitToolContinuation,
       log,
       requestId,
@@ -179,10 +183,12 @@ export function createProxyServer(
     setTransport(
       value: JsonRpcTransport | undefined,
       nextRequirements?: PolicyRequirements,
+      nextThreadConfigResolver?: ThreadConfigResolver,
     ) {
       // Update requirements before the same-transport short-circuit so a refresh
       // of managed policy against an unchanged transport still takes effect.
       requirements = nextRequirements ?? UNRESTRICTED_POLICY_REQUIREMENTS;
+      resolveThreadConfig = nextThreadConfigResolver;
       if (transport === value) return;
       continuations?.dispose();
       if (transport && transport !== value)
@@ -240,6 +246,7 @@ interface RouteContext {
   continuations: ContinuationCoordinator | undefined;
   root: string;
   requirements: PolicyRequirements;
+  resolveThreadConfig: ThreadConfigResolver | undefined;
   implicitToolContinuation: boolean;
   log: Logger;
   requestId: string;
@@ -257,6 +264,7 @@ async function route({
   continuations,
   root,
   requirements,
+  resolveThreadConfig,
   implicitToolContinuation,
   log,
   requestId,
@@ -310,6 +318,7 @@ async function route({
       continuations,
       root,
       requirements,
+      resolveThreadConfig,
       implicitToolContinuation,
     });
     return;

@@ -420,6 +420,7 @@ test("requirements parsing treats null as unrestricted and skips unknown entries
       allowedApprovalPolicies: [],
       allowedApprovalsReviewers: null,
       allowedSandboxModes: null,
+      allowedWindowsSandboxImplementations: null,
       allowedWebSearchModes: null,
     },
   );
@@ -440,6 +441,7 @@ test("requirements parsing treats null as unrestricted and skips unknown entries
         ],
         allowedApprovalsReviewers: ["auto_review"],
         allowedSandboxModes: ["read-only"],
+        allowedWindowsSandboxImplementations: ["unelevated"],
         allowedWebSearchModes: ["disabled", "indexed"],
       },
     }),
@@ -447,6 +449,7 @@ test("requirements parsing treats null as unrestricted and skips unknown entries
       allowedApprovalPolicies: ["on-request"],
       allowedApprovalsReviewers: ["auto_review"],
       allowedSandboxModes: ["read-only"],
+      allowedWindowsSandboxImplementations: ["unelevated"],
       allowedWebSearchModes: ["disabled", "indexed"],
     },
   );
@@ -473,6 +476,7 @@ test("requirements parsing treats null as unrestricted and skips unknown entries
       allowedApprovalPolicies: ["never"],
       allowedApprovalsReviewers: ["guardian_subagent"],
       allowedSandboxModes: ["workspace-write"],
+      allowedWindowsSandboxImplementations: null,
       allowedWebSearchModes: ["live"],
     },
   );
@@ -485,6 +489,7 @@ test("requirements parsing treats null as unrestricted and skips unknown entries
         allowedApprovalPolicies: null,
         allowedApprovalsReviewers: null,
         allowedSandboxModes: "read-only",
+        allowedWindowsSandboxImplementations: null,
         allowedWebSearchModes: null,
       },
     },

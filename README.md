@@ -217,6 +217,8 @@ Per-request Codex controls live under a nonstandard top-level `x_codex` object:
 
 The `disabled` sandbox provides no built-in shell or local filesystem reads or writes through an execution environment. The proxy realizes it as Codex's native `read-only` sandbox plus `environments: []`, so managed policy requirements must allow `read-only` for a request to use `disabled`. Client-provided tools and hosted web search, when explicitly enabled, remain separate capabilities.
 
+On native Windows, the proxy defaults an unconfigured sandbox backend to `windows.sandbox = "unelevated"`, which does not require administrator setup. Explicit Windows sandbox settings and managed requirements take precedence. This backend selection is separate from `x_codex.sandbox`: requests must still opt into `read-only` or `workspace-write` for built-in filesystem access. The unelevated backend uses a restricted token and provides weaker isolation than the elevated backend; operators who have configured elevated sandboxing retain it. The isolated live-test Codex home uses the same default.
+
 Multi-agent availability is app-server process configuration, not a Chat Completions request policy. The proxy starts app-server with subagents disabled unless the operator passes `--subagents true`; the startup log records the effective value as `subagents_enabled`. The proxy exposes no per-request `x_codex` multi-agent field, so enabling `read-only`, `workspace-write`, or web search does not itself enable child spawning.
 
 The JSON Schema ships with the package at `protocol/schemas/x-codex.schema.json`.

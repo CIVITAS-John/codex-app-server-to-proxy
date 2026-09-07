@@ -90,6 +90,7 @@ async function startConfiguredFakeChatBackend(
       UNRESTRICTED_POLICY_REQUIREMENTS,
       log,
       undefined,
+      undefined,
       scripted.childProviderCalls,
       scripted.hasChildProviderThread,
     );
@@ -212,6 +213,7 @@ async function startLiveChatBackendOnce(
       appServer.requirements,
       silentLogger,
       providerBudget,
+      appServer.resolveThreadConfig,
     );
   } catch (error) {
     await appServer?.stop().catch(() => undefined);
@@ -1251,6 +1253,7 @@ async function startProxy(
   requirements: PolicyRequirements,
   log: Logger,
   providerBudget?: ProviderCallBudget,
+  resolveThreadConfig?: AppServer["resolveThreadConfig"],
   childProviderCalls: () => number = () => 0,
   hasChildProviderThread: (threadId: string) => boolean = () => false,
 ): Promise<ChatContractBackend> {
@@ -1320,6 +1323,7 @@ async function startProxy(
       shutdownTimeoutMs: 10_000,
       log,
       requirements,
+      resolveThreadConfig,
     });
     proxy = started.proxy;
     origin = started.origin;

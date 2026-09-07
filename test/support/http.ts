@@ -1,4 +1,5 @@
 import type { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
+import type { ThreadConfigResolver } from "../../src/app-server/windows-sandbox.js";
 import {
   parseServeOptions,
   resolveServeOptions,
@@ -21,6 +22,7 @@ export interface StartProxyWithTransportOptions {
   log?: Logger | undefined;
   requirements?: PolicyRequirements | undefined;
   implicitToolContinuation?: boolean | undefined;
+  resolveThreadConfig?: ThreadConfigResolver | undefined;
 }
 
 /** Running ready proxy and the fully resolved options used to create it. */
@@ -63,6 +65,7 @@ export async function startProxyWithTransport(
   proxy.setTransport(
     rpc,
     settings.requirements ?? UNRESTRICTED_POLICY_REQUIREMENTS,
+    settings.resolveThreadConfig,
   );
   proxy.setReady(true);
   const address = await proxy.listen();

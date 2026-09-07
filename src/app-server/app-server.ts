@@ -29,6 +29,10 @@ import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { listenForAbort, withDeadline } from "../core/abort.js";
 import { installResponsesLiteOverride } from "./responses-lite-override.js";
+import {
+  createThreadConfigResolver,
+  type ThreadConfigResolver,
+} from "./windows-sandbox.js";
 
 /** Identifies this proxy to app-server during initialization. */
 const CLIENT_NAME = "codex-openai-proxy";
@@ -111,6 +115,8 @@ export interface AppServer {
   authSeeded: boolean;
   /** Whether this process loaded the proxy's Responses Lite catalog override. */
   responsesLiteOverrideApplied: boolean;
+  /** Resolves proxy-owned config defaults against the thread's effective cwd. */
+  resolveThreadConfig: ThreadConfigResolver;
   stop(): Promise<void>;
 }
 
@@ -247,6 +253,7 @@ export async function startAppServer(
     child,
     authSeeded,
     responsesLiteOverrideApplied,
+    resolveThreadConfig: createThreadConfigResolver(rpc, requirements),
     stop,
   };
 }

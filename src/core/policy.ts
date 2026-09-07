@@ -46,11 +46,22 @@ const APPROVAL_REVIEWER_ORDER = [
 /** An approval reviewer accepted by the pinned app-server protocol. */
 export type ApprovalsReviewer = (typeof APPROVAL_REVIEWER_ORDER)[number];
 
+/** Native Windows sandbox implementations accepted by app-server. */
+export const WINDOWS_SANDBOX_IMPLEMENTATIONS = [
+  "elevated",
+  "unelevated",
+] as const;
+
+/** A native Windows sandbox implementation accepted by app-server. */
+export type WindowsSandboxImplementation =
+  (typeof WINDOWS_SANDBOX_IMPLEMENTATIONS)[number];
+
 /** Relevant managed requirements read from app-server at startup. */
 export interface PolicyRequirements {
   allowedApprovalPolicies: ApprovalPolicy[] | null;
   allowedApprovalsReviewers: ApprovalsReviewer[] | null;
   allowedSandboxModes: CodexSandboxMode[] | null;
+  allowedWindowsSandboxImplementations: WindowsSandboxImplementation[] | null;
   allowedWebSearchModes: WebSearchMode[] | null;
 }
 
@@ -110,6 +121,7 @@ export const UNRESTRICTED_POLICY_REQUIREMENTS: PolicyRequirements = {
   allowedApprovalPolicies: null,
   allowedApprovalsReviewers: null,
   allowedSandboxModes: null,
+  allowedWindowsSandboxImplementations: null,
   allowedWebSearchModes: null,
 };
 
@@ -217,6 +229,11 @@ export function parsePolicyRequirements(value: unknown): PolicyRequirements {
       requirements.allowedSandboxModes,
       CODEX_SANDBOX_MODES,
       "allowedSandboxModes",
+    ),
+    allowedWindowsSandboxImplementations: stringAllowlist(
+      requirements.allowedWindowsSandboxImplementations,
+      WINDOWS_SANDBOX_IMPLEMENTATIONS,
+      "allowedWindowsSandboxImplementations",
     ),
     allowedWebSearchModes: stringAllowlist(
       requirements.allowedWebSearchModes,

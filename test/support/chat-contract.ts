@@ -29,8 +29,8 @@ export const OBSERVATION_FIXTURE = ".codex-contract-observation";
 /** Canonical bounded command used to read the observation fixture. */
 export const OBSERVATION_COMMAND = `cat ${OBSERVATION_FIXTURE}`;
 
-/** Maximum model turns allowed by the comprehensive offline contract. */
-const MAX_OFFLINE_PROVIDER_CALLS = 18;
+/** Exact ceiling for all deterministic turns in the comprehensive offline contract. */
+const MAX_OFFLINE_PROVIDER_CALLS = 20;
 
 /** Live filesystem scenario budget for an initial request plus one correction. */
 const LIVE_FILESYSTEM_SCENARIO_TIMEOUT_MS = 260_000;

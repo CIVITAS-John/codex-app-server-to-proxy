@@ -2,6 +2,12 @@
 
 All notable user-facing changes are recorded here. This project follows semantic versioning once a version is published.
 
+## 0.1.0-rc.25 — September 6, 2026
+
+### Fixed
+
+- Native Windows requests now default an unconfigured sandbox backend to `unelevated`, restoring built-in command execution and its observational `x_codex` tool activity after the Codex `0.153.4` upgrade without requiring administrator setup. The proxy resolves configuration for each thread's working directory, preserves explicit current and legacy backend settings, and respects managed restrictions. The public sandbox default remains `disabled`; requests must still opt into filesystem access.
+
 ## 0.1.0-rc.24 — September 4, 2026
 
 ### Changed
