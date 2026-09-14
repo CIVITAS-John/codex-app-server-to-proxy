@@ -1,5 +1,13 @@
 # codex-app-server
 
+## Pinned compatibility note
+
+Reviewed on 2026-09-14 against [`rust-v0.154.0`](https://github.com/openai/codex/tree/rust-v0.154.0), using the package-generated [wire contract](../protocol/CONTRACT.md) and [upstream protocol source](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/app-server-protocol/src/protocol/v2/mod.rs). Upstream removed `codex-rs/app-server/README.md` in this release. The reference text below is retained from the repository's previous snapshot; it is not a newly fetched 0.154.0 manual. Generated artifacts and the proxy contract take precedence.
+
+The new required nullable thread fields are `environments`, `originator`, and `daybreakEnabled`. Quota snapshots add `normalModelSlug`; quota reads add nullable `ordinaryUsageAllowed` and optional capability parameters. The proxy continues to omit those parameters, enrich terminal quota errors only, and never infer recovery or retry from usage metadata. Raw `configuration_update` items remain private. New `userVerification/*` methods are not public proxy features; `openai/userVerification` elicitation is declined by the existing fail-closed handler. Managed `application.network` and browser requirements remain enforced by app-server; the proxy adds no override.
+
+The [pinned Responses client](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/core/src/client.rs) still switches request framing on `use_responses_lite` and disables parallel tool calls in that mode. The catalog workaround remains in place. The [model cache](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/models-manager/src/cache.rs) retains versioned cache metadata; the proxy preserves it in its separate catalog, which Codex loads through `model_catalog_json`. This does not refresh the frozen catalog or prove live tool compatibility.
+
 `codex app-server` is the interface Codex uses to power rich interfaces such as the [Codex VS Code extension](https://marketplace.visualstudio.com/items?itemName=openai.chatgpt).
 
 ## Table of Contents

@@ -117,6 +117,40 @@ test("reads quota details once with undefined params and the request signal", as
   }
 });
 
+/** Keeps new usage capabilities observational after a terminal quota failure. */
+test("ordinary usage metadata never recovers or retries a failed request", async () => {
+  fixedClock();
+  try {
+    for (const ordinaryUsageAllowed of [true, false, null]) {
+      for (const primary of [
+        { usedPercent: 100, windowDurationMins: 60, resetsAt: NOW + 30 },
+        null,
+      ]) {
+        const resolved = await resolveUsageLimit({
+          ...protocolRateLimitsResponse(
+            protocolRateLimitSnapshot({
+              normalModelSlug: "gpt-5.6-luna",
+              primary,
+            }),
+          ),
+          ordinaryUsageAllowed,
+        });
+        assert.equal(resolved.error.status, 429);
+        assert.equal(resolved.error.code, "usage_limit_exceeded");
+        assert.equal(
+          resolved.error.extensions.xCodex?.resetAt,
+          primary ? NOW + 30 : undefined,
+        );
+        assert.deepEqual(resolved.calls, [
+          ["account/rateLimits/read", undefined, resolved.signal],
+        ]);
+      }
+    }
+  } finally {
+    vi.restoreAllMocks();
+  }
+});
+
 /** Verifies bucket priority and reset-selection rules for rolling rate limits. */
 test("uses the codex bucket and latest exhausted reset before rolling fallbacks", async () => {
   fixedClock();

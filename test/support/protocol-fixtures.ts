@@ -92,6 +92,7 @@ export function protocolRateLimitSnapshot(
   return {
     limitId: "codex",
     limitName: "Codex",
+    normalModelSlug: null,
     primary: null,
     secondary: null,
     credits: null,
@@ -113,6 +114,7 @@ export function protocolRateLimitsResponse(
 ): GetAccountRateLimitsResponse {
   return {
     rateLimits: snapshot,
+    ordinaryUsageAllowed: null,
     rateLimitsByLimitId,
     rateLimitResetCredits,
     accountId: null,
@@ -177,6 +179,9 @@ export function protocolThread(
   return {
     id,
     extra: null,
+    environments: null,
+    originator: null,
+    daybreakEnabled: null,
     sessionId: `session_${id}`,
     forkedFromId: null,
     parentThreadId: null,

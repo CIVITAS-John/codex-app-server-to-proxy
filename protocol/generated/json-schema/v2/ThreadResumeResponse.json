@@ -1306,6 +1306,24 @@
           ],
           "description": "Working directory captured for the thread."
         },
+        "daybreakEnabled": {
+          "description": "Saved Daybreak choice, independent of turn execution. Null if unset.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "environments": {
+          "default": null,
+          "description": "Current environments for a loaded thread, in priority order, primary first. `null` means the thread is not loaded or the server does not expose its selection. An empty list means no environments are selected. This does not report connection status.",
+          "items": {
+            "$ref": "#/definitions/ThreadEnvironment"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "ephemeral": {
           "description": "Whether the thread is ephemeral and should not be materialized on disk.",
           "type": "boolean"
@@ -1365,6 +1383,13 @@
         },
         "name": {
           "description": "Optional user-facing thread title.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "originator": {
+          "description": "Originator recorded when the thread was created, independent of its current client or executor. Null when the recorded originator is unavailable.",
           "type": [
             "string",
             "null"
@@ -1502,6 +1527,29 @@
         "waitingOnUserInput"
       ],
       "type": "string"
+    },
+    "ThreadEnvironment": {
+      "description": "An environment selected by a loaded thread, independent of connection status.",
+      "properties": {
+        "cwd": {
+          "$ref": "#/definitions/LegacyAppPathString"
+        },
+        "environmentId": {
+          "type": "string"
+        },
+        "runtimeWorkspaceRoots": {
+          "items": {
+            "$ref": "#/definitions/LegacyAppPathString"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "cwd",
+        "environmentId",
+        "runtimeWorkspaceRoots"
+      ],
+      "type": "object"
     },
     "ThreadExtra": {
       "description": "Extra app-server data for a thread.",

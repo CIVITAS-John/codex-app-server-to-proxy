@@ -211,6 +211,7 @@ if (process.argv.includes("--version")) {
 const cwd = process.cwd();
 const thread = {
   id: "thr_package_smoke", extra: null, sessionId: "session_package_smoke",
+  environments: null, originator: null, daybreakEnabled: null,
   forkedFromId: null, parentThreadId: null, preview: "", ephemeral: false,
   section: null, sectionEnteredAt: null, projectId: null,
   historyMode: "paginated", modelProvider: "openai", model: null, reasoningEffort: null,

@@ -292,6 +292,19 @@ const embeddedDeclinedRequests = JSON.stringify([
     },
   }),
   protocolServerRequest({
+    id: "verification",
+    method: "mcpServer/elicitation/request",
+    params: {
+      threadId: "thread_decline",
+      turnId: "turn_decline",
+      serverName: "fixture",
+      mode: "openai/userVerification",
+      title: "Synthetic verification",
+      description: "Decline this synthetic challenge.",
+      challenge: "fixture-challenge",
+    },
+  }),
+  protocolServerRequest({
     id: "command",
     method: "item/commandExecution/requestApproval",
     params: {
@@ -466,6 +479,10 @@ let initialized = false;`,
         });
         assert.deepEqual(response("elicit"), {
           id: "elicit",
+          result: { action: "decline", content: null },
+        });
+        assert.deepEqual(response("verification"), {
+          id: "verification",
           result: { action: "decline", content: null },
         });
         for (const id of ["command", "file"])
@@ -1023,6 +1040,7 @@ testWithPosixExecutable(
             hooks: null,
             enforceResidency: null,
             network: null,
+            application: null,
             autoReview: null,
             models: null,
             sqliteHome: null,

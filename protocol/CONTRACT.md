@@ -1,6 +1,8 @@
 # Stage 01 compatibility contract
 
-This contract targets `codex-cli 0.153.4`, pinned by the exact `@openai/codex` runtime dependency. The checked-in TypeScript and JSON Schema artifacts were generated from that package-owned executable with `--experimental`; they are the wire-type source of truth. Regenerate them with `npm run generate:protocol` after changing the package pin.
+This contract targets `codex-cli 0.154.0`, pinned by the exact `@openai/codex` runtime dependency. The checked-in TypeScript and JSON Schema artifacts were generated from that package-owned executable with `--experimental`; they are the wire-type source of truth. Regenerate them with `npm run generate:protocol` after changing the package pin.
+
+The [0.154.0 compatibility review](../docs/codex-app-server.md#pinned-compatibility-note) keeps the public surface unchanged: `account/rateLimits/read` still omits capability parameters, and `ordinaryUsageAllowed` and `normalModelSlug` do not authorize retries or recovery. Raw `configuration_update` items remain private; `openai/userVerification` elicitation is declined. New generated methods are not public proxy endpoints. Existing proxy homes and schema-version-0 continuation stores require no migration.
 
 ## Request fields
 

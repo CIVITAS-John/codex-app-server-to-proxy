@@ -20,6 +20,8 @@ test("Responses Lite override clones every model and preserves other config", as
     const source = `${JSON.stringify(
       {
         fetched_at: "fixture",
+        client_version: "0.153.4",
+        etag: "synthetic-etag",
         models: [
           {
             slug: "gpt-5.6-sol",
@@ -68,6 +70,8 @@ test("Responses Lite override clones every model and preserves other config", as
       unknown
     >;
     assert.equal(override.fetched_at, "fixture");
+    assert.equal(override.client_version, "0.153.4");
+    assert.equal(override.etag, "synthetic-etag");
     assert.deepEqual(
       (override.models as Array<Record<string, unknown>>).map((model) => ({
         slug: model.slug,
