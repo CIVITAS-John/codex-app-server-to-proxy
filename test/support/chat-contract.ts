@@ -252,8 +252,8 @@ export function registerChatContract(
     if (scenarios.has("system-prompt"))
       for (const stream of [false, true])
         test(`applies the system prompt over conflicting user input (${stream ? "SSE" : "aggregate"})`, async () => {
-          // Only the system message knows the nonce. Dropping it or flattening
-          // it into user text must not satisfy this instruction-priority test.
+          // Only the client system message knows the nonce. It must become
+          // thread base instructions; user or replayed history must not satisfy this test.
           const expected = `contract-system-${randomBytes(16).toString("hex")}`;
           const response = await chat({
             model: CONTRACT_MODEL,

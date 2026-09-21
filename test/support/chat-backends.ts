@@ -471,6 +471,7 @@ function createScriptedTransport(
     { threadId: string; timer?: NodeJS.Timeout }
   >();
   const injected = new Map<string, unknown[]>();
+  const baseInstructions = new Map<string, string>();
   const pendingTools = new Map<number, { threadId: string; turnId: string }>();
   /** Tool-call turns awaiting their interrupt, by turn id. */
   const toolTurns = new Map<string, string>();
@@ -530,6 +531,9 @@ function createScriptedTransport(
           throw new Error(
             "contract thread did not opt into raw response events",
           );
+        if (typeof params.baseInstructions !== "string")
+          throw new Error("contract thread did not send base instructions");
+        baseInstructions.set(threadId, params.baseInstructions);
         if (
           Array.isArray(params.environments) &&
           params.environments.length === 0
@@ -553,6 +557,10 @@ function createScriptedTransport(
         return;
       }
       if (message.method === "thread/resume") {
+        if (Object.hasOwn(params, "baseInstructions"))
+          throw new Error(
+            "contract resume unexpectedly replaced base instructions",
+          );
         send(
           protocolResponse(
             "thread/resume",
@@ -584,16 +592,11 @@ function createScriptedTransport(
         );
         active.set(turnId, { threadId });
         if (prompt.includes("contract-user-wins")) {
-          // Read the injected system role, never a nonce copied from turn input.
-          // A missing or demoted instruction produces the conflicting answer.
-          const system = (injected.get(threadId) ?? []).find(
-            (item) => (item as { role?: string }).role === "system",
-          ) as
-            { content?: Array<{ type?: string; text?: string }> } | undefined;
-          const text = system?.content?.find(
-            (part) => part.type === "input_text",
-          )?.text;
-          const answer = /contract-system-[a-f0-9]{32}/.exec(text ?? "")?.[0];
+          // Read the durable base instructions, never a nonce copied from turn
+          // input or injected message history.
+          const answer = /contract-system-[a-f0-9]{32}/.exec(
+            baseInstructions.get(threadId) ?? "",
+          )?.[0];
           send(
             protocolNotification({
               method: "item/agentMessage/delta",

@@ -91,9 +91,11 @@ All implementation items below are now represented in the source tree and determ
 
 ## Decisions and stage boundary
 
-- **Decision (2026-09-20): dedicated system-prompt verification.** A separately selectable live file checks system-over-user instruction priority in aggregate and SSE output. It uses only `gpt-5.6-luna`, disables tools, and caps its budget at two upstream responses. The core live contract retains its 32-response guard; the complete opt-in command therefore permits 34 responses across the two contracts. Offline execution covers the same role-preserving requests. No runtime or public-schema changes are introduced.
+- **Decision (2026-09-20): dedicated system-prompt verification.** A separately selectable live file checks system-over-user instruction priority in aggregate and SSE output. It uses only `gpt-5.6-luna`, disables tools, and caps its budget at two upstream responses. The core live contract retains its 32-response guard; the complete opt-in command therefore permits 34 responses across the two contracts. Following the Stage 04 instruction fix, the offline fake reads the system nonce exclusively from thread base instructions. Deterministic tests verify base-instruction extraction, history exclusion, and continuation settings; they do not establish model instruction adherence. The live assertions retain that responsibility. No public-schema changes are introduced.
 
 Vitest remains the sole runner for maintained automated suites. The default configuration is the required offline gate; the dedicated live configuration is a separately authorized compatibility smoke and never substitutes for deterministic fault coverage.
+
+Instruction mapping verification (2026-09-20): formatting, lint, protocol regeneration, build, type-checking, and all 27 offline test files passed on Windows (343 tests passed, 27 skipped). A local stub provider confirmed that the pinned app-server sends the supplied base instructions, omits its default prompt for an empty base, and retains both cases after process restart and native resume. This probe made zero paid model calls and retained no runtime captures in the repository. The dedicated two-response live instruction-priority test was not rerun.
 
 The runtime policy enforces a lower bound only: `engines` is `>=20`, so Node.js 20 is the minimum compatibility line and newer majors are accepted without an upper cap. CI exercises the primary Node.js 24 LTS on Linux, macOS, and Windows; the matrix gains lines as they are validated but does not bound what the package accepts.
 

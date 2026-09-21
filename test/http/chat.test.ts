@@ -2606,6 +2606,96 @@ test("strips replayed assistant reasoning before injecting visible history", asy
   });
 });
 
+test("maps system messages to fresh-thread base instructions", async () => {
+  await withChatServer(async (origin, _proxy, useTransport) => {
+    const fake = policyCapturingAppServer();
+    useTransport(fake);
+    const response = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        messages: [
+          { role: "system", content: "base one" },
+          { role: "developer", content: "developer instruction" },
+          { role: "user", content: "input1" },
+          { role: "system", content: "base two" },
+          { role: "assistant", content: "assistant history" },
+          { role: "user", content: "input2" },
+        ],
+      }),
+    });
+    assert.equal(response.status, 200);
+    const thread = fake.messages.find(
+      (message) => message.method === "thread/start",
+    );
+    assert.equal(
+      (thread?.params as Record<string, unknown>)?.baseInstructions,
+      "base one\n\nbase two",
+    );
+    const injected = fake.messages.find(
+      (message) => message.method === "thread/inject_items",
+    );
+    assert.deepEqual(injected?.params, {
+      threadId: "thr_policy",
+      items: [
+        {
+          type: "message",
+          role: "developer",
+          content: [{ type: "input_text", text: "developer instruction" }],
+        },
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "input1" }],
+        },
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "assistant history" }],
+        },
+      ],
+    });
+    const turn = fake.messages.find(
+      (message) => message.method === "turn/start",
+    );
+    assert.deepEqual((turn?.params as { input: unknown[] }).input, [
+      { type: "text", text: "input2", text_elements: [] },
+    ]);
+  });
+});
+
+test("starts a system-only request with base instructions and empty input", async () => {
+  await withChatServer(async (origin, _proxy, useTransport) => {
+    const fake = policyCapturingAppServer();
+    useTransport(fake);
+    const response = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        messages: [{ role: "system", content: "base only" }],
+      }),
+    });
+    assert.equal(response.status, 200);
+    const thread = fake.messages.find(
+      (message) => message.method === "thread/start",
+    );
+    assert.equal(
+      (thread?.params as Record<string, unknown>)?.baseInstructions,
+      "base only",
+    );
+    assert.equal(
+      fake.messages.some((message) => message.method === "thread/inject_items"),
+      false,
+    );
+    const turn = fake.messages.find(
+      (message) => message.method === "turn/start",
+    );
+    assert.deepEqual((turn?.params as { input: unknown[] }).input, []);
+  });
+});
+
 test("a fresh request may end with an assistant message to continue", async () => {
   await withChatServer(async (origin, _proxy, useTransport) => {
     const fake = policyCapturingAppServer();
@@ -3413,6 +3503,37 @@ test("rejects ambiguous history and executes an unknown continuation on a fresh 
   });
 });
 
+test("unknown continuation uses supplied system base on fresh fallback", async () => {
+  await withChatServer(async (origin, _proxy, useTransport) => {
+    const fake = policyCapturingAppServer();
+    useTransport(fake);
+    const response = await fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "m",
+        previous_response_id: "chatcmpl_missing",
+        messages: [
+          { role: "system", content: "fallback base" },
+          { role: "user", content: "fallback input" },
+        ],
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(
+      fake.messages.map((message) => message.method),
+      ["thread/start", "turn/start"],
+    );
+    assert.equal(
+      (fake.messages[0]?.params as Record<string, unknown>)?.baseInstructions,
+      "fallback base",
+    );
+    assert.deepEqual((fake.messages[1]?.params as { input: unknown[] }).input, [
+      { type: "text", text: "fallback input", text_elements: [] },
+    ]);
+  });
+});
+
 test("client disconnect interrupts an active app-server turn", async () => {
   await withChatServer(async (origin, _proxy, useTransport) => {
     let interrupted = false;
@@ -3730,6 +3851,7 @@ test("request policies map exactly, bind continuations, and honor managed denial
         model: "m",
         ephemeral: false,
         experimentalRawEvents: true,
+        baseInstructions: "",
         cwd,
         sandbox: "workspace-write",
         approvalPolicy: "never",
@@ -3760,13 +3882,17 @@ test("request policies map exactly, bind continuations, and honor managed denial
         },
       });
 
+      const beforeNativeContinuation = fake.messages.length;
       const continued = await fetch(`${origin}/v1/chat/completions`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           ...request,
           previous_response_id: firstBody.id,
-          messages: [{ role: "user", content: "continue" }],
+          messages: [
+            { role: "system", content: "changed continuation base" },
+            { role: "user", content: "continue" },
+          ],
         }),
       });
       assert.equal(continued.status, 200);
@@ -3786,6 +3912,13 @@ test("request policies map exactly, bind continuations, and honor managed denial
           "windows.sandbox": "unelevated",
         },
       });
+      const nativeContinuationMessages = fake.messages.slice(
+        beforeNativeContinuation,
+      );
+      assert.deepEqual(
+        nativeContinuationMessages.map((message) => message.method),
+        ["thread/read", "thread/resume", "turn/start"],
+      );
       const continuedTurn = fake.messages
         .filter((message) => message.method === "turn/start")
         .at(-1);
@@ -3834,6 +3967,7 @@ test("request policies map exactly, bind continuations, and honor managed denial
         model: "m",
         ephemeral: false,
         experimentalRawEvents: true,
+        baseInstructions: "",
         cwd,
         sandbox: "read-only",
         approvalPolicy: "never",
@@ -3869,6 +4003,7 @@ test("request policies map exactly, bind continuations, and honor managed denial
         model: "m",
         ephemeral: false,
         experimentalRawEvents: true,
+        baseInstructions: "",
         cwd,
         sandbox: "workspace-write",
         approvalPolicy: "never",
@@ -3917,6 +4052,7 @@ test("request policies map exactly, bind continuations, and honor managed denial
         model: "m",
         ephemeral: false,
         experimentalRawEvents: true,
+        baseInstructions: "",
         cwd,
         sandbox: "workspace-write",
         approvalPolicy: "on-request",
@@ -3975,6 +4111,7 @@ test("request policies map exactly, bind continuations, and honor managed denial
           model: "m",
           ephemeral: false,
           experimentalRawEvents: true,
+          baseInstructions: "",
           cwd: root,
           sandbox: "read-only",
           approvalPolicy: "never",
@@ -4099,6 +4236,7 @@ test("request policies map exactly, bind continuations, and honor managed denial
         model: "m",
         ephemeral: false,
         experimentalRawEvents: true,
+        baseInstructions: "",
         cwd: root,
         sandbox: "read-only",
         approvalPolicy: "never",

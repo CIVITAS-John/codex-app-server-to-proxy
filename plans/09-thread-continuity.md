@@ -2,6 +2,8 @@
 
 ## Status and goal
 
+**Decision (2026-09-20): retain native base instructions.** Fresh execution, including fallback, derives `baseInstructions` from the supplied system messages as specified in Stage 04. Native resume omits this override so the original base survives suffix-only requests and process restarts. Earlier transcript messages are not replayed, including changed system text. Compatibility consequence: older threads retain their earlier instruction behavior; applying changed instructions or the corrected system mapping requires fresh execution with the intended transcript. No continuation-store migration is introduced.
+
 Implemented on 2026-09-04; the offline gates (`npm run check`), the restructured bounded tool/restart
 scenario, and documentation alignment pass. The live scenario is adapted but awaits its explicitly
 authorized run under the five-response maximum.

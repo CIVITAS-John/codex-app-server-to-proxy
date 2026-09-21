@@ -410,10 +410,21 @@ function validateTools(
   });
 }
 
-/** Maps one prior message to raw Responses API history without flattening roles. */
+/** Joins Chat Completions system messages for app-server base instructions. */
+export function toBaseInstructions(messages: readonly ChatMessage[]): string {
+  return messages
+    .filter((message) => message.role === "system")
+    .map((message) => message.content ?? "")
+    .join("\n\n");
+}
+
+/** Maps one prior non-system message to raw Responses API history. */
 export function toHistoryItem(
   message: ChatMessage,
 ): Record<string, unknown> | undefined {
+  // System messages are owned by `toBaseInstructions`; app-server filters
+  // raw system history out of model requests.
+  if (message.role === "system") return undefined;
   // A tool-only assistant response has no model-visible text to inject; its
   // calls are represented by the pairs `toHistoryItems` builds around it.
   if (message.content === null) return undefined;

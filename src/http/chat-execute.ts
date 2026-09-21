@@ -32,6 +32,7 @@ import {
   freshExecutionHistory,
   toFunctionCallItem,
   toFunctionCallOutputItem,
+  toBaseInstructions,
   toHistoryItem,
   toHistoryItems,
   validateFallbackHistory,
@@ -1140,6 +1141,9 @@ async function startFreshThread(
         model: request.model,
         ephemeral: false,
         experimentalRawEvents: true,
+        // System messages become thread base instructions because app-server
+        // treats that field as the durable instruction channel.
+        baseInstructions: toBaseInstructions(request.messages),
         ...(await threadPolicyParams(request.policy, options)),
         ...environmentParams(request.policy),
         ...(request.dynamicTools.length
@@ -1159,11 +1163,12 @@ async function startFreshThread(
   handle.rawResponseBoundaries = true;
   acquireThread(handle, options, onToolRequest);
   // Only a trailing user message becomes new turn input. Any other trailing
-  // message joins the injected history and the empty-input turn asks the model
-  // to continue from it. A terminal tool-result block reaches this path only
-  // through fallback, whose admission check already required its complete
-  // preceding assistant batch; ordinary fresh requests keep their existing
-  // warn-and-drop handling of unpairable history.
+  // non-system message joins injected history and the empty-input turn asks the
+  // model to continue from it. System messages are already represented by the
+  // thread base. A terminal tool-result block reaches this path only through
+  // fallback, whose admission check already required its complete preceding
+  // assistant batch; ordinary fresh requests keep their existing warn-and-drop
+  // handling of unpairable history.
   const prior = toHistoryItems(freshExecutionHistory(request.messages));
   if (prior.unansweredCalls || prior.orphanResults)
     options.log("warn", "unpaired_history_tool_items_dropped", {
@@ -1202,10 +1207,9 @@ async function startTurn(
   handle: TurnHandle,
 ): Promise<void> {
   const last = request.messages.at(-1)!;
-  // Only a trailing user message is new turn input. A tool result's injected
-  // function_call_output pairs, and any other trailing message injected as
-  // history, are already the model-visible input; app-server accepts an empty
-  // input list for both.
+  // Only a trailing user message is new turn input. Other messages already
+  // supply history, tool-result pairs, or system base instructions; app-server
+  // accepts an empty input list to continue from that context.
   const input =
     last.role === "user"
       ? [{ type: "text", text: last.content!, text_elements: [] }]
