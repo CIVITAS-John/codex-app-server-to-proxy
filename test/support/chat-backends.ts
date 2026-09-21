@@ -583,6 +583,31 @@ function createScriptedTransport(
           }),
         );
         active.set(turnId, { threadId });
+        if (prompt.includes("contract-user-wins")) {
+          // Read the injected system role, never a nonce copied from turn input.
+          // A missing or demoted instruction produces the conflicting answer.
+          const system = (injected.get(threadId) ?? []).find(
+            (item) => (item as { role?: string }).role === "system",
+          ) as
+            { content?: Array<{ type?: string; text?: string }> } | undefined;
+          const text = system?.content?.find(
+            (part) => part.type === "input_text",
+          )?.text;
+          const answer = /contract-system-[a-f0-9]{32}/.exec(text ?? "")?.[0];
+          send(
+            protocolNotification({
+              method: "item/agentMessage/delta",
+              params: {
+                threadId,
+                turnId,
+                itemId: "system-prompt-message",
+                delta: answer ?? "contract-user-wins",
+              },
+            }),
+          );
+          complete(threadId, turnId);
+          return;
+        }
         // Emit every request in one batch synchronously so the proxy observes
         // the same parallel callback shape expected from live app-server.
         const sendToolBatch = (batchIndex: number): void => {

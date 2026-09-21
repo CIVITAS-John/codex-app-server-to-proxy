@@ -91,6 +91,8 @@ All implementation items below are now represented in the source tree and determ
 
 ## Decisions and stage boundary
 
+- **Decision (2026-09-20): dedicated system-prompt verification.** A separately selectable live file checks system-over-user instruction priority in aggregate and SSE output. It uses only `gpt-5.6-luna`, disables tools, and caps its budget at two upstream responses. The core live contract retains its 32-response guard; the complete opt-in command therefore permits 34 responses across the two contracts. Offline execution covers the same role-preserving requests. No runtime or public-schema changes are introduced.
+
 Vitest remains the sole runner for maintained automated suites. The default configuration is the required offline gate; the dedicated live configuration is a separately authorized compatibility smoke and never substitutes for deterministic fault coverage.
 
 The runtime policy enforces a lower bound only: `engines` is `>=20`, so Node.js 20 is the minimum compatibility line and newer majors are accepted without an upper cap. CI exercises the primary Node.js 24 LTS on Linux, macOS, and Windows; the matrix gains lines as they are validated but does not bound what the package accepts.

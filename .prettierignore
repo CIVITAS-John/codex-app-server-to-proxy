@@ -2,6 +2,8 @@ dist
 node_modules
 AGENTS.md
 CLAUDE.md
+# Preserve the user's editable copy of the upstream base instructions verbatim.
+model-instructions.md
 docs
 plans
 protocol/CONTRACT.md

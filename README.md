@@ -52,6 +52,20 @@ For the pinned Codex `0.154.0` runtime, proxy startup installs a temporary [mode
 
 If a new Codex home creates its first model cache during initialization, that bootstrap app-server remains private; the proxy installs the override and restarts app-server once before reporting ready. The generated catalog intentionally freezes the cached model metadata while this workaround is active, changes the affected models from code-mode-only to direct tool routing, and replaces any prior top-level `model_catalog_json` value in the selected Codex home. The opt-in live contract requires one model turn to issue two independent client tool calls in the same batch, directly checking the behavior this compatibility patch is intended to restore. Remove the patch when the pinned runtime can expose and batch those calls without it.
 
+## Instruction configuration
+
+To replace Codex's built-in base instructions, set [`model_instructions_file`](https://developers.openai.com/codex/config-reference/) in your personal Codex `config.toml` to the path of a UTF-8 instruction file. `AGENTS.md` and `developer_instructions` add instructions; they do not replace that base prompt.
+
+Personal Codex configuration does not propagate through authentication sync: the proxy copies only `auth.json` and sets the child's `CODEX_HOME` to its separate proxy home. Keep `--codex-home` separate from your personal Codex home to preserve this isolation. Configuration placed in the proxy home, trusted project `.codex/config.toml` settings, and instruction files loaded from the request's working directory can still affect proxy requests. This is home isolation, not isolation from project instructions or managed policy.
+
+For a fresh Chat Completions request, `system` and `developer` messages are injected into the Codex thread with their original roles before the user turn. They do not replace Codex's base instructions. On native thread reuse, earlier history is retained rather than reinjected: changing a system message in a continuation transcript does not update that thread's instructions. To change it, send the intended transcript as a fresh request without `previous_response_id` or an implicitly continued pending tool-result batch.
+
+The dedicated [system-prompt live test](test/contract/system-prompt.live.test.ts) checks that a system-only nonce wins over conflicting user input in both aggregate and SSE output, using `gpt-5.6-luna` with at most two upstream model responses:
+
+```sh
+npm run test:live -- test/contract/system-prompt.live.test.ts
+```
+
 ## Use an OpenAI client
 
 Point any OpenAI-compatible client at `http://127.0.0.1:8787/v1`. No API key is required; use any placeholder if your library demands one.
