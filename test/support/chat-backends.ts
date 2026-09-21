@@ -195,6 +195,10 @@ async function startLiveChatBackendOnce(
     // Report only the dynamic-tool dispatch offset; token-usage notifications
     // are asserted through HTTP output and stay off stdout.
     let turnStartedAt = 0;
+    const rawToolCounts = new Map<
+      string,
+      { direct: number; qualified: number; other: number }
+    >();
     const baseRequest = appServer.rpc.request.bind(appServer.rpc);
     appServer.rpc.request = (method, params, signal) => {
       if (method === "turn/start") turnStartedAt = Date.now();
@@ -205,6 +209,41 @@ async function startLiveChatBackendOnce(
         console.info(
           `[live] item/tool/call at +${Date.now() - turnStartedAt} ms after turn/start`,
         );
+    });
+    // Counts distinguish a one-call model response from a lost proxy call.
+    // Never print raw items, arguments, thread IDs, or arbitrary tool names.
+    appServer.rpc.on("notification", (method, params: unknown) => {
+      const value = protocolRecord(params);
+      if (typeof value?.turnId !== "string") return;
+      if (method === "rawResponseItem/completed") {
+        const item = protocolRecord(value.item);
+        if (item?.type !== "function_call" && item?.type !== "custom_tool_call")
+          return;
+        const counts = rawToolCounts.get(value.turnId) ?? {
+          direct: 0,
+          qualified: 0,
+          other: 0,
+        };
+        if (
+          item.name === "contract_lookup" ||
+          item.name === "contract_lookup_secondary"
+        )
+          counts.direct += 1;
+        else if (
+          typeof item.name === "string" &&
+          /\.contract_lookup(?:_secondary)?$/.test(item.name)
+        )
+          counts.qualified += 1;
+        else counts.other += 1;
+        rawToolCounts.set(value.turnId, counts);
+      } else if (method === "rawResponse/completed") {
+        const counts = rawToolCounts.get(value.turnId);
+        if (counts)
+          console.info(
+            `[live] raw tool calls direct=${counts.direct} qualified=${counts.qualified} other=${counts.other}`,
+          );
+        rawToolCounts.delete(value.turnId);
+      }
     });
     return await startProxy(
       appServer.rpc,

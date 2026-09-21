@@ -24,6 +24,10 @@ export const CONTRACT_TOOL_BATCHES = [
   [{ name: "contract_lookup", key: "maple" }],
 ] as const;
 
+/** Explicit concurrency contract supplied through the thread's base instructions. */
+const TOOL_CONCURRENCY_INSTRUCTIONS =
+  "You are executing a tool protocol conformance test. When the user requests independent function calls, emit every requested call together in a single response. Parallel function calls are enabled. A batch with one call missing is invalid, and no tool results will be delivered until the entire requested batch is present. Use the direct named functions, with no prose or intermediary tools. After all results arrive, follow their instructions for the next batch or final answer.";
+
 /** Safe root-relative file read by the live built-in command scenario. */
 export const OBSERVATION_FIXTURE = ".codex-contract-observation";
 
@@ -445,6 +449,7 @@ export function registerChatContract(
         // history: the batch prompt names no keys, so a live model must fill
         // its calls from the remembered code words.
         const transcript: Array<Record<string, unknown>> = [
+          { role: "system", content: TOOL_CONCURRENCY_INSTRUCTIONS },
           {
             role: "user",
             content:
@@ -718,6 +723,7 @@ export function registerChatContract(
         const firstResponse = await chat({
           model: CONTRACT_MODEL,
           messages: [
+            { role: "system", content: TOOL_CONCURRENCY_INSTRUCTIONS },
             {
               role: "user",
               content:
