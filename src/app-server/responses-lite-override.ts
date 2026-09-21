@@ -95,9 +95,9 @@ function disableResponsesLite(source: string): {
     const usedResponsesLite = model.use_responses_lite === true;
     model.use_responses_lite = false;
     // Code-only routing turns dynamic functions into nested exec callbacks.
-    // Clear it only where the catalog advertises native parallel-tool support.
-    if (usedResponsesLite && model.supports_parallel_tool_calls === true)
-      delete model.tool_mode;
+    // Codex 0.154.0 no longer exposes supports_parallel_tool_calls in model
+    // metadata. Gating on that removed field silently retains code-only tools.
+    if (usedResponsesLite) delete model.tool_mode;
   }
 
   return {
@@ -126,7 +126,7 @@ function renderConfig(existing: string, catalogPath: string): string {
 
 /**
  * Installs a separate catalog that disables Responses Lite and restores direct
- * tools where native parallel calls are advertised, without mutating the cache.
+ * tools for converted models, without mutating the cache.
  */
 export async function installResponsesLiteOverride(
   codexHome: string,

@@ -20,24 +20,23 @@ test("Responses Lite override clones every model and preserves other config", as
     const source = `${JSON.stringify(
       {
         fetched_at: "fixture",
-        client_version: "0.153.4",
+        client_version: "0.154.0",
         etag: "synthetic-etag",
         models: [
           {
-            slug: "gpt-5.6-sol",
+            slug: "gpt-5.6-luna",
             use_responses_lite: true,
-            supports_parallel_tool_calls: true,
-            tool_mode: "code_mode",
+            tool_mode: "code_mode_only",
             priority: 1,
           },
           {
-            slug: "gpt-5.6-serial",
+            slug: "legacy-catalog-model",
             use_responses_lite: true,
             supports_parallel_tool_calls: false,
             tool_mode: "code_mode_only",
             priority: 2,
           },
-          { slug: "gpt-5.4", priority: 3 },
+          { slug: "unchanged-model", tool_mode: "code_mode", priority: 3 },
         ],
       },
       null,
@@ -70,7 +69,7 @@ test("Responses Lite override clones every model and preserves other config", as
       unknown
     >;
     assert.equal(override.fetched_at, "fixture");
-    assert.equal(override.client_version, "0.153.4");
+    assert.equal(override.client_version, "0.154.0");
     assert.equal(override.etag, "synthetic-etag");
     assert.deepEqual(
       (override.models as Array<Record<string, unknown>>).map((model) => ({
@@ -80,19 +79,19 @@ test("Responses Lite override clones every model and preserves other config", as
       })),
       [
         {
-          slug: "gpt-5.6-sol",
+          slug: "gpt-5.6-luna",
           use_responses_lite: false,
           tool_mode: undefined,
         },
         {
-          slug: "gpt-5.6-serial",
-          use_responses_lite: false,
-          tool_mode: "code_mode_only",
-        },
-        {
-          slug: "gpt-5.4",
+          slug: "legacy-catalog-model",
           use_responses_lite: false,
           tool_mode: undefined,
+        },
+        {
+          slug: "unchanged-model",
+          use_responses_lite: false,
+          tool_mode: "code_mode",
         },
       ],
     );

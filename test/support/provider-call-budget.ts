@@ -23,6 +23,10 @@ export class ProviderCallBudget {
   readonly #seen = new Set<string>();
   readonly #rootThreads = new Set<string>();
   readonly #childThreads = new Set<string>();
+  readonly #responseOutputs = new Map<
+    string,
+    { finalAnswer: boolean; mayContinue: boolean }
+  >();
   readonly #maximum: number;
   #parent = 0;
   #child = 0;
@@ -50,6 +54,7 @@ export class ProviderCallBudget {
 
   /** Releases a root turn when its owning app-server generation is closed. */
   releaseRootTurn(turn: ActiveRootTurn): void {
+    this.#responseOutputs.delete(JSON.stringify([turn.threadId, turn.turnId]));
     if (
       this.#activeRootTurn?.threadId === turn.threadId &&
       this.#activeRootTurn.turnId === turn.turnId
@@ -67,8 +72,45 @@ export class ProviderCallBudget {
     interrupt: RootTurnInterrupter,
   ): void {
     const value = objectRecord(params);
+    const threadId = value?.threadId;
+    const turnId = value?.turnId;
+    if (
+      method === "rawResponseItem/completed" &&
+      typeof threadId === "string" &&
+      typeof turnId === "string"
+    ) {
+      const key = JSON.stringify([threadId, turnId]);
+      const output = this.#responseOutputs.get(key) ?? {
+        finalAnswer: false,
+        mayContinue: false,
+      };
+      const item = objectRecord(value?.item);
+      if (item?.type === "message") {
+        if (
+          item.role === "assistant" &&
+          (item.phase === "final_answer" || item.phase == null) &&
+          Array.isArray(item.content) &&
+          item.content.some((part: unknown) => {
+            const content = objectRecord(part);
+            return (
+              content?.type === "output_text" &&
+              typeof content.text === "string" &&
+              content.text.length > 0
+            );
+          })
+        )
+          output.finalAnswer = true;
+      } else if (item?.type !== "reasoning") {
+        // Tool calls (including unknown future kinds) can trigger another
+        // provider request even if the response also contains final prose.
+        output.mayContinue = true;
+      }
+      this.#responseOutputs.set(key, output);
+      return;
+    }
     if (method === "turn/completed") {
       const turn = objectRecord(value?.turn);
+      this.#responseOutputs.delete(JSON.stringify([threadId, turn?.id]));
       const activeRootTurn = this.#activeRootTurn;
       if (
         activeRootTurn &&
@@ -80,9 +122,7 @@ export class ProviderCallBudget {
     }
     if (method !== "rawResponse/completed") return;
 
-    const threadId = value?.threadId;
     const responseId = value?.responseId;
-    const turnId = value?.turnId;
     if (typeof threadId !== "string" || typeof responseId !== "string") {
       this.#fail(
         "Live provider-call accounting received rawResponse/completed without string threadId and responseId fields.",
@@ -92,6 +132,9 @@ export class ProviderCallBudget {
     const key = JSON.stringify([threadId, responseId]);
     if (this.#seen.has(key)) return;
     this.#seen.add(key);
+    const outputKey = JSON.stringify([threadId, turnId]);
+    const output = this.#responseOutputs.get(outputKey);
+    this.#responseOutputs.delete(outputKey);
     if (this.#rootThreads.has(threadId)) {
       this.#parent += 1;
       // App-server may flush the turn/start response and its first raw event in
@@ -109,9 +152,18 @@ export class ProviderCallBudget {
       this.#fail(
         `Live provider-call ceiling of ${this.#maximum} was exceeded by a newly observed completion.`,
       );
+      this.#interruptAtCeiling(interrupt);
       return;
     }
-    if (total === this.#maximum) this.#interruptAtCeiling(interrupt);
+    // A root final answer with no tools has no follow-up provider work. Let
+    // turn/completed arrive naturally so the last allowed SSE ends with stop.
+    // Child answers still require root work and must retain the interrupt.
+    const finishingRoot =
+      this.#rootThreads.has(threadId) &&
+      output?.finalAnswer === true &&
+      !output.mayContinue;
+    if (total === this.#maximum && !finishingRoot)
+      this.#interruptAtCeiling(interrupt);
   }
 
   /** Returns an immutable count snapshot, failing after any budget violation. */
@@ -127,6 +179,15 @@ export class ProviderCallBudget {
   /** Throws the first accounting or ceiling failure observed by this run. */
   assertHealthy(): void {
     if (this.#failure) throw this.#failure;
+  }
+
+  /** Rejects a new root turn before its RPC can spend an exhausted budget. */
+  assertCanStartTurn(): void {
+    this.assertHealthy();
+    if (this.#parent + this.#child >= this.#maximum)
+      throw new Error(
+        `Live provider-call ceiling of ${this.#maximum} prevents another turn.`,
+      );
   }
 
   /** Waits for a ceiling interrupt and surfaces its asynchronous failure. */

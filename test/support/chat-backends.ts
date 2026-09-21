@@ -1294,7 +1294,10 @@ async function startProxy(
   const request = rpc.request.bind(rpc);
   rpc.request = (method, params, signal) => {
     const values = protocolRecord(params);
-    if (method === "turn/start") modelCalls += 1;
+    if (method === "turn/start") {
+      providerBudget?.assertCanStartTurn();
+      modelCalls += 1;
+    }
     if (method === "thread/resume") resumeCalls += 1;
     if (method === "thread/resume" && typeof values?.threadId === "string")
       providerBudget?.registerRootThread(values.threadId);

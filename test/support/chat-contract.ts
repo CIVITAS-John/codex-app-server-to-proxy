@@ -281,10 +281,13 @@ export function registerChatContract(
               .map((choice) => choice.delta?.content ?? "")
               .join("");
             assert.equal(content.trim(), expected);
-            assert.ok(
-              chunks.some(
-                (chunk) => chunk.choices?.[0]?.finish_reason === "stop",
-              ),
+            assert.deepEqual(
+              chunks
+                .flatMap((chunk) => chunk.choices ?? [])
+                .map((choice) => choice.finish_reason)
+                .filter((reason) => reason != null),
+              ["stop"],
+              "system prompt stream did not finish normally",
             );
           } else {
             const body = parseJson<ToolCompletion>(

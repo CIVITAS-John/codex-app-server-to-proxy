@@ -48,7 +48,7 @@ Notes:
 
 ### Temporary Responses Lite override
 
-For the pinned Codex `0.154.0` runtime, proxy startup installs a temporary [model catalog override](https://developers.openai.com/codex/config-reference/#configtoml) in the selected Codex home. It copies `models_cache.json` to `models.no-responses-lite.json`, sets `use_responses_lite` to `false` on every model entry, and removes `tool_mode` from entries that originally used Responses Lite while advertising native parallel-tool support. This makes declared client functions direct Responses tools instead of serialized nested code-mode callbacks. The proxy adds a marked top-level `model_catalog_json` block to `config.toml` and never edits the refreshable cache directly.
+For the pinned Codex `0.154.0` runtime, proxy startup installs a temporary [model catalog override](https://developers.openai.com/codex/config-reference/#configtoml) in the selected Codex home. It copies `models_cache.json` to `models.no-responses-lite.json`, sets `use_responses_lite` to `false` on every model entry, and removes `tool_mode` from entries that originally used Responses Lite. Codex 0.154.0 no longer exposes the former `supports_parallel_tool_calls` catalog field, so conversion does not depend on it. This makes declared client functions direct Responses tools instead of serialized nested code-mode callbacks. The proxy adds a marked top-level `model_catalog_json` block to `config.toml` and never edits the refreshable cache directly.
 
 If a new Codex home creates its first model cache during initialization, that bootstrap app-server remains private; the proxy installs the override and restarts app-server once before reporting ready. The generated catalog intentionally freezes the cached model metadata while this workaround is active, changes the affected models from code-mode-only to direct tool routing, and replaces any prior top-level `model_catalog_json` value in the selected Codex home. The opt-in live contract requires one model turn to issue two independent client tool calls in the same batch, directly checking the behavior this compatibility patch is intended to restore. Remove the patch when the pinned runtime can expose and batch those calls without it.
 
@@ -67,6 +67,8 @@ The dedicated [system-prompt live test](test/contract/system-prompt.live.test.ts
 ```sh
 npm run test:live -- test/contract/system-prompt.live.test.ts
 ```
+
+The live budget guard lets a root final answer without tool work finish naturally at the limit, preserving `finish_reason: "stop"`. It interrupts responses that can require more work and rejects further root turns before dispatch.
 
 ## Use an OpenAI client
 

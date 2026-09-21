@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
+import type { ServerNotification } from "../../protocol/generated/typescript/ServerNotification.js";
 import { UNRESTRICTED_POLICY_REQUIREMENTS } from "../../src/core/policy.js";
+import { EventNormalizer } from "../../src/http/chat-normalize.js";
+import { protocolTurn } from "./protocol-fixtures.js";
 import { assertLivePolicyPrerequisites } from "./chat-backends.js";
 import { ProviderCallBudget } from "./provider-call-budget.js";
 
@@ -9,8 +12,8 @@ function completion(
   threadId: string,
   responseId: string,
   turnId = `turn_${threadId}`,
-): Record<string, unknown> {
-  return { threadId, turnId, responseId, usage: null };
+): Extract<ServerNotification, { method: "rawResponse/completed" }>["params"] {
+  return { threadId, turnId, responseId, usage: null, usageMetadata: null };
 }
 
 test("provider-call accounting deduplicates parent and child completions and enforces its ceiling", async () => {
@@ -68,6 +71,124 @@ test("provider-call accounting deduplicates parent and child completions and enf
     () => budget.stats(),
     /ceiling of 24 was exceeded by a newly observed completion/u,
   );
+});
+
+test("the final permitted answer reaches stop before another turn is rejected", async () => {
+  for (const phase of [undefined, "final_answer"] as const) {
+    const budget = new ProviderCallBudget(2);
+    const interrupted: string[] = [];
+    const interrupt = async ({ turnId }: { turnId: string }): Promise<void> => {
+      interrupted.push(turnId);
+    };
+    const observe = (notification: ServerNotification): void =>
+      budget.observe(notification.method, notification.params, interrupt);
+    for (const turnId of ["aggregate", "sse"]) {
+      budget.assertCanStartTurn();
+      budget.activateRootTurn("root", turnId);
+      observe({
+        method: "rawResponseItem/completed",
+        params: {
+          threadId: "root",
+          turnId,
+          item: {
+            type: "message",
+            role: "assistant",
+            ...(phase ? { phase } : {}),
+            content: [{ type: "output_text", text: "synthetic-answer" }],
+          },
+        },
+      });
+      observe({
+        method: "rawResponse/completed",
+        params: completion("root", `response_${turnId}`, turnId),
+      });
+      // Reproduce the asynchronous gap where the old guard sent an interrupt
+      // after the provider finished but before app-server completed the turn.
+      await budget.settle();
+      const terminal = {
+        method: "turn/completed",
+        params: {
+          threadId: "root",
+          turn: protocolTurn(
+            turnId,
+            interrupted.includes(turnId) ? "interrupted" : "completed",
+          ),
+        },
+      } satisfies ServerNotification;
+      observe(terminal);
+      assert.deepEqual(
+        new EventNormalizer().normalize(terminal.method, terminal.params),
+        [{ finishReason: "stop" }],
+      );
+    }
+    assert.deepEqual(interrupted, []);
+    assert.deepEqual(budget.stats(), { parent: 2, child: 0, total: 2 });
+    assert.throws(() => budget.assertCanStartTurn(), /prevents another turn/u);
+  }
+});
+
+test("a final answer cannot exempt tools, child work, or a later response from the ceiling", async () => {
+  for (const scenario of [
+    "tool",
+    "child",
+    "later-response",
+    "commentary",
+    "unknown",
+  ] as const) {
+    const budget = new ProviderCallBudget(
+      scenario === "later-response" ? 2 : 1,
+    );
+    budget.activateRootTurn("root", "turn_root");
+    const interrupted: string[] = [];
+    const interrupt = async ({ turnId }: { turnId: string }): Promise<void> => {
+      interrupted.push(turnId);
+    };
+    const observe = (notification: ServerNotification): void =>
+      budget.observe(notification.method, notification.params, interrupt);
+    const threadId = scenario === "child" ? "child" : "root";
+    const turnId = `turn_${threadId}`;
+    observe({
+      method: "rawResponseItem/completed",
+      params: {
+        threadId,
+        turnId,
+        item: {
+          type: "message",
+          role: "assistant",
+          phase: scenario === "commentary" ? "commentary" : "final_answer",
+          content: [{ type: "output_text", text: "synthetic-answer" }],
+        },
+      },
+    });
+    if (scenario === "tool" || scenario === "unknown")
+      observe({
+        method: "rawResponseItem/completed",
+        params: {
+          threadId,
+          turnId,
+          item:
+            scenario === "tool"
+              ? {
+                  type: "function_call",
+                  call_id: "call_1",
+                  name: "synthetic_tool",
+                  arguments: "{}",
+                }
+              : { type: "other" },
+        },
+      });
+    observe({
+      method: "rawResponse/completed",
+      params: completion(threadId, "response_1", turnId),
+    });
+    if (scenario === "later-response")
+      observe({
+        method: "rawResponse/completed",
+        params: completion(threadId, "response_2", turnId),
+      });
+    await budget.settle();
+    assert.deepEqual(interrupted, ["turn_root"], scenario);
+  }
 });
 
 test("provider-call accounting fails explicitly when child events are absent or malformed", () => {
