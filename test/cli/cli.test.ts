@@ -583,16 +583,14 @@ testWithPosixExecutable(
         fakeCodexScript({
           version: PINNED_CODEX_VERSION,
           setup:
-            "const fs = require('node:fs'); const authPath = require('node:path').join(process.env.CODEX_HOME, 'auth.json'); let accountReads = 0;",
+            "const fs = require('node:fs'); const authPath = require('node:path').join(process.env.CODEX_HOME, 'auth.json');",
           onLine: (message) => `  if (${message}.method === "account/read") {
-    accountReads += 1;
-    if (accountReads === 1) {
-      if (fs.readFileSync(authPath, "utf8") !== '{"kind":"dead"}') throw new Error("seeded credential was not pulled");
+    const auth = fs.readFileSync(authPath, "utf8");
+    if (auth === '{"kind":"dead"}') {
       console.log(JSON.stringify({ id: ${message}.id, error: { code: -32000, message: "expired credential" } }));
-    } else {
-      if (fs.readFileSync(authPath, "utf8") !== '{"kind":"fresh"}') throw new Error("recovery credential was not written");
+    } else if (auth === '{"kind":"fresh"}') {
       console.log(JSON.stringify({ id: ${message}.id, result: ${embeddedProtocolResults.authenticatedAccount} }));
-    }
+    } else throw new Error("unexpected credential in seeded home");
     return;
   }
   if (${message}.method === "account/logout") {
@@ -677,16 +675,14 @@ testWithPosixExecutable(
         fakeCodexScript({
           version: PINNED_CODEX_VERSION,
           setup:
-            "const fs = require('node:fs'); const authPath = require('node:path').join(process.env.CODEX_HOME, 'auth.json'); let accountReads = 0;",
+            "const fs = require('node:fs'); const authPath = require('node:path').join(process.env.CODEX_HOME, 'auth.json');",
           onLine: (message) => `  if (${message}.method === "account/read") {
-    accountReads += 1;
-    if (accountReads === 1) {
-      if (fs.readFileSync(authPath, "utf8") !== '{"kind":"proxy-dead"}') throw new Error("newer proxy credential was replaced");
+    const auth = fs.readFileSync(authPath, "utf8");
+    if (auth === '{"kind":"proxy-dead"}') {
       console.log(JSON.stringify({ id: ${message}.id, error: { code: -32000, message: "expired credential" } }));
-    } else {
-      if (fs.readFileSync(authPath, "utf8") !== '{"kind":"fresh"}') throw new Error("recovery credential was not written");
+    } else if (auth === '{"kind":"fresh"}') {
       console.log(JSON.stringify({ id: ${message}.id, result: ${embeddedProtocolResults.authenticatedAccount} }));
-    }
+    } else throw new Error("newer proxy credential was replaced");
     return;
   }
   if (${message}.method === "account/logout") {
@@ -754,6 +750,8 @@ testWithPosixExecutable(
     await withTempDir(async (directory) => {
       const fake = join(directory, "codex");
       const launches = join(directory, "launches");
+      const recoveryStarted = join(directory, "recovery-started");
+      const allowRecovery = join(directory, "allow-recovery");
       const reservation = await reservePort();
       const port = reservation.port;
       await reservation.close();
@@ -765,8 +763,17 @@ testWithPosixExecutable(
 const launches = ${JSON.stringify(launches)};
 const count = Number(fs.existsSync(launches) ? fs.readFileSync(launches, "utf8") : 0) + 1;
 fs.writeFileSync(launches, String(count));
+if (count === 4) fs.writeFileSync(${JSON.stringify(recoveryStarted)}, "yes");
 process.on("SIGTERM", () => process.exit(0));`,
           onLine: (message) => `  if (${message}.method === "account/read") {
+    if (count === 4) {
+      const wait = setInterval(() => {
+        if (!fs.existsSync(${JSON.stringify(allowRecovery)})) return;
+        clearInterval(wait);
+        console.log(JSON.stringify({ id: ${message}.id, result: ${embeddedProtocolResults.authenticatedAccount} }));
+      }, 10);
+      return;
+    }
     console.log(JSON.stringify({ id: ${message}.id, result: ${embeddedProtocolResults.authenticatedAccount} }));
     if(count===3) setTimeout(()=>process.exit(23),250);
     return;
@@ -799,8 +806,10 @@ process.on("SIGTERM", () => process.exit(0));`,
       try {
         await waitForText(() => stderr, "app_server_ready");
         await waitForText(() => stderr, "app_server_exited");
+        await waitForFile(recoveryStarted);
         const unavailable = await fetch(`http://127.0.0.1:${port}/ready`);
         assert.equal(unavailable.status, 503);
+        await writeFile(allowRecovery, "yes");
         await waitForText(() => stderr, "app_server_restarted", 8_000);
         const ready = await fetch(`http://127.0.0.1:${port}/ready`);
         assert.equal(ready.status, 200);
