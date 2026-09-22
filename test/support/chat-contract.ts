@@ -1371,7 +1371,7 @@ export function registerChatContract(
         assert.equal(
           spawns.length,
           1,
-          `expected exactly one spawnAgent call (observed ${calls.length} tool calls and ${backend!.providerCalls().child - childCallsBefore} child provider completions)`,
+          `expected exactly one spawnAgent call (observed ${calls.length} tool calls: ${calls.map((call) => call.function.name.slice(0, 128)).join(", ")}; ${backend!.providerCalls().child - childCallsBefore} child provider completions)`,
         );
         const completedSpawn = results.find(
           (result) =>
