@@ -118,6 +118,7 @@ export interface ChatContractBackend {
   writePath: string;
   providerCalls(): { parent: number; child: number; total: number };
   assertChildProviderCallsObserved(childThreadId: string): void;
+  childReturnedNonce(childThreadId: string): Promise<boolean>;
   /** Compatibility count retained for deterministic turn-oriented fakes. */
   modelCalls(): number;
   resumeCalls(): number;
@@ -1252,6 +1253,7 @@ export function registerChatContract(
               [
                 "webSearch",
                 "spawnAgent",
+                "subAgentActivity",
                 "sendInput",
                 "resumeAgent",
                 "wait",
@@ -1325,6 +1327,7 @@ export function registerChatContract(
               "commandExecution",
               "fileChange",
               "spawnAgent",
+              "subAgentActivity",
               "sendInput",
               "resumeAgent",
               "wait",
@@ -1366,28 +1369,43 @@ export function registerChatContract(
         const calls = choice?.message?.tool_calls ?? [];
         const results = choice?.message?.tool_results ?? [];
         const spawns = calls.filter(
-          (call) => call.function.name === "spawnAgent",
+          (call) =>
+            call.function.name === "spawnAgent" ||
+            (call.function.name === "subAgentActivity" &&
+              parseJson<{ kind?: string }>(
+                call.function.arguments,
+                "child activity arguments",
+              ).kind === "started"),
         );
         assert.equal(
           spawns.length,
           1,
-          `expected exactly one spawnAgent call (observed ${calls.length} tool calls: ${calls.map((call) => call.function.name.slice(0, 128)).join(", ")}; ${backend!.providerCalls().child - childCallsBefore} child provider completions)`,
+          `expected exactly one child start (observed ${calls.length} tool calls: ${calls
+            .slice(0, 16)
+            .map((call) => call.function.name.slice(0, 128))
+            .join(
+              ", ",
+            )}; ${backend!.providerCalls().child - childCallsBefore} child provider completions)`,
         );
         const completedSpawn = results.find(
           (result) =>
             result.id === spawns[0]!.id &&
             result.result?.status === "completed",
         );
-        assert.ok(completedSpawn, "spawnAgent omitted its completed result");
+        assert.ok(completedSpawn, "child start omitted its completed result");
         const spawnContent = objectRecord(completedSpawn.result?.content);
-        const receiverThreadIds = spawnContent?.receiverThreadIds;
+        // app-server can report a child start as activity rather than a collab call.
+        const receiverThreadIds =
+          spawns[0]!.function.name === "subAgentActivity"
+            ? [spawnContent?.agentThreadId]
+            : spawnContent?.receiverThreadIds;
         assert.ok(Array.isArray(receiverThreadIds));
         assert.equal(receiverThreadIds.length, 1);
         const childThreadId = receiverThreadIds[0];
         assert.equal(
           typeof childThreadId,
           "string",
-          "spawnAgent omitted its child thread id",
+          "child start omitted its child thread id",
         );
         assert.ok(
           results.some((result) => {
@@ -1398,19 +1416,41 @@ export function registerChatContract(
               child?.status === "completed" &&
               child.message === backend!.observationToken
             );
-          }),
+          }) ||
+            // Activity completion omits the reply, so verify the child's own
+            // completed history rather than trusting the parent's nonce echo.
+            (results.some((result) => {
+              const content = objectRecord(result.result?.content);
+              return (
+                result.result?.status === "completed" &&
+                content?.kind === "completed" &&
+                content.agentThreadId === childThreadId
+              );
+            }) &&
+              (await backend!.childReturnedNonce(childThreadId))),
           "completed child state omitted the nonce handoff",
         );
         assert.equal(
-          calls.every((call) =>
-            ["spawnAgent", "wait"].includes(call.function.name),
-          ),
+          calls.every((call) => {
+            if (call.function.name !== "subAgentActivity")
+              return ["spawnAgent", "wait"].includes(call.function.name);
+            const args = parseJson<{ kind?: string; agentThreadId?: string }>(
+              call.function.arguments,
+              "child activity arguments",
+            );
+            return (
+              ["started", "completed"].includes(args.kind ?? "") &&
+              args.agentThreadId === childThreadId
+            );
+          }),
           true,
           "spawn scenario exposed unexpected internal activity",
         );
         const observedReceiverIds = new Set(
           results.flatMap((result) => {
             const content = objectRecord(result.result?.content);
+            if (typeof content?.agentThreadId === "string")
+              return [content.agentThreadId];
             return Array.isArray(content?.receiverThreadIds)
               ? content.receiverThreadIds.filter(
                   (value): value is string => typeof value === "string",

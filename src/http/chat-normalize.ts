@@ -509,6 +509,11 @@ function internalToolShape(item: Record<string, unknown>): {
   arguments: string;
 } {
   const kind = typeof item.type === "string" ? item.type : "unknown";
+  if (kind === "subAgentActivity")
+    return {
+      name: kind,
+      arguments: JSON.stringify(subAgentActivityContent(item)),
+    };
   const details: Record<string, unknown> = {};
   for (const key of [
     "command",
@@ -561,9 +566,11 @@ function internalToolResult(
   const result =
     item.type === "collabAgentToolCall"
       ? collabAgentResultContent(item)
-      : item.type === "webSearch"
-        ? item.results
-        : (item.result ?? item.aggregatedOutput ?? item.action);
+      : item.type === "subAgentActivity"
+        ? subAgentActivityContent(item)
+        : item.type === "webSearch"
+          ? item.results
+          : (item.result ?? item.aggregatedOutput ?? item.action);
   return {
     id: String(item.id),
     type: "function",
@@ -576,6 +583,21 @@ function internalToolResult(
         ? { error: normalizeError(item.error) }
         : {}),
     },
+  };
+}
+
+/** Exposes child lifecycle correlation without publishing the agent path. */
+function subAgentActivityContent(
+  item: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ...(typeof item.kind === "string" &&
+    ["started", "interacted", "interrupted", "completed"].includes(item.kind)
+      ? { kind: item.kind }
+      : {}),
+    ...(typeof item.agentThreadId === "string"
+      ? { agentThreadId: item.agentThreadId }
+      : {}),
   };
 }
 

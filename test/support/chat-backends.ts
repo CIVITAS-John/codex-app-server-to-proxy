@@ -19,6 +19,7 @@ import { ensureAuthenticated } from "../../src/app-server/auth.js";
 import type { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
 import { installResponsesLiteOverride } from "../../src/app-server/responses-lite-override.js";
 import type { Logger } from "../../src/core/logger.js";
+import type { ThreadReadResponse } from "../../protocol/generated/typescript/v2/ThreadReadResponse.js";
 import type { ProxyServer } from "../../src/http/server.js";
 import {
   UNRESTRICTED_POLICY_REQUIREMENTS,
@@ -430,6 +431,8 @@ async function startRestartableBackend(
         options.providerBudget.assertChildThreadCallsObserved(childThreadId);
       else current.assertChildProviderCallsObserved(childThreadId);
     },
+    childReturnedNonce: (childThreadId) =>
+      current.childReturnedNonce(childThreadId),
     modelCalls: () => priorModelCalls + current.modelCalls(),
     resumeCalls: () => priorResumeCalls + current.resumeCalls(),
     waitForInterrupt: () => current.waitForInterrupt(),
@@ -1432,6 +1435,27 @@ async function startProxy(
           throw new Error(
             `The deterministic contract backend emitted no provider call for expected child thread ${JSON.stringify(childThreadId)}.`,
           );
+      },
+      async childReturnedNonce(childThreadId) {
+        // Reading completed history neither resumes the child nor starts model work.
+        const { thread } = (await rpc.request(
+          "thread/read",
+          { threadId: childThreadId, includeTurns: true },
+          AbortSignal.timeout(10_000),
+        )) as ThreadReadResponse;
+        return (
+          thread.id === childThreadId &&
+          thread.turns.some(
+            (turn) =>
+              turn.status === "completed" &&
+              turn.items.some(
+                (item) =>
+                  item.type === "agentMessage" &&
+                  item.text === environment.observationToken &&
+                  (item.phase === "final_answer" || item.phase === null),
+              ),
+          )
+        );
       },
       modelCalls: () => modelCalls,
       resumeCalls: () => resumeCalls,

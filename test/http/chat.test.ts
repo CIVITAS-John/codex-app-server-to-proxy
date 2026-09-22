@@ -1298,6 +1298,53 @@ test("sanitizes partial collab-agent lifecycle state without repeating its call"
   ]);
 });
 
+test("preserves sub-agent activity correlation without exposing agent paths", () => {
+  const normalizer = new EventNormalizer();
+  for (const kind of ["started", "completed"] as const) {
+    const notification = protocolNotification({
+      method: "item/completed",
+      params: {
+        threadId: "thread",
+        turnId: "turn",
+        completedAtMs: 1,
+        item: {
+          type: "subAgentActivity",
+          id: `activity_${kind}`,
+          kind,
+          agentThreadId: "thr_child",
+          agentPath: "/synthetic/private/agent",
+        },
+      },
+    });
+    const delta = normalizer.normalize(
+      notification.method,
+      notification.params,
+    )[0]?.delta;
+    const call = delta?.tool_calls?.[0];
+    assert.equal(call?.function.name, "subAgentActivity");
+    assert.deepEqual(JSON.parse(call!.function.arguments), {
+      kind,
+      agentThreadId: "thr_child",
+    });
+    assert.deepEqual(delta?.tool_results?.[0]?.result, {
+      status: "completed",
+      content: { kind, agentThreadId: "thr_child" },
+    });
+    assert.equal(delta?.tool_results?.[0]?.id, call?.id);
+  }
+  const malformed = normalizer.normalize("item/completed", {
+    item: {
+      type: "subAgentActivity",
+      id: "malformed_activity",
+      kind: "unknown",
+      agentThreadId: { private: true },
+      agentPath: "/synthetic/private/agent",
+    },
+  })[0]?.delta;
+  assert.equal(malformed?.tool_calls?.[0]?.function.arguments, "{}");
+  assert.deepEqual(malformed?.tool_results?.[0]?.result.content, {});
+});
+
 test("hides replayed dynamic lifecycle items without changing continuation finish reason", () => {
   /** Builds a generated dynamic-tool lifecycle notification for this turn. */
   const replayedDynamicTool = (method: "item/started" | "item/completed") => {
