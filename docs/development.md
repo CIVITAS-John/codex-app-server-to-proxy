@@ -1,6 +1,6 @@
 # Repository guide
 
-This guide is for contributors to `codex-openai-proxy`. User installation, API behavior, and `x_codex` extensions belong in the [root README](../README.md). Product decisions, stage gates, and implementation status belong in the [implementation plan](../plans/README.md).
+This guide is for contributors to `codex-openai-proxy`. User installation, API behavior, and `x_codex` extensions belong in the [root README](../README.md). Runtime design lives in [architecture](architecture.md), [continuation](continuation.md), and [compatibility](compatibility.md); release gates live in the [release checklist](../RELEASE.md).
 
 ## Requirements
 
@@ -32,7 +32,7 @@ The maintained TypeScript modules are grouped by domain so the public HTTP contr
 
 `protocol/` contains the generated app-server protocol structures consumed by maintained code and tests. The exact `@openai/codex` dependency in `package.json` is the single version source for default runtime startup, generation, and the checked-in contract metadata. Runtime startup and generation invoke the package-owned JavaScript entry point through the current Node.js executable so it works consistently across supported operating systems; an explicit override remains a directly spawned host executable. Regenerate the artifacts with `npm run generate:protocol` after changing that pin; the command rejects an install/version mismatch, recreates both generated trees, and updates `protocol/VERSION.json`. Do not hand-edit generated output. `npm run check:protocol` seeds and regenerates a temporary protocol root, then compares every generated file and `VERSION.json` with the checked-in tree, so required CI detects removed, added, or changed artifacts without rewriting the workspace or using the network.
 
-`docs/codex-app-server.md` is a checked-in protocol reference. `plans/` contains the staged implementation record and compatibility decisions.
+`docs/codex-app-server.md` is a checked-in upstream protocol reference. [Architecture](architecture.md), [continuation](continuation.md), and [compatibility](compatibility.md) describe proxy-owned decisions.
 
 ## Development commands
 
@@ -54,9 +54,7 @@ The default local test command excludes `*.live.test.ts`, never makes a model ca
 
 The protocol cleanliness check seeds a temporary protocol root, regenerates there with the package-owned executable and version pin, compares the complete file set and contents, and removes the temporary root in a `finally` path. It never rewrites checked-in artifacts; `npm run generate:protocol` remains the explicit mutating command.
 
-`GET /v1/models` is the public compatibility route. It queries the active authenticated pinned app-server, aggregates all `model/list` pages, exposes visible model slugs accepted by Codex, and starts zero Codex threads or turns. When the temporary Responses Lite override is installed, it reflects that frozen catalog; otherwise it reflects app-server's ordinary catalog. The OpenAI-shaped `created: 0` and `owned_by: "openai"` fields are synthetic compatibility placeholders because app-server does not provide them. From a repository checkout, `npm run models:live` remains the hidden/full-metadata diagnostic: add `-- --include-hidden` for hidden entries or `-- --json` for complete metadata. It also starts zero model turns.
-
-Each new `serve` process makes one bounded, catalog-only refresh attempt before readiness. A temporary empty Codex home prevents the proxy's static override from masking upstream changes; only a nonempty cache for the pinned Codex version replaces the proxy-home cache. A successful fetch rebuilds the override and restarts the private app-server. A failed attempt keeps the previous cache with a warning, and startup requires a usable override. Recovery of an app-server within the same proxy process does not repeat the fetch.
+From a repository checkout, `npm run models:live` lists full app-server model metadata without starting a model turn; add `-- --include-hidden` for hidden entries or `-- --json` for complete metadata. The [README](../README.md#whats-supported) owns the public `GET /v1/models` behavior, and [compatibility](compatibility.md#temporary-model-catalog-override) explains startup catalog refresh.
 
 ## Updating upstream Codex
 
@@ -70,13 +68,13 @@ This resolves the npm `latest` release to an exact version; pass `-- <exact-vers
 
 Failures return a nonzero exit code and leave the attempted update available for agent inspection. The script does not launch an agent: invoke `$update-codex` to diagnose and repair compatibility, then run `npm run update:codex -- --check` to repeat validation without reinstalling or regenerating the working tree. Installation or generation failures stop immediately; independent validation gates all run even if one fails.
 
-Even a green run requires review of upstream protocol changes, policy behavior, existing proxy homes and continuation stores, and the version-specific Responses Lite workaround. Record the compatibility decision in the relevant plan and update current-version documentation before release. The normal pull-request OS matrix remains required; live verification is a separate opt-in below.
+Even a green run requires review of upstream protocol changes, policy behavior, existing proxy homes and continuation stores, and the version-specific Responses Lite workaround. Record the decision and persistence consequence in [compatibility](compatibility.md) and update current-version documentation before release. The normal pull-request OS matrix remains required; live verification is a separate opt-in below.
 
 ## Continuous integration
 
 Required CI runs `npm ci`, then the full `npm run check` on Linux and `npm test` on macOS and Windows. Formatting, linting, and protocol regeneration produce platform-independent results, so they are gated once rather than three times; every platform still builds, type-checks, runs the whole offline suite, and tests the packed CLI. Linux, macOS, and Windows all exercise the primary Node.js 24 LTS. Node.js 20 is the minimum supported line; the `engines` range accepts newer majors, and matrix lines are added as they are validated.
 
-CI sets `CODEX_TEST_COVERAGE` explicitly. The primary Node.js 24 Linux job alone runs coverage and its floors and publishes the offline `coverage/` directory; the other operating-system and Node.js compatibility jobs run the same tests without redundant instrumentation. Omitting the variable locally keeps coverage enabled. Coverage is limited to maintained source and thresholds are based on the Stage 07 baseline. Pull requests never run the live suite.
+CI sets `CODEX_TEST_COVERAGE` explicitly. The primary Node.js 24 Linux job alone runs coverage and its floors and publishes the offline `coverage/` directory; the other operating-system and Node.js compatibility jobs run the same tests without redundant instrumentation. Omitting the variable locally keeps coverage enabled. Coverage is limited to maintained source. Pull requests never run the live suite.
 
 The recorded floors describe a complete offline run, so they are enforced only where one is possible. Windows skips the POSIX-only fixture, permission, and executable suites and therefore reports coverage without enforcing the floors; `npm run check` is expected to pass there. Treat the Linux coverage job as the authoritative gate.
 
@@ -90,7 +88,7 @@ npm run test:live -- test/contract/system-prompt.live.test.ts
 
 The core contract below retains its separate 32-response ceiling. Running all live files now permits at most 34 responses in total (32 core plus two system-prompt responses). The system-prompt cases also run against the deterministic fake in the default offline suite.
 
-The live suite runs serially with only `gpt-6-luna`, caps captured diagnostics, and remains excluded from default tests. In addition to role-history, dynamic-tool, restart (the restart step expects fresh fallback with delivered tool batches), and disabled-capability coverage, its opt-in scenarios exercise a platform-neutral `workspace-write` flow that reads a random fixture through `commandExecution`, writes the same nonce through `fileChange`/`apply_patch`, and verifies the file on disk; a live `webSearch` turn with filesystem and agents unavailable; and exactly one spawned child that returns a nonce to its parent and reaches a completed `agentsStates` entry. The child scenario supplies explicit system instructions requiring the spawn and reports bounded call counts if that assertion fails. If the filesystem turn stops after its successful read without attempting the required write, the test permits one corrective continuation and combines both turns' lifecycle evidence; the suite-wide response ceiling includes that correction. The file/web app-server starts with subagents disabled; the separate spawn app-server starts with them explicitly enabled. This process-level separation proves filesystem access does not imply spawning and adds no per-request `x_codex` multi-agent field.
+The live suite runs serially with only `gpt-6-luna`, caps captured diagnostics, and remains excluded from default tests. In addition to role-history, dynamic-tool, restart (the restart step expects fresh fallback with delivered tool batches), and disabled-capability coverage, its opt-in scenarios exercise a platform-neutral `workspace-write` flow that reads a random fixture through `commandExecution`, writes the same nonce through `fileChange`/`apply_patch`, and verifies the file on disk; a live `webSearch` turn with filesystem and agents unavailable; and exactly one spawned child that returns a nonce to its parent. Child completion is proven by a nonce-bearing `agentsStates` entry or completed `subAgentActivity` plus the exact nonce in that child's completed thread history (read without starting model work). The child scenario supplies explicit system instructions requiring the spawn and reports bounded call counts if that assertion fails. If the filesystem turn stops after its successful read without attempting the required write, the test permits one corrective continuation and combines both turns' lifecycle evidence; the suite-wide response ceiling includes that correction. The file/web app-server starts with subagents disabled; the separate spawn app-server starts with them explicitly enabled. This process-level separation proves filesystem access does not imply spawning and adds no per-request `x_codex` multi-agent field.
 
 The core contract's hard cost guard is 32 distinct upstream model responses, deduplicated by `(threadId, responseId)` from `rawResponse/completed` across parent and child threads and retained across app-server restarts and both live backends. Here, the provider is the upstream model service used by app-server; one proxy-issued `turn/start` can produce several of these responses around tool calls, and child threads produce their own. The guard interrupts further work at the limit. A spawn run fails rather than undercounting if the app-server does not expose the child thread's raw completion. No expected normal count is stated until an authorized live calibration records one.
 
@@ -110,6 +108,6 @@ Keep documentation aligned with its audience:
 
 - Describe installation, OpenAI compatibility, observable behavior, and `x_codex` extensions in `README.md`.
 - Record architecture, repository layout, contributor workflows, and testing details under `docs/`.
-- Record product decisions, stage status, acceptance gates, and compatibility consequences in `plans/`.
+- Record current runtime decisions in [architecture](architecture.md) and [continuation](continuation.md), upstream compatibility decisions in [compatibility](compatibility.md), and release gates in the [release checklist](../RELEASE.md).
 
-When a design decision changes, update the relevant stage plan as well as any user-facing contract it affects. Always label `previous_response_id`, reasoning deltas, and internal tool-result deltas as `x_codex` extensions rather than standard Chat Completions behavior.
+When a design decision changes, update its topic page and any user-facing contract it affects. Label `previous_response_id`, reasoning deltas, and internal tool-result deltas as nonstandard extensions; only namespaced controls and metadata live under `x_codex`.

@@ -36,7 +36,7 @@ Repeat `npm run update:codex -- --check` after repairs. Do not repeatedly reinst
 
 ## Finish
 
-Update current-version claims in `README.md`, `protocol/CONTRACT.md`, and relevant docs; retain version numbers that describe historical decisions. Record the target version, compatibility decision, and persistence consequence in `plans/07-quality-and-ci.md` and `plans/08-packaging-and-release.md` as applicable. Update the changelog for observable changes.
+Update current-version claims in `README.md`, `protocol/CONTRACT.md`, and relevant docs; retain version numbers that describe historical decisions. Record the target version, compatibility decision, and persistence consequence in `docs/compatibility.md`, and update `RELEASE.md` if release gates change. Update the changelog for observable changes.
 
 Require the offline gates and the normal pull-request OS matrix before release. Live tests remain separately opt-in: state `gpt-6-luna` and the hard maximum of 32 deduplicated upstream model responses before an authorized run, following `docs/development.md`. Never persist runtime transcripts as fixtures or diagnostics.
 

@@ -14,7 +14,7 @@ This repository builds `codex-openai-proxy`, a localhost-only TypeScript CLI tha
     - Other model names may appear only when documenting generic client input or protocol history.
 - Keep examples safe by default: loopback hosts, `read-only` or `workspace-write`, temporary directories, and no secrets.
 - Do not paste access tokens, OAuth callbacks, user home paths, or captured production transcripts into docs or fixtures.
-- Update the relevant file in `plans/` when a design decision changes. Record the decision and its compatibility consequence.
+- Update the relevant topic in `docs/` when a design decision changes. Record its compatibility consequence there and update the README when user-visible behavior changes.
 
 ## Implementation conventions
 
@@ -42,4 +42,4 @@ This repository builds `codex-openai-proxy`, a localhost-only TypeScript CLI tha
 
 ## Completion standard
 
-A stage is complete only when its acceptance criteria pass, its decisions are reflected in the README and relevant plan, and mocked tests cover both success and failure paths. Any live verification must state its expected maximum number of model calls.
+A change is complete only when its acceptance criteria pass, its decisions are reflected in the README and relevant topic documentation, and mocked tests cover both success and failure paths. Any live verification must state its expected maximum number of model calls.

@@ -4,9 +4,9 @@ Record the command or workflow URL, UTC date, commit SHA, version, and result be
 
 ## Prepare the candidate
 
-- [ ] Confirm the candidate version and intended dist-tag. The first candidate is `0.1.0-rc.0` on `next`; the prerelease workflow rejects stable versions.
+- [ ] Confirm the candidate version in `package.json` and the intended `next` dist-tag. The prerelease workflow rejects stable versions.
 - [ ] Review the diff for credentials, login URLs, prompts, tool arguments/results, absolute personal paths, captured transcripts, and local state.
-- [ ] Refresh the generated app-server contract only if the exact `@openai/codex` pin changed: update the pin, run `npm ci` and `npm run generate:protocol`, review the complete generated diff, and commit `protocol/VERSION.json` with both generated trees. Otherwise run `npm run check:protocol` and record that the `0.146.0` snapshot is clean.
+- [ ] Refresh the generated app-server contract only if the exact `@openai/codex` pin changed: update the pin, run `npm ci` and `npm run generate:protocol`, review the complete generated diff, and commit `protocol/VERSION.json` with both generated trees. Otherwise run `npm run check:protocol` and record that the current pinned snapshot is clean.
 - [ ] Update [CHANGELOG.md](CHANGELOG.md). Keep the candidate marked pending until registry verification succeeds.
 - [ ] Run the deterministic offline gate from a clean install:
 
@@ -31,14 +31,7 @@ Record the command or workflow URL, UTC date, commit SHA, version, and result be
   npm audit
   ```
 
-### Recorded local result — 2026-07-16
-
-- `npm run check`: passed 19 test files and 155 tests with all coverage thresholds satisfied.
-- `npm run test:package`: passed exact-tarball installation, generated-bin version/help/start, health/readiness, and one synthetic Chat Completions response with zero model calls.
-- `npm pack --dry-run --json --ignore-scripts`: 51 files; 71,939 bytes packed; 295,941 bytes unpacked after the final published README revision.
-- `npm run test:package -- --registry-install`: passed locally from an isolated empty cache; remote operating-system evidence remains pending.
-
-These results are local source-tree evidence, not remote-matrix or registry evidence. Re-run them for any changed candidate and record the new tarball digest.
+Record fresh local results for the exact candidate under review. Prior local passes do not establish the current tarball, remote matrix, or registry result.
 
 ## Prove remote compatibility
 
@@ -50,7 +43,7 @@ These results are local source-tree evidence, not remote-matrix or registry evid
 
 This check costs model calls and requires explicit authorization. It is isolated from default tests and is never a pull-request prerequisite.
 
-- [ ] Before starting, record: model `gpt-6-luna`; hard maximum **24 deduplicated provider responses**; candidate version, commit SHA, and operator. Do not state an expected normal count until an authorized live calibration establishes it.
+- [ ] Before starting, record: model `gpt-6-luna`; hard maximum **34 deduplicated provider responses** for the full live configuration (32 core plus two system-prompt responses); candidate version, commit SHA, and operator. Do not state an expected normal count until an authorized live calibration establishes it.
 - [ ] Run the dedicated live configuration serially through the authorized `codex-live-tests` environment, or locally with the same pinned package and an existing ChatGPT login:
 
   ```sh
@@ -58,7 +51,7 @@ This check costs model calls and requires explicit authorization. It is isolated
   ```
 
 - [ ] After completion, record the **exact deduplicated provider-response count**, result, UTC date, and bounded diagnostic location. Count distinct `(threadId, responseId)` pairs from `rawResponse/completed` across parent and child threads, app-server restarts, and both isolated live backends. A range or “within limit” is not an exact count.
-- [ ] Confirm the source-level scenarios cover high `reasoning_effort`, streamed reasoning, reasoning- and internal-activity-stripped role-history replay, three consecutive full-history client-defined tool result continuations, usage covering every model request behind one response and closing the stream after the finish reason, default disabled-sandbox chat, completed-thread continuation after restarting both proxy and app-server, platform-neutral `workspace-write` command read plus `fileChange`/`apply_patch` write verified on disk, live web search with filesystem and agents unavailable, and exactly one spawned child with a completed nonce handoff. The child must produce an observable raw completion or the run fails. Do not persist credentials, login URLs, prompts, tool payloads, or raw live transcripts.
+- [ ] Confirm the source-level scenarios cover high `reasoning_effort`, streamed reasoning, reasoning- and internal-activity-stripped role-history replay, three consecutive full-history client-defined tool result continuations, usage covering every model request behind one response and closing the stream after the finish reason, default disabled-sandbox chat, completed-thread continuation after restarting both proxy and app-server, platform-neutral `workspace-write` command read plus `fileChange`/`apply_patch` write verified on disk, live web search with filesystem and agents unavailable, and exactly one child start (`spawnAgent` or `subAgentActivity`) and a completed nonce handoff. Prove the handoff through `agentsStates`, or through completed child activity plus completed child thread history. The child must produce an observable raw completion or the run fails. Do not persist credentials, login URLs, prompts, tool payloads, or raw live transcripts.
 
 This source-level live suite is a prepublication compatibility check. It does not prove the npm-registry artifact or first-run login; those have separate prerelease checks below.
 
@@ -66,7 +59,7 @@ This source-level live suite is a prepublication compatibility check. It does no
 
 ### Bootstrap an unclaimed package name once
 
-npm trusted publishing is configured from an existing package's settings. If `npm view codex-openai-proxy` shows that the package already exists and the expected npm owner controls it, skip this section and use OIDC below. If the name is unclaimed, reserve it with the tested `0.1.0-rc.0` candidate:
+npm trusted publishing is configured from an existing package's settings. If `npm view codex-openai-proxy` shows that the package already exists and the expected npm owner controls it, skip this section and use OIDC below. If the name is unclaimed, reserve it with the exact tested prerelease candidate:
 
 - [ ] Check the registry immediately before choosing a path. An `E404` from the first command means the name is not yet reserved; if it exists, verify the expected owner with the second command:
 
@@ -75,7 +68,7 @@ npm trusted publishing is configured from an existing package's settings. If `np
   npm owner ls codex-openai-proxy
   ```
 
-- [ ] Re-run `npm run check` and `npm run test:package -- --retain`, preserve the emitted `codex-openai-proxy-0.1.0-rc.0.tgz` path, and compute and record its digest before publication. The command retains the file only after its smoke passes. Name availability is race-prone until publication completes.
+- [ ] Re-run `npm run check` and `npm run test:package -- --retain`, preserve the emitted tarball path for the current `package.json` version, and compute and record its digest before publication. The command retains the file only after its smoke passes. Name availability is race-prone until publication completes.
 - [ ] In a private interactive terminal, authenticate as the intended npm package owner with write-enabled 2FA. Verify the account before changing the registry:
 
   ```sh
@@ -83,14 +76,14 @@ npm trusted publishing is configured from an existing package's settings. If `np
   npm whoami
   ```
 
-- [ ] Publish the exact tested tarball to `next`. Let npm prompt interactively for the one-time 2FA code; do not place the code in shell history, CI, or the evidence record:
+- [ ] Publish the exact tested tarball to `next`. Replace `X.Y.Z-rc.N` below with the version in the retained tarball's filename. Let npm prompt interactively for the one-time 2FA code; do not place the code in shell history, CI, or the evidence record:
 
   ```sh
-  npm publish ./codex-openai-proxy-0.1.0-rc.0.tgz --tag next --access public
+  npm publish ./codex-openai-proxy-X.Y.Z-rc.N.tgz --tag next --access public
   ```
 
 - [ ] Record this as a one-time non-OIDC bootstrap exception: npm owner, UTC time, commit SHA, tarball digest, pack metadata, local-gate results, registry integrity, and `next` dist-tag. Do not claim workflow provenance for this artifact.
-- [ ] Do not trigger the automated prerelease publisher for an already published `0.1.0-rc.0`; npm versions are immutable. Configure the package's trusted publisher immediately, and use a new candidate version for its first OIDC verification.
+- [ ] Do not trigger the automated prerelease publisher for the already published bootstrap version; npm versions are immutable. Configure the package's trusted publisher immediately, and use a new candidate version for its first OIDC verification.
 
 ### Publish subsequent candidates through OIDC
 
@@ -113,22 +106,22 @@ git push origin main
 
 ## Verify the registry
 
-- [ ] Set the exact version under review—`0.1.0-rc.0` for the bootstrap or the new candidate version for OIDC—then record its version, `next` dist-tag, integrity, tarball URL, repository, and license:
+- [ ] Set the exact version under review—the bootstrap version or the new OIDC candidate—and record its version, `next` dist-tag, integrity, tarball URL, repository, and license. Replace the placeholder with that version:
 
   ```sh
-  CODEX_PROXY_RELEASE_VERSION=0.1.0-rc.0
+  CODEX_PROXY_RELEASE_VERSION=X.Y.Z-rc.N
   npm view "codex-openai-proxy@${CODEX_PROXY_RELEASE_VERSION}" version dist-tags dist.integrity dist.tarball repository license --json
   ```
 
 - [ ] For an OIDC-published candidate, verify the npm provenance attestation links to the expected repository, workflow, `main` dispatch ref, dispatch commit, and tested tarball. Separately verify that the release tag names the generated version commit whose parent is that dispatch commit. Verify registry signatures and attestations from a clean temporary install where supported. For the one-time manual bootstrap, record that provenance is unavailable rather than claiming it passed.
 - [ ] Install the exact registry version in a clean temporary project with lifecycle scripts disabled, invoke `codex-openai-proxy --version` through its npm bin shim, and repeat the bounded published-package smoke.
 - [ ] In an explicitly authorized disposable login profile with no existing Codex session, start the exact registry-installed bin shim on loopback and record that browser or device-code login reaches `/ready`. An already-authenticated startup is not first-run login evidence. Do not record the authorization URL, device code, token, or profile path.
-- [ ] From the exact registry-installed bin shim, run the published-prerelease live scenarios with only `gpt-6-luna`: declare the hard maximum of **24 deduplicated provider responses** before starting, then record the exact distinct `(threadId, responseId)` count from `rawResponse/completed` across parent and child threads. Cover the source-level scenarios above, including disk-verified workspace writing, isolated live web search, exactly one child and its completed nonce handoff, and restart behavior. Do not claim a normal count before calibration. The fake packed smoke and source-level `npm run test:live` do not satisfy this item.
+- [ ] From the exact registry-installed bin shim, run the published-prerelease live scenarios with only `gpt-6-luna`: declare a hard maximum of **34 deduplicated provider responses** for the full live configuration before starting, then record the exact distinct `(threadId, responseId)` count from `rawResponse/completed` across parent and child threads. Cover the source-level scenarios above, including disk-verified workspace writing, isolated live web search, exactly one child start with a verified nonce handoff, and restart behavior. Do not claim a normal count before calibration. The fake packed smoke and source-level `npm run test:live` do not satisfy this item.
 - [ ] Confirm [CHANGELOG.md](CHANGELOG.md) records the verified publication date.
 
 ## Promote a stable release
 
-The Stage 08 workflow is prerelease-only and always publishes to `next`. It must not be used to move `latest`.
+The checked-in prerelease workflow always publishes to `next`. It must not be used to move `latest`.
 
 - [ ] Accept the prerelease evidence and close or explicitly defer every release-blocking issue.
 - [ ] Choose a stable version, update the changelog and package version, and add or approve a trusted-publishing path that rejects prerelease versions and publishes the stable version to `latest` with provenance.
@@ -145,7 +138,7 @@ The Stage 08 workflow is prerelease-only and always publishes to `next`. It must
   ```
 
 - [ ] Before changing tags, verify the replacement accepts the existing version-0 continuation store and the exact Codex contract, or document that users must keep the prior compatible package installed for continuation access.
-- [ ] Move the affected tag to a verified compatible version first, then deprecate the defective version. These concrete `next` examples replace `0.1.0-rc.1` and the message as appropriate; use `latest` instead of `next` for a stable rollback. Let npm prompt for 2FA and never record the one-time code:
+- [ ] Move the affected tag to a verified compatible version first, then deprecate the defective version. Replace the example versions and message as appropriate; use `latest` instead of `next` for a stable rollback. Let npm prompt for 2FA and never record the one-time code:
 
   ```sh
   npm dist-tag add codex-openai-proxy@0.1.0-rc.1 next
