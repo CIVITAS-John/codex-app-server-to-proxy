@@ -18,6 +18,7 @@ import {
 } from "../app-server/app-server.js";
 import { ensureAuthenticated } from "../app-server/auth.js";
 import { installResponsesLiteOverride } from "../app-server/responses-lite-override.js";
+import { refreshModelCache } from "../app-server/model-cache-refresh.js";
 import { abortableDelay } from "../core/abort.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -110,6 +111,7 @@ class AppServerSupervisor {
   #starting: AppServer | undefined;
   #initializing: Promise<AppServer> | undefined;
   #recovering = false;
+  #modelRefreshAttempted = false;
 
   constructor({ options, log, proxy, lifecycle }: AppServerSupervisorOptions) {
     this.#options = options;
@@ -221,6 +223,37 @@ class AppServerSupervisor {
             new Error("app-server exited during startup")
           );
 
+        if (!this.#modelRefreshAttempted) {
+          this.#modelRefreshAttempted = true;
+          let refreshed = false;
+          try {
+            await refreshModelCache({
+              codexHome: this.#options.codexHome,
+              codexPath: this.#options.codexPath,
+              root: this.#options.root,
+              shutdownTimeoutMs: this.#options.shutdownTimeoutMs,
+              log: this.#log,
+              signal: this.#lifecycle.signal,
+            });
+            refreshed = true;
+          } catch (error) {
+            if (this.#lifecycle.signal.aborted) throw error;
+            this.#log("warn", "model_cache_refresh_failed", {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+          if (refreshed) {
+            await installResponsesLiteOverride(
+              this.#options.codexHome,
+              this.#log,
+            );
+            // The static catalog and any rotated auth are startup-only state.
+            await next.stop();
+            if (this.#starting === next) this.#starting = undefined;
+            continue;
+          }
+        }
+
         if (!next.responsesLiteOverrideApplied && attempt === 0) {
           const override = await installResponsesLiteOverride(
             this.#options.codexHome,
@@ -234,6 +267,10 @@ class AppServerSupervisor {
             continue;
           }
         }
+        if (!next.responsesLiteOverrideApplied)
+          throw new Error(
+            "Codex model catalog override is unavailable after startup refresh.",
+          );
       } catch (error) {
         await this.#stopPartial(next);
         if (this.#starting === next) this.#starting = undefined;

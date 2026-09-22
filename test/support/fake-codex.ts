@@ -2,6 +2,7 @@ import type { InitializeResponse } from "../../protocol/generated/typescript/Ini
 import type { ConfigRequirementsReadResponse } from "../../protocol/generated/typescript/v2/ConfigRequirementsReadResponse.js";
 import {
   protocolInitializeResponse,
+  protocolModel,
   protocolResponse,
 } from "./protocol-fixtures.js";
 
@@ -36,6 +37,12 @@ export function fakeCodexScript(options: FakeCodexScriptOptions): string {
   const versionOutput = JSON.stringify(`codex-cli ${options.version}`);
   const initializeJson = JSON.stringify(initializeResponse);
   const requirementsJson = JSON.stringify(requirementsResponse);
+  const modelListJson = JSON.stringify(
+    protocolResponse("model/list", 0, {
+      data: [protocolModel("gpt-5.6-luna")],
+      nextCursor: null,
+    }).result,
+  );
   const setupSource = options.setup ?? "";
   const onLineSource = options.onLine?.(FAKE_CODEX_MESSAGE_IDENTIFIER) ?? "";
 
@@ -51,6 +58,7 @@ const readline = require("node:readline");
 ${setupSource}
 const initializeResponse = ${initializeJson};
 const requirementsResponse = ${requirementsJson};
+const modelListResponse = ${modelListJson};
 const lines = readline.createInterface({ input: process.stdin });
 lines.on("line", (line) => {
   const ${FAKE_CODEX_MESSAGE_IDENTIFIER} = JSON.parse(line);
@@ -61,6 +69,18 @@ ${onLineSource}
   }
   if (${FAKE_CODEX_MESSAGE_IDENTIFIER}.method === "configRequirements/read") {
     console.log(JSON.stringify({ id: ${FAKE_CODEX_MESSAGE_IDENTIFIER}.id, result: requirementsResponse }));
+    return;
+  }
+  if (${FAKE_CODEX_MESSAGE_IDENTIFIER}.method === "model/list") {
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const cachePath = path.join(process.env.CODEX_HOME, "models_cache.json");
+    fs.writeFileSync(cachePath, JSON.stringify({
+      client_version: ${JSON.stringify(options.version)},
+      fetched_at: "fixture",
+      models: [{ slug: "gpt-5.6-luna", use_responses_lite: true }]
+    }));
+    console.log(JSON.stringify({ id: ${FAKE_CODEX_MESSAGE_IDENTIFIER}.id, result: modelListResponse }));
   }
 });
 `;

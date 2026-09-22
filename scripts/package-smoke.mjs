@@ -221,7 +221,8 @@ async function removeSmokeTree(path) {
 /** Creates a deterministic fake for the installed package-owned Codex binary. */
 function fakeCodexSource(codexVersion) {
   return `#!/usr/bin/env node
-import { appendFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 if (process.argv.includes("--version")) {
   process.stdout.write("codex-cli ${codexVersion}\\n");
@@ -269,9 +270,13 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     account: { type: "chatgpt", email: null, planType: "unknown" },
     requiresOpenaiAuth: true
   }});
-  else if (message.method === "model/list") send({ id: message.id, result: {
-    data: [model], nextCursor: null
-  }});
+  else if (message.method === "model/list") {
+    writeFileSync(join(process.env.CODEX_HOME, "models_cache.json"), JSON.stringify({
+      client_version: "${codexVersion}", fetched_at: "fixture",
+      models: [{ slug: "gpt-5.6-luna", use_responses_lite: true }]
+    }));
+    send({ id: message.id, result: { data: [model], nextCursor: null }});
+  }
   else if (message.method === "thread/start") send({ id: message.id, result: {
     thread, model: "gpt-5.6-luna", modelProvider: "openai", serviceTier: null, cwd,
     runtimeWorkspaceRoots: [], instructionSources: [], approvalPolicy: "never",
@@ -491,6 +496,14 @@ async function main() {
     try {
       const listening = await waitForEvent(() => serverStderr, "server_listening");
       await waitForEvent(() => serverStderr, "app_server_ready");
+      const startupMethods = (await readFile(rpcObservationPath, "utf8")).trim().split("\n");
+      assert.equal(startupMethods.includes("model/list"), true);
+      assert.equal(startupMethods.includes("thread/start"), false);
+      assert.equal(startupMethods.includes("turn/start"), false);
+      const refreshedCache = JSON.parse(
+        await readFile(join(codexHome, "models_cache.json"), "utf8"),
+      );
+      assert.equal(refreshedCache.client_version, installedCodex.version);
       assert.equal(listening.proxy_version, packageJson.version);
       assert.equal(listening.codex_version, installedCodex.version);
       assert.equal(listening.subagents_enabled, false);

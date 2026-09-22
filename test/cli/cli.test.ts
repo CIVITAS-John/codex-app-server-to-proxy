@@ -364,7 +364,7 @@ testWithPosixExecutable(
 );
 
 testWithPosixExecutable(
-  "CLI restarts setup once when Codex creates the model cache",
+  "CLI refreshes the model cache before exposing the replacement app-server",
   async () => {
     await withTempDir(async (directory) => {
       const fake = join(directory, "codex");
@@ -422,7 +422,7 @@ if (!fs.existsSync(cachePath))
       let exited = false;
       try {
         await waitForText(() => stderr, "app_server_ready");
-        assert.equal(await readFile(starts, "utf8"), "2");
+        assert.equal(await readFile(starts, "utf8"), "3");
         const override = JSON.parse(
           await readFile(
             join(codexHome, "models.no-responses-lite.json"),
@@ -768,7 +768,7 @@ fs.writeFileSync(launches, String(count));
 process.on("SIGTERM", () => process.exit(0));`,
           onLine: (message) => `  if (${message}.method === "account/read") {
     console.log(JSON.stringify({ id: ${message}.id, result: ${embeddedProtocolResults.authenticatedAccount} }));
-    if(count===1) setTimeout(()=>process.exit(23),250);
+    if(count===3) setTimeout(()=>process.exit(23),250);
     return;
   }
 `,
@@ -804,7 +804,7 @@ process.on("SIGTERM", () => process.exit(0));`,
         await waitForText(() => stderr, "app_server_restarted", 8_000);
         const ready = await fetch(`http://127.0.0.1:${port}/ready`);
         assert.equal(ready.status, 200);
-        assert.equal(Number(await readFile(launches, "utf8")), 2);
+        assert.equal(Number(await readFile(launches, "utf8")), 4);
       } finally {
         child.kill("SIGTERM");
         await once(child, "exit");
@@ -830,7 +830,7 @@ testWithPosixExecutable(
 const launches = ${JSON.stringify(launches)};
 const count = Number(fs.existsSync(launches) ? fs.readFileSync(launches, "utf8") : 0) + 1;
 fs.writeFileSync(launches, String(count));
-if (count === 1) {
+if (count !== 4) {
   process.on("SIGTERM", () => process.exit(0));
 } else {
   process.on("SIGTERM", () => setTimeout(() => {
@@ -843,12 +843,12 @@ if (count === 1) {
 }`,
           onLine: (
             message,
-          ) => `  if (count === 2 && ${message}.method === "initialize") {
+          ) => `  if (count === 4 && ${message}.method === "initialize") {
     return;
   }
   if (${message}.method === "account/read") {
     console.log(JSON.stringify({ id: ${message}.id, result: ${embeddedProtocolResults.authenticatedAccount} }));
-    if (count === 1) setTimeout(() => process.exit(23), 100);
+    if (count === 3) setTimeout(() => process.exit(23), 250);
     return;
   }`,
         }),

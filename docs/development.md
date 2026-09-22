@@ -56,6 +56,8 @@ The protocol cleanliness check seeds a temporary protocol root, regenerates ther
 
 `GET /v1/models` is the public compatibility route. It queries the active authenticated pinned app-server, aggregates all `model/list` pages, exposes visible model slugs accepted by Codex, and starts zero Codex threads or turns. When the temporary Responses Lite override is installed, it reflects that frozen catalog; otherwise it reflects app-server's ordinary catalog. The OpenAI-shaped `created: 0` and `owned_by: "openai"` fields are synthetic compatibility placeholders because app-server does not provide them. From a repository checkout, `npm run models:live` remains the hidden/full-metadata diagnostic: add `-- --include-hidden` for hidden entries or `-- --json` for complete metadata. It also starts zero model turns.
 
+Each new `serve` process makes one bounded, catalog-only refresh attempt before readiness. A temporary empty Codex home prevents the proxy's static override from masking upstream changes; only a nonempty cache for the pinned Codex version replaces the proxy-home cache. A successful fetch rebuilds the override and restarts the private app-server. A failed attempt keeps the previous cache with a warning, and startup requires a usable override. Recovery of an app-server within the same proxy process does not repeat the fetch.
+
 ## Updating upstream Codex
 
 Use the repository-local `$update-codex` skill (`.agents/skills/update-codex/SKILL.md`) to update the pin and handle compatibility repairs. Its automated first attempt is:
