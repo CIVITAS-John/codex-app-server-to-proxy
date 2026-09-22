@@ -423,15 +423,26 @@ if (!fs.existsSync(cachePath))
       try {
         await waitForText(() => stderr, "app_server_ready");
         assert.equal(await readFile(starts, "utf8"), "3");
+        const refreshed = JSON.parse(
+          await readFile(join(codexHome, "models_cache.json"), "utf8"),
+        ) as { models: Array<{ slug: string }> };
         const override = JSON.parse(
           await readFile(
             join(codexHome, "models.no-responses-lite.json"),
             "utf8",
           ),
-        ) as { models: Array<{ use_responses_lite: boolean }> };
+        ) as {
+          models: Array<{ slug: string; use_responses_lite: boolean }>;
+        };
         assert.deepEqual(
-          override.models.map((model) => model.use_responses_lite),
-          [false, false],
+          override.models.map((model) => ({
+            slug: model.slug,
+            use_responses_lite: model.use_responses_lite,
+          })),
+          refreshed.models.map(({ slug }) => ({
+            slug,
+            use_responses_lite: false,
+          })),
         );
         assert.match(
           await readFile(join(codexHome, "config.toml"), "utf8"),
