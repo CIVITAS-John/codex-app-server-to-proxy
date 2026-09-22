@@ -2,6 +2,10 @@
 
 All notable user-facing changes are recorded here. This project follows semantic versioning once a version is published.
 
+## Unreleased
+
+- Updated the `@openai/codex` runtime and generated experimental app-server contract from `0.154.0` to `0.155.1`. The proxy's Chat Completions surface and persisted home/store formats are unchanged; new generated methods remain private and the Responses Lite workaround remains installed.
+
 ## 0.1.0-rc.25 — September 14, 2026
 
 - Updated the `@openai/codex` runtime and generated experimental app-server contract from `0.153.4` to `0.154.0`. The proxy's public Chat Completions surface and persisted home/store formats are unchanged; the Responses Lite workaround remains in place pending live proof that it can be removed.

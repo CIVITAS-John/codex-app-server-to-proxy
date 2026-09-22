@@ -199,6 +199,25 @@ async function stopShim(child) {
     throw new Error("Installed package shim did not stop.");
 }
 
+/** Retries transient Windows locks while closing the isolated package-smoke tree. */
+async function removeSmokeTree(path) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = error?.code;
+      if (
+        process.platform !== "win32" ||
+        !["EBUSY", "EPERM"].includes(code) ||
+        attempt >= 59
+      )
+        throw error;
+      await delay(500);
+    }
+  }
+}
+
 /** Creates a deterministic fake for the installed package-owned Codex binary. */
 function fakeCodexSource(codexVersion) {
   return `#!/usr/bin/env node
@@ -525,7 +544,7 @@ async function main() {
     }
   } finally {
     try {
-      await rm(installRoot, { recursive: true, force: true });
+      await removeSmokeTree(installRoot);
     } finally {
       if (!retainTarball || !smokePassed)
         await rm(tarballPath, { force: true });

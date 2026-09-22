@@ -9,12 +9,15 @@ import {
 } from "../support/chat-backends.js";
 import { ProviderCallBudget } from "../support/provider-call-budget.js";
 
+/** Model selected for this explicitly authorized live contract. */
+const LIVE_MODEL = "gpt-6-luna";
+
 /** Shared hard ceiling spanning both authenticated live app-server backends. */
 const providerBudget = new ProviderCallBudget(MAX_LIVE_PROVIDER_CALLS);
 
 registerChatContract(
   "real Codex app-server (agents disabled)",
-  () => startLiveChatBackend(providerBudget),
+  () => startLiveChatBackend(providerBudget, LIVE_MODEL),
   {
     scenarios: [
       "role-history-sse",
@@ -25,6 +28,7 @@ registerChatContract(
       "live-web-search",
     ],
     maxProviderCalls: MAX_LIVE_PROVIDER_CALLS,
+    model: LIVE_MODEL,
     // The interrupted tool-call response must return quickly with exact usage;
     // the run reports how long it and its continuation took. Numbers only.
     reportToolTimings: true,
@@ -33,10 +37,11 @@ registerChatContract(
 
 registerChatContract(
   "real Codex app-server (agents enabled)",
-  () => startLiveSpawnChatBackend(providerBudget),
+  () => startLiveSpawnChatBackend(providerBudget, LIVE_MODEL),
   {
     scenarios: ["spawn-child-agent"],
     maxProviderCalls: MAX_LIVE_PROVIDER_CALLS,
+    model: LIVE_MODEL,
   },
 );
 

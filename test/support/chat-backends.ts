@@ -100,15 +100,17 @@ async function startConfiguredFakeChatBackend(
 /** Starts the authenticated package-owned Codex contract backend. */
 export async function startLiveChatBackend(
   providerBudget = new ProviderCallBudget(MAX_LIVE_PROVIDER_CALLS),
+  model = CONTRACT_MODEL,
 ): Promise<ChatContractBackend> {
-  return startConfiguredLiveChatBackend(false, false, providerBudget);
+  return startConfiguredLiveChatBackend(false, false, providerBudget, model);
 }
 
 /** Starts the isolated live backend whose process may spawn child agents. */
 export async function startLiveSpawnChatBackend(
   providerBudget = new ProviderCallBudget(MAX_LIVE_PROVIDER_CALLS),
+  model = CONTRACT_MODEL,
 ): Promise<ChatContractBackend> {
-  return startConfiguredLiveChatBackend(true, true, providerBudget);
+  return startConfiguredLiveChatBackend(true, true, providerBudget, model);
 }
 
 /** Creates one restartable live backend with a process-level agent policy. */
@@ -116,11 +118,18 @@ async function startConfiguredLiveChatBackend(
   agentsEnabled: boolean,
   requireChildProviderCalls: boolean,
   providerBudget: ProviderCallBudget,
+  model: string,
 ): Promise<ChatContractBackend> {
   const environment = await createContractEnvironment();
   return startRestartableBackend(
     environment,
-    () => startLiveChatBackendOnce(environment, agentsEnabled, providerBudget),
+    () =>
+      startLiveChatBackendOnce(
+        environment,
+        agentsEnabled,
+        providerBudget,
+        model,
+      ),
     { providerBudget, requireChildProviderCalls },
   );
 }
@@ -130,10 +139,11 @@ async function startLiveChatBackendOnce(
   environment: ContractEnvironment,
   agentsEnabled: boolean,
   providerBudget: ProviderCallBudget,
+  model: string,
 ): Promise<ChatContractBackend> {
   let appServer: AppServer | undefined;
   try {
-    await seedLiveModelCache(environment.codexHome);
+    await seedLiveModelCache(environment.codexHome, model);
     for (let attempt = 0; attempt < 2; attempt += 1) {
       appServer = await startAppServer({
         codexPath: process.env.CODEX_PATH ?? "codex",
@@ -264,7 +274,10 @@ async function startLiveChatBackendOnce(
 }
 
 /** Seeds isolated live runs from existing metadata without changing its owner. */
-async function seedLiveModelCache(codexHome: string): Promise<void> {
+async function seedLiveModelCache(
+  codexHome: string,
+  model: string,
+): Promise<void> {
   const sourceHomes = [
     process.env.CODEX_HOME,
     join(homedir(), ".codex-openai-proxy", "codex-home"),
@@ -276,8 +289,7 @@ async function seedLiveModelCache(codexHome: string): Promise<void> {
       const source = JSON.parse(
         await readFile(join(sourceHome, "models_cache.json"), "utf8"),
       ) as { models?: Array<{ slug?: unknown }> };
-      if (!source.models?.some((model) => model.slug === CONTRACT_MODEL))
-        continue;
+      if (!source.models?.some((entry) => entry.slug === model)) continue;
       const target = join(codexHome, "models_cache.json");
       await copyFile(join(sourceHome, "models_cache.json"), target);
       await chmod(target, 0o600);

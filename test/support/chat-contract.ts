@@ -148,6 +148,7 @@ export type ChatContractScenario =
 export interface ChatContractOptions {
   scenarios?: readonly ChatContractScenario[];
   maxProviderCalls?: number;
+  model?: string;
   /**
    * Reports live-only wall-clock timings for dynamic-tool continuations and
    * filesystem request phases. Output stays numeric or enumerated so run logs
@@ -183,6 +184,7 @@ export function registerChatContract(
     const scenarios = new Set(options.scenarios ?? OFFLINE_SCENARIOS);
     const maxProviderCalls =
       options.maxProviderCalls ?? MAX_OFFLINE_PROVIDER_CALLS;
+    const model = options.model ?? CONTRACT_MODEL;
 
     beforeAll(async () => {
       backend = await startBackend();
@@ -222,7 +224,7 @@ export function registerChatContract(
     if (scenarios.has("aggregate"))
       test("returns an OpenAI-shaped aggregate completion", async () => {
         const response = await chat({
-          model: CONTRACT_MODEL,
+          model: model,
           messages: [
             {
               role: "user",
@@ -245,7 +247,7 @@ export function registerChatContract(
         }>(raw, "aggregate completion");
         assert.match(body.id ?? "", /^chatcmpl_codex_/);
         assert.equal(body.object, "chat.completion");
-        assert.equal(body.model, CONTRACT_MODEL);
+        assert.equal(body.model, model);
         assert.equal(body.choices?.[0]?.index, 0);
         assert.equal(body.choices?.[0]?.message?.role, "assistant");
         assert.ok((body.choices?.[0]?.message?.content?.length ?? 0) > 0);
@@ -260,7 +262,7 @@ export function registerChatContract(
           // thread base instructions; user or replayed history must not satisfy this test.
           const expected = `contract-system-${randomBytes(16).toString("hex")}`;
           const response = await chat({
-            model: CONTRACT_MODEL,
+            model: model,
             reasoning_effort: "low",
             stream,
             messages: [
@@ -307,7 +309,7 @@ export function registerChatContract(
       test("replays a streamed response with reasoning stripped from history", async () => {
         const callsBefore = backend!.modelCalls();
         const first = await chat({
-          model: CONTRACT_MODEL,
+          model: model,
           reasoning_effort: "xhigh",
           messages: [
             { role: "system", content: "Answer briefly." },
@@ -378,7 +380,7 @@ export function registerChatContract(
         );
 
         const second = await chat({
-          model: CONTRACT_MODEL,
+          model: model,
           reasoning_effort: "high",
           messages: [
             { role: "system", content: "Answer briefly." },
@@ -464,7 +466,7 @@ export function registerChatContract(
         ];
         const firstStarted = Date.now();
         const firstResponse = await chat({
-          model: CONTRACT_MODEL,
+          model: model,
           messages: transcript,
           tools,
         });
@@ -561,7 +563,7 @@ export function registerChatContract(
 
           const resultStarted = Date.now();
           const resultResponse = await chat({
-            model: CONTRACT_MODEL,
+            model: model,
             messages: transcript,
             tools,
           });
@@ -622,7 +624,7 @@ export function registerChatContract(
         const resumesBefore = backend!.resumeCalls();
         const restartCallsBefore = backend!.modelCalls();
         const restarted = await chat({
-          model: CONTRACT_MODEL,
+          model: model,
           previous_response_id: completedBody.id,
           messages: [
             ...transcript,
@@ -721,7 +723,7 @@ export function registerChatContract(
           },
         ];
         const firstResponse = await chat({
-          model: CONTRACT_MODEL,
+          model: model,
           messages: [
             { role: "system", content: TOOL_CONCURRENCY_INSTRUCTIONS },
             {
@@ -796,7 +798,7 @@ export function registerChatContract(
         // pairs, inject the earlier user as history, and keep the final
         // user as the new turn's input, all on the same thread.
         const continuedResponse = await chat({
-          model: CONTRACT_MODEL,
+          model: model,
           previous_response_id: firstBody.id,
           tools,
           messages: [
@@ -883,7 +885,7 @@ export function registerChatContract(
       test("completes pure chat without exposing the disabled execution environment", async () => {
         const callsBefore = backend!.modelCalls();
         const response = await chat({
-          model: CONTRACT_MODEL,
+          model: model,
           messages: [
             {
               role: "user",
@@ -942,7 +944,7 @@ export function registerChatContract(
         const callsBefore = backend!.modelCalls();
         const resumesBefore = backend!.resumeCalls();
         const response = await chat({
-          model: CONTRACT_MODEL,
+          model: model,
           messages: [
             {
               role: "user",
@@ -1044,7 +1046,7 @@ export function registerChatContract(
         assert.match(responseId ?? "", /^chatcmpl_codex_/);
 
         const continued = await chat({
-          model: CONTRACT_MODEL,
+          model: model,
           previous_response_id: responseId,
           messages: [
             {
@@ -1071,7 +1073,7 @@ export function registerChatContract(
         assert.equal(backend!.resumeCalls(), resumesBefore + 1);
 
         const replayed = await chat({
-          model: CONTRACT_MODEL,
+          model: model,
           messages: [
             {
               role: "user",
@@ -1135,7 +1137,7 @@ export function registerChatContract(
             scenarioStarted,
           );
           const response = await chat({
-            model: CONTRACT_MODEL,
+            model: model,
             reasoning_effort: "medium",
             messages: [
               {
@@ -1168,7 +1170,7 @@ export function registerChatContract(
               scenarioStarted,
             );
             const correction = await chat({
-              model: CONTRACT_MODEL,
+              model: model,
               reasoning_effort: "medium",
               previous_response_id: body.id,
               messages: [
@@ -1277,7 +1279,7 @@ export function registerChatContract(
     if (scenarios.has("live-web-search"))
       test("exposes a correlated live web-search lifecycle without execution", async () => {
         const response = await chat({
-          model: CONTRACT_MODEL,
+          model: model,
           messages: [
             {
               role: "user",
@@ -1338,7 +1340,7 @@ export function registerChatContract(
       test("spawns exactly one child and completes a nonce handoff", async () => {
         const childCallsBefore = backend!.providerCalls().child;
         const response = await chat({
-          model: CONTRACT_MODEL,
+          model: model,
           messages: [
             {
               role: "user",
@@ -1426,11 +1428,11 @@ export function registerChatContract(
         // only syntactically rejected bodies belong in this no-model-work set.
         for (const body of [
           {
-            model: CONTRACT_MODEL,
+            model: model,
             messages: [{ role: "tool", content: "x" }],
           },
           {
-            model: CONTRACT_MODEL,
+            model: model,
             reasoning_effort: "unsupported",
             messages: [{ role: "user", content: "x" }],
           },
@@ -1461,7 +1463,7 @@ export function registerChatContract(
     if (scenarios.has("disconnect"))
       test("interrupts a disconnected stream and remains usable", async () => {
         const response = await chat({
-          model: CONTRACT_MODEL,
+          model: model,
           messages: [
             {
               role: "user",
@@ -1488,7 +1490,7 @@ export function registerChatContract(
         await backend!.waitForInterrupt();
 
         const followup = await chat({
-          model: CONTRACT_MODEL,
+          model: model,
           messages: [
             { role: "user", content: "Reply with one short acknowledgment." },
           ],
