@@ -104,7 +104,7 @@ Codex 0.153.4; its package version reads 0.1.0-rc.23 despite the report naming r
 Run the focused offline suites first, then `npm run check`. No live test is
 required to implement this change, and none is run during planning. If a live
 gate is requested, use the dedicated live configuration, serial execution,
-`gpt-5.6-luna`, capped output, and a maximum of two model responses: one tool-call
+`gpt-6-luna`, capped output, and a maximum of two model responses: one tool-call
 response and one results-plus-user continuation, with no automatic retry.
 
 ## Boundaries and risks

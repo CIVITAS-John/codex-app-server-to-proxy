@@ -11,7 +11,7 @@ import { protocolModel } from "../support/protocol-fixtures.js";
 
 /** Complete catalog entry used by the live-model script tests. */
 const catalogModel = {
-  ...protocolModel("gpt-5.6-luna", { id: "gpt-5.6-luna" }),
+  ...protocolModel("gpt-6-luna", { id: "gpt-6-luna" }),
   displayName: "GPT-5.4 mini",
   description: "Small Codex model",
   supportedReasoningEfforts: [
@@ -63,12 +63,12 @@ test("live model catalog follows pagination and preserves advertised order", asy
   ]);
   assert.deepEqual(
     models.map((model: { model: string }) => model.model),
-    ["gpt-5.6-luna", "hidden-model"],
+    ["gpt-6-luna", "hidden-model"],
   );
   assert.equal(
     formatModelCatalog(models),
     [
-      "gpt-5.6-luna (default)",
+      "gpt-6-luna (default)",
       "  GPT-5.4 mini; reasoning: medium, high",
       "hidden-model (hidden)",
       "  GPT-5.4 mini; reasoning: medium, high",

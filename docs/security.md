@@ -25,7 +25,7 @@ The proxy rejects every request containing an `Origin` header, even if the value
 
 ## Data and diagnostics audit
 
-Required CI is offline and uploads only maintained-source coverage. It does not upload app-server transcripts, login output, continuation state, or live-test diagnostics. Synthetic fixtures use placeholder identifiers, loopback addresses, temporary paths, and `gpt-5.6-luna`; they contain no captured production requests.
+Required CI is offline and uploads only maintained-source coverage. It does not upload app-server transcripts, login output, continuation state, or live-test diagnostics. Synthetic fixtures use placeholder identifiers, loopback addresses, temporary paths, and `gpt-6-luna`; they contain no captured production requests.
 
 Structured logs are plaintext and intentionally unredacted. Depending on the event, they may include prompts, message bodies, login URLs, credentials or tokens, cwd, tool names/arguments/results, filesystem paths, and raw child stderr. This applies at every log level; keep captures local and short-lived, and never publish or share them without reviewing their full contents. Continuation state does not retain login URLs or authentication tokens.
 
@@ -38,4 +38,4 @@ Before release:
 1. Run `npm ci && npm run check` from a clean tree.
 2. Confirm protocol regeneration is clean and coverage excludes generated artifacts.
 3. Keep runtime log captures out of fixtures and workflow artifacts; use only synthetic placeholders in checked-in diagnostics and review any capture before sharing.
-4. Run the opt-in live suite only with explicit authorization; state `gpt-5.6-luna` and the hard maximum of 32 distinct upstream model responses first. Count deduplicated `(threadId, responseId)` pairs from `rawResponse/completed` across parent and child threads; fail if child completions cannot be observed.
+4. Run the opt-in live suite only with explicit authorization; state `gpt-6-luna` and the hard maximum of 32 distinct upstream model responses first. Count deduplicated `(threadId, responseId)` pairs from `rawResponse/completed` across parent and child threads; fail if child completions cannot be observed.

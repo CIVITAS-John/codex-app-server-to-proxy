@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Logger } from "../core/logger.js";
@@ -61,7 +62,7 @@ async function writePrivateFileIfChanged(
   // user's config.toml and from logging an install that did not happen.
   if (current === content) return false;
 
-  const temporary = `${path}.tmp`;
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {
     await writeFile(temporary, content, { encoding: "utf8", mode: 0o600 });
     await rename(temporary, path);
@@ -106,14 +107,19 @@ function disableResponsesLite(source: string): {
   };
 }
 
-/** Renders the managed top-level override while preserving other Codex config. */
-function renderConfig(existing: string, catalogPath: string): string {
+/** Removes only the static catalog selection for a fresh Codex model fetch. */
+export function configWithoutModelCatalogOverride(existing: string): string {
   const withoutManagedBlock = existing.replace(CONFIG_BLOCK_PATTERN, "");
   const withoutCatalogKey = withoutManagedBlock.replace(
     MODEL_CATALOG_KEY_PATTERN,
     "",
   );
-  const remainder = withoutCatalogKey.replace(/^(?:\r?\n)+/u, "");
+  return withoutCatalogKey.replace(/^(?:\r?\n)+/u, "");
+}
+
+/** Renders the managed top-level override while preserving other Codex config. */
+function renderConfig(existing: string, catalogPath: string): string {
+  const remainder = configWithoutModelCatalogOverride(existing);
   const managedBlock = [
     CONFIG_BLOCK_START,
     "# Temporary workaround for the Codex 0.154.0 Responses request framing.",

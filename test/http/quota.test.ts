@@ -129,7 +129,7 @@ test("ordinary usage metadata never recovers or retries a failed request", async
         const resolved = await resolveUsageLimit({
           ...protocolRateLimitsResponse(
             protocolRateLimitSnapshot({
-              normalModelSlug: "gpt-5.6-luna",
+              normalModelSlug: "gpt-6-luna",
               primary,
             }),
           ),

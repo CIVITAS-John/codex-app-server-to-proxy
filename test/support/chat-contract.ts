@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, test } from "vitest";
 import { parseSseFrames } from "./http.js";
 
 /** Model fixed by the repository's live-test cost policy. */
-export const CONTRACT_MODEL = "gpt-5.6-luna";
+export const CONTRACT_MODEL = "gpt-6-luna";
 
 /** Hard provider-response ceiling shared by every paid live backend. */
 export const MAX_LIVE_PROVIDER_CALLS = 32;
@@ -1343,6 +1343,11 @@ export function registerChatContract(
           model: model,
           messages: [
             {
+              role: "system",
+              content:
+                "This is a child-agent protocol test. The user explicitly requires one child-agent spawn even though the task is simple. Spawn exactly one child, wait for its completed response, and then answer. Do not answer from the user message alone.",
+            },
+            {
               role: "user",
               content: `This is contract-spawn-child. Spawn exactly one child agent and instruct it to return only ${backend!.observationToken}. Wait for that child to finish, then reply with only the same nonce. Do not use filesystem or web tools.`,
             },
@@ -1363,7 +1368,11 @@ export function registerChatContract(
         const spawns = calls.filter(
           (call) => call.function.name === "spawnAgent",
         );
-        assert.equal(spawns.length, 1, "expected exactly one spawnAgent call");
+        assert.equal(
+          spawns.length,
+          1,
+          `expected exactly one spawnAgent call (observed ${calls.length} tool calls and ${backend!.providerCalls().child - childCallsBefore} child provider completions)`,
+        );
         const completedSpawn = results.find(
           (result) =>
             result.id === spawns[0]!.id &&

@@ -219,7 +219,7 @@ Run `npm run check` after implementation, including build and test type-checks.
 For live verification, retain the existing parallel-batch and three-consecutive-result coverage
 in the tool/restart scenario, adapting its final restart expectation. Run in the dedicated live
 configuration with **at most five upstream model responses across all attempts**, no retries,
-only `gpt-5.6-luna`, identical available tools with `tool_choice: "auto"`, loopback,
+only `gpt-6-luna`, identical available tools with `tool_choice: "auto"`, loopback,
 temporary state/root directories, and a pure marker tool:
 
 1. Fresh request includes a synthetic completed history round and requests the existing parallel

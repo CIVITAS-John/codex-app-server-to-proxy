@@ -24,7 +24,7 @@ test("Responses Lite override clones every model and preserves other config", as
         etag: "synthetic-etag",
         models: [
           {
-            slug: "gpt-5.6-luna",
+            slug: "gpt-6-luna",
             use_responses_lite: true,
             tool_mode: "code_mode_only",
             priority: 1,
@@ -47,7 +47,7 @@ test("Responses Lite override clones every model and preserves other config", as
       configPath,
       [
         'model_catalog_json = "C:\\\\old-catalog.json"',
-        'model = "gpt-5.6-luna"',
+        'model = "gpt-6-luna"',
         "",
         '[projects."C:\\\\workspace"]',
         'trust_level = "trusted"',
@@ -79,7 +79,7 @@ test("Responses Lite override clones every model and preserves other config", as
       })),
       [
         {
-          slug: "gpt-5.6-luna",
+          slug: "gpt-6-luna",
           use_responses_lite: false,
           tool_mode: undefined,
         },
@@ -105,7 +105,7 @@ test("Responses Lite override clones every model and preserves other config", as
       config.includes(`model_catalog_json = ${JSON.stringify(overridePath)}`),
     );
     assert.equal(config.includes("old-catalog"), false);
-    assert.ok(config.includes('model = "gpt-5.6-luna"'));
+    assert.ok(config.includes('model = "gpt-6-luna"'));
     assert.ok(config.includes('[projects."C:\\\\workspace"]'));
     assert.ok(config.includes('trust_level = "trusted"'));
 

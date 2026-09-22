@@ -181,7 +181,7 @@ All notable user-facing changes are recorded here. This project follows semantic
 
 ### Changed
 
-- Documentation and live-test examples use `gpt-5.6-luna`.
+- Documentation and live-test examples use `gpt-6-luna`.
 
 ## 0.1.0-rc.4 — July 23, 2026
 

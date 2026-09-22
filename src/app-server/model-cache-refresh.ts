@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Logger } from "../core/logger.js";
 import { PINNED_CODEX_VERSION, startAppServer } from "./app-server.js";
+import { configWithoutModelCatalogOverride } from "./responses-lite-override.js";
 
 /** Inputs for one best-effort startup refresh of Codex-owned model metadata. */
 export interface ModelCacheRefreshOptions {
@@ -114,8 +115,18 @@ export async function refreshModelCache(
   const scratchHome = await mkdtemp(
     join(tmpdir(), "codex-proxy-model-refresh-"),
   );
+  let refreshed: { cache: Buffer; modelCount: number } | undefined;
   try {
     await chmod(scratchHome, 0o700);
+    const selectedConfig = await readOptional(
+      join(options.codexHome, "config.toml"),
+    );
+    if (selectedConfig !== undefined)
+      await writeFile(
+        join(scratchHome, "config.toml"),
+        configWithoutModelCatalogOverride(selectedConfig.toString("utf8")),
+        { mode: 0o600 },
+      );
     const originalAuth = await readOptional(
       join(options.codexHome, "auth.json"),
     );
@@ -152,20 +163,24 @@ export async function refreshModelCache(
       )
     )
       throw new Error("Fresh Codex model cache has invalid version or models.");
-    await mkdir(options.codexHome, { recursive: true, mode: 0o700 });
-    await replacePrivateFile(
-      join(options.codexHome, "models_cache.json"),
-      cache,
-    );
-    options.log("info", "model_cache_refreshed", {
-      model_count: catalog.models.length,
-    });
+    refreshed = { cache, modelCount: catalog.models.length };
   } finally {
     await rm(scratchHome, {
       recursive: true,
       force: true,
-      maxRetries: 5,
-      retryDelay: 100,
+      maxRetries: 59,
+      retryDelay: 500,
     });
   }
+  if (refreshed === undefined)
+    throw new Error("Codex model cache refresh produced no metadata.");
+  // A cleanup failure leaves the prior cache intact, including its override.
+  await mkdir(options.codexHome, { recursive: true, mode: 0o700 });
+  await replacePrivateFile(
+    join(options.codexHome, "models_cache.json"),
+    refreshed.cache,
+  );
+  options.log("info", "model_cache_refreshed", {
+    model_count: refreshed.modelCount,
+  });
 }

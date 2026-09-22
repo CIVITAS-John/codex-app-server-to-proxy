@@ -39,7 +39,7 @@ export function fakeCodexScript(options: FakeCodexScriptOptions): string {
   const requirementsJson = JSON.stringify(requirementsResponse);
   const modelListJson = JSON.stringify(
     protocolResponse("model/list", 0, {
-      data: [protocolModel("gpt-5.6-luna")],
+      data: [protocolModel("gpt-6-luna")],
       nextCursor: null,
     }).result,
   );
@@ -78,7 +78,7 @@ ${onLineSource}
     fs.writeFileSync(cachePath, JSON.stringify({
       client_version: ${JSON.stringify(options.version)},
       fetched_at: "fixture",
-      models: [{ slug: "gpt-5.6-luna", use_responses_lite: true }]
+      models: [{ slug: "gpt-6-luna", use_responses_lite: true }]
     }));
     console.log(JSON.stringify({ id: ${FAKE_CODEX_MESSAGE_IDENTIFIER}.id, result: modelListResponse }));
   }

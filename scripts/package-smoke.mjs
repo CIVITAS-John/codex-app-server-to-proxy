@@ -245,7 +245,7 @@ const turn = (status) => ({
   error: null, startedAt: null, completedAt: null, durationMs: null
 });
 const model = {
-  id: "gpt-5.6-luna", model: "gpt-5.6-luna", upgrade: null, upgradeInfo: null,
+  id: "gpt-6-luna", model: "gpt-6-luna", upgrade: null, upgradeInfo: null,
   availabilityNux: null, displayName: "Package smoke model", description: "",
   modelSpecialty: null, hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "low", description: "" }],
   defaultReasoningEffort: "low", inputModalities: ["text"], supportsPersonality: false,
@@ -273,12 +273,12 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   else if (message.method === "model/list") {
     writeFileSync(join(process.env.CODEX_HOME, "models_cache.json"), JSON.stringify({
       client_version: "${codexVersion}", fetched_at: "fixture",
-      models: [{ slug: "gpt-5.6-luna", use_responses_lite: true }]
+      models: [{ slug: "gpt-6-luna", use_responses_lite: true }]
     }));
     send({ id: message.id, result: { data: [model], nextCursor: null }});
   }
   else if (message.method === "thread/start") send({ id: message.id, result: {
-    thread, model: "gpt-5.6-luna", modelProvider: "openai", serviceTier: null, cwd,
+    thread, model: "gpt-6-luna", modelProvider: "openai", serviceTier: null, cwd,
     runtimeWorkspaceRoots: [], instructionSources: [], approvalPolicy: "never",
     approvalsReviewer: "auto_review", sandbox: { type: "readOnly", networkAccess: false },
     activePermissionProfile: null, reasoningEffort: null, multiAgentMode: "explicitRequestOnly"
@@ -517,7 +517,7 @@ async function main() {
         object: "list",
         data: [
           {
-            id: "gpt-5.6-luna",
+            id: "gpt-6-luna",
             object: "model",
             created: 0,
             owned_by: "openai",
@@ -534,7 +534,7 @@ async function main() {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          model: "gpt-5.6-luna",
+          model: "gpt-6-luna",
           messages: [{ role: "user", content: "Return the package smoke fixture." }],
         }),
       });

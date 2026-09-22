@@ -37,8 +37,24 @@ test("startup refresh atomically replaces an old cache with current metadata", a
     await mkdir(home);
     const path = join(home, "models_cache.json");
     await writeFile(path, cache("0.154.0", "old-model"));
+    await writeFile(
+      join(home, "config.toml"),
+      [
+        "# BEGIN codex-openai-proxy temporary Responses Lite override",
+        'model_catalog_json = "old-catalog.json"',
+        "# END codex-openai-proxy temporary Responses Lite override",
+        'model_provider = "openai"',
+        "",
+      ].join("\n"),
+    );
     await refreshModelCache(
       options(home, async (scratchHome) => {
+        const scratchConfig = await readFile(
+          join(scratchHome, "config.toml"),
+          "utf8",
+        );
+        assert.equal(scratchConfig.includes("model_catalog_json"), false);
+        assert.match(scratchConfig, /model_provider = "openai"/u);
         await writeFile(
           join(scratchHome, "models_cache.json"),
           cache(PINNED_CODEX_VERSION, "new-model"),

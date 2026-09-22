@@ -95,7 +95,7 @@ test("GET /v1/models maps public selectors to the exact standard envelope", asyn
       [
         null,
         {
-          data: [protocolModel("gpt-5.6-luna", { id: "catalog_internal" })],
+          data: [protocolModel("gpt-6-luna", { id: "catalog_internal" })],
           nextCursor: null,
         },
       ],
@@ -114,7 +114,7 @@ test("GET /v1/models maps public selectors to the exact standard envelope", asyn
       object: "list",
       data: [
         {
-          id: "gpt-5.6-luna",
+          id: "gpt-6-luna",
           object: "model",
           created: 0,
           owned_by: "openai",

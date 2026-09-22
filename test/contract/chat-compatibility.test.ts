@@ -52,7 +52,7 @@ function postWithNodeHttp(
 // consuming a chunked SSE body through Node's own streaming client.
 test("a non-fetch HTTP client streams SSE through to the terminal marker", async () => {
   const response = await postWithNodeHttp(backend.origin, {
-    model: "gpt-5.6-luna",
+    model: "gpt-6-luna",
     messages: [{ role: "user", content: "compatibility streaming" }],
     stream: true,
   });

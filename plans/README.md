@@ -68,7 +68,7 @@ Stage 09 makes one synchronous admission decision before any app-server setup RP
 
 The product decisions above and cross-stage continuation rules below describe this implemented Stage 09 runtime. [Stage 09](09-thread-continuity.md) records the deferred follow-up work — native fork, remote-setup fallback, retry after dispatch, and hidden-history recovery — which is separate future work.
 
-The default TypeScript/Vitest configuration is deterministic and offline; opt-in live-test filenames are excluded. The expanded serial live contract retains its existing compatibility scenarios and adds disk-verified `workspace-write` command/file-change coverage, isolated live web search, and an exactly-one-child nonce handoff. It uses only `gpt-6-luna` and enforces a hard maximum of 32 deduplicated upstream model responses across parent and child threads; its normal count remains unknown until live calibration. On 2026-07-16, `npm run check` passed 19 files and 155 tests with coverage thresholds, the offline `npm run test:package` and local `--registry-install` mode passed, and the final dry pack contained 51 files at 71,939 bytes packed and 295,941 bytes unpacked.
+The default TypeScript/Vitest configuration is deterministic and offline; opt-in live-test filenames are excluded. The expanded serial live contract retains its existing compatibility scenarios and adds disk-verified `workspace-write` command/file-change coverage, isolated live web search, and an exactly-one-child nonce handoff. It uses only `gpt-6-luna` and enforces a hard maximum of 32 deduplicated upstream model responses across parent and child threads; its normal count remains unknown until full live calibration. On 2026-07-16, `npm run check` passed 19 files and 155 tests with coverage thresholds, the offline `npm run test:package` and local `--registry-install` mode passed, and the final dry pack contained 51 files at 71,939 bytes packed and 295,941 bytes unpacked.
 
 Local implementation is not evidence that npm, GitHub Actions, or every supported platform accepted the candidate. [Stage 08](08-packaging-and-release.md) records the local acceptance evidence separately from the pending external gates.
 
@@ -114,7 +114,7 @@ The first release is done when a fresh user can:
 
 - install the npm package and run one command;
 - complete ChatGPT browser login;
-- stream a `gpt-5.6-luna` chat completion;
+- stream a `gpt-6-luna` chat completion;
 - execute a client-defined tool across two HTTP requests;
 - continue via `previous_response_id`;
 - choose allowed policies;

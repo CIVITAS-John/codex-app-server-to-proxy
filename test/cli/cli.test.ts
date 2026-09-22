@@ -1041,7 +1041,7 @@ process.on("SIGTERM", () => setTimeout(() => process.exit(0), 200));`,
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            model: "gpt-5.6-luna",
+            model: "gpt-6-luna",
             messages: [{ role: "user", content: "Use lookup." }],
             tools: [
               {

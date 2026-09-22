@@ -50,7 +50,7 @@ These results are local source-tree evidence, not remote-matrix or registry evid
 
 This check costs model calls and requires explicit authorization. It is isolated from default tests and is never a pull-request prerequisite.
 
-- [ ] Before starting, record: model `gpt-5.6-luna`; hard maximum **24 deduplicated provider responses**; candidate version, commit SHA, and operator. Do not state an expected normal count until an authorized live calibration establishes it.
+- [ ] Before starting, record: model `gpt-6-luna`; hard maximum **24 deduplicated provider responses**; candidate version, commit SHA, and operator. Do not state an expected normal count until an authorized live calibration establishes it.
 - [ ] Run the dedicated live configuration serially through the authorized `codex-live-tests` environment, or locally with the same pinned package and an existing ChatGPT login:
 
   ```sh
@@ -123,7 +123,7 @@ git push origin main
 - [ ] For an OIDC-published candidate, verify the npm provenance attestation links to the expected repository, workflow, `main` dispatch ref, dispatch commit, and tested tarball. Separately verify that the release tag names the generated version commit whose parent is that dispatch commit. Verify registry signatures and attestations from a clean temporary install where supported. For the one-time manual bootstrap, record that provenance is unavailable rather than claiming it passed.
 - [ ] Install the exact registry version in a clean temporary project with lifecycle scripts disabled, invoke `codex-openai-proxy --version` through its npm bin shim, and repeat the bounded published-package smoke.
 - [ ] In an explicitly authorized disposable login profile with no existing Codex session, start the exact registry-installed bin shim on loopback and record that browser or device-code login reaches `/ready`. An already-authenticated startup is not first-run login evidence. Do not record the authorization URL, device code, token, or profile path.
-- [ ] From the exact registry-installed bin shim, run the published-prerelease live scenarios with only `gpt-5.6-luna`: declare the hard maximum of **24 deduplicated provider responses** before starting, then record the exact distinct `(threadId, responseId)` count from `rawResponse/completed` across parent and child threads. Cover the source-level scenarios above, including disk-verified workspace writing, isolated live web search, exactly one child and its completed nonce handoff, and restart behavior. Do not claim a normal count before calibration. The fake packed smoke and source-level `npm run test:live` do not satisfy this item.
+- [ ] From the exact registry-installed bin shim, run the published-prerelease live scenarios with only `gpt-6-luna`: declare the hard maximum of **24 deduplicated provider responses** before starting, then record the exact distinct `(threadId, responseId)` count from `rawResponse/completed` across parent and child threads. Cover the source-level scenarios above, including disk-verified workspace writing, isolated live web search, exactly one child and its completed nonce handoff, and restart behavior. Do not claim a normal count before calibration. The fake packed smoke and source-level `npm run test:live` do not satisfy this item.
 - [ ] Confirm [CHANGELOG.md](CHANGELOG.md) records the verified publication date.
 
 ## Promote a stable release

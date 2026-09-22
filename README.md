@@ -50,7 +50,7 @@ Notes:
 
 For the pinned Codex `0.155.1` runtime, proxy startup installs a temporary [model catalog override](https://developers.openai.com/codex/config-reference/#configtoml) in the selected Codex home. It copies `models_cache.json` to `models.no-responses-lite.json`, sets `use_responses_lite` to `false` on every model entry, and removes `tool_mode` from entries that originally used Responses Lite. Codex 0.155.1 no longer exposes the former `supports_parallel_tool_calls` catalog field, so conversion does not depend on it. This makes declared client functions direct Responses tools instead of serialized nested code-mode callbacks. The proxy adds a marked top-level `model_catalog_json` block to `config.toml`; the Responses Lite transformation never modifies the source cache.
 
-On each new proxy process, a private app-server with a fresh temporary Codex home requests the current model catalog without starting a model turn. The proxy accepts its cache only when the pinned Codex version and a nonempty model list are present, atomically replaces the selected home's cache, rebuilds the override, and restarts app-server before reporting ready. If refresh fails, startup keeps the previous cache and logs a warning; a home without any usable override cannot become ready. The generated catalog remains fixed for that proxy process, changes affected models from code-mode-only to direct tool routing, and replaces any prior top-level `model_catalog_json` value in the selected Codex home. The opt-in live contract supplies explicit system instructions and requires one model turn to issue two independent client tool calls in the same batch. Parallel calls are permitted by the override; the model still chooses which calls to emit. Remove the patch when the pinned runtime can expose and batch those calls without it.
+On each new proxy process, a private app-server with a fresh temporary Codex home requests the current model catalog without starting a model turn. It uses the selected home's ordinary Codex settings but omits the static catalog override for this fetch. The proxy accepts its cache only when the pinned Codex version and a nonempty model list are present, atomically replaces the selected home's cache, rebuilds the override, and restarts app-server before reporting ready. If refresh fails, startup keeps the previous cache and logs a warning; a home without any usable override cannot become ready. The generated catalog remains fixed for that proxy process, changes affected models from code-mode-only to direct tool routing, and replaces any prior top-level `model_catalog_json` value in the selected Codex home. The opt-in live contract supplies explicit system instructions and requires one model turn to issue two independent client tool calls in the same batch. Parallel calls are permitted by the override; the model still chooses which calls to emit. Remove the patch when the pinned runtime can expose and batch those calls without it.
 
 ## Instruction configuration
 
@@ -83,7 +83,7 @@ const client = new OpenAI({
 });
 
 const completion = await client.chat.completions.create({
-  model: "gpt-5.6-luna",
+  model: "gpt-6-luna",
   messages: [{ role: "user", content: "Summarize this project." }],
 });
 
@@ -96,7 +96,7 @@ Or with `curl`:
 curl http://127.0.0.1:8787/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "gpt-5.6-luna",
+    "model": "gpt-6-luna",
     "messages": [{"role": "user", "content": "Summarize this project."}]
   }'
 ```
@@ -135,7 +135,7 @@ Set `stream: true` as usual:
 curl -N http://127.0.0.1:8787/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "gpt-5.6-luna",
+    "model": "gpt-6-luna",
     "reasoning_effort": "high",
     "messages": [{"role": "user", "content": "Describe this repository."}],
     "stream": true
@@ -169,7 +169,7 @@ Pass a completed response's `id` as top-level `previous_response_id` to prefer c
 
 ```json
 {
-  "model": "gpt-5.6-luna",
+  "model": "gpt-6-luna",
   "messages": [{ "role": "user", "content": "Now explain the test strategy." }],
   "previous_response_id": "chatcmpl_codex_..."
 }
@@ -219,7 +219,7 @@ Per-request Codex controls live under a nonstandard top-level `x_codex` object:
 
 ```json
 {
-  "model": "gpt-5.6-luna",
+  "model": "gpt-6-luna",
   "messages": [{ "role": "user", "content": "Review this project." }],
   "x_codex": {
     "cwd": "/absolute/path/to/project",
@@ -240,6 +240,8 @@ The `disabled` sandbox provides no built-in shell or local filesystem reads or w
 On native Windows, the proxy defaults an unconfigured sandbox backend to `windows.sandbox = "unelevated"`, which does not require administrator setup. Explicit Windows sandbox settings and managed requirements take precedence. This backend selection is separate from `x_codex.sandbox`: requests must still opt into `read-only` or `workspace-write` for built-in filesystem access. The unelevated backend uses a restricted token and provides weaker isolation than the elevated backend; operators who have configured elevated sandboxing retain it. The isolated live-test Codex home uses the same default.
 
 Multi-agent availability is app-server process configuration, not a Chat Completions request policy. The proxy starts app-server with subagents disabled unless the operator passes `--subagents true`; the startup log records the effective value as `subagents_enabled`. The proxy exposes no per-request `x_codex` multi-agent field, so enabling `read-only`, `workspace-write`, or web search does not itself enable child spawning.
+
+The opt-in `gpt-6-luna` live child-agent contract explicitly instructs one spawn, then verifies the child completion and nonce handoff. It runs in a separate app-server process with subagents enabled and shares the core contract's 32-response ceiling.
 
 The JSON Schema ships with the package at `protocol/schemas/x-codex.schema.json`.
 
