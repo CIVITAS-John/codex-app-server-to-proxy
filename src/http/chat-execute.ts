@@ -49,6 +49,9 @@ import {
 /** Maximum buffered app-server activity retained for one HTTP response. */
 const MAX_INGRESS_EVENTS = 1_024;
 
+/** Quiet window for callbacks dispatched after their raw response completed. */
+const LATE_TOOL_CALLBACK_GRACE_MS = 1_000;
+
 /** Proxy-created thread subscriptions with raw boundaries on each transport. */
 const RAW_RESPONSE_THREADS = new WeakMap<JsonRpcTransport, Set<string>>();
 
@@ -211,17 +214,45 @@ class IngressQueue {
     signal: AbortSignal,
     threadId: string,
     turnId: string,
+    precedingBoundary: boolean,
   ): Promise<boolean> {
-    const hasBoundary = (): boolean =>
-      this.#ingress.some(
-        (event) =>
-          event.type === "notification" &&
-          event.method === "rawResponse/completed" &&
-          matchesTurn(event.params, threadId, turnId),
-      );
-    await this.wait(signal, { ready: hasBoundary });
-    this.assertHealthy();
-    return hasBoundary();
+    let callbackCount = 0;
+    let quietUntil = 0;
+    for (;;) {
+      this.assertHealthy();
+      if (signal.aborted) return false;
+      let closed = precedingBoundary;
+      let lateCallback = false;
+      let count = 0;
+      for (const event of this.#ingress) {
+        if (event.type === "dynamic_tool") {
+          count += 1;
+          if (closed) lateCallback = true;
+        } else if (matchesTurn(event.params, threadId, turnId)) {
+          // Raw items start the next response. An earlier completion must
+          // never close a later response within the same Codex turn.
+          if (
+            event.type === "raw_dynamic_tool" ||
+            event.method === "rawResponseItem/completed"
+          ) {
+            closed = false;
+            lateCallback = false;
+          } else if (event.method === "rawResponse/completed") closed = true;
+        }
+      }
+      if (count !== callbackCount) {
+        callbackCount = count;
+        quietUntil = Date.now() + LATE_TOOL_CALLBACK_GRACE_MS;
+      }
+      if (closed && (!lateCallback || Date.now() >= quietUntil)) return true;
+      const length = this.#ingress.length;
+      await this.wait(signal, {
+        ready: () => this.#ingress.length !== length,
+        ...(closed && lateCallback
+          ? { timeoutMs: quietUntil - Date.now() }
+          : {}),
+      });
+    }
   }
 
   /** Rejects every retained dynamic request during unsuspended cleanup. */
@@ -252,6 +283,7 @@ export type ContinuationFallbackReason =
   | "expired_tool_continuation"
   | "superseded_previous_response_id"
   | "ambiguous_tool_call_id"
+  | "tool_results_required"
   | "continuation_model_mismatch"
   | "continuation_reasoning_effort_mismatch"
   | "continuation_cwd_mismatch"
@@ -349,6 +381,17 @@ export async function execute(
         historicalToolCallIds,
       );
       if (call) queue.enqueue({ type: "raw_dynamic_tool", call, params });
+      else
+        // Keep only correlation, not provider payloads, to invalidate an older
+        // boundary even when the next raw item is private/internal activity.
+        queue.enqueue({
+          type: "notification",
+          method,
+          params: {
+            threadId: record(params)?.threadId,
+            turnId: record(params)?.turnId,
+          },
+        });
       return;
     }
     const behavior = notificationBehavior(method);
@@ -465,7 +508,9 @@ export async function execute(
     } else {
       assertDispatchable(options);
       if (admission.reason) {
-        validateFallbackHistory(request.messages);
+        validateFallbackHistory(request.messages, {
+          allowUnansweredCalls: admission.reason === "tool_results_required",
+        });
         // One diagnostic per dispatched fallback: fixed reason and request ID
         // only, so transcripts, tool arguments, and raw thread IDs stay out
         // of logs. Emitted after the gates that can still reject the request,
@@ -508,6 +553,9 @@ export async function execute(
       let pendingUsage: Usage | undefined;
       // Tracks whether this response persisted a pending tool batch.
       let capturedBatch: StoredToolCall[] | undefined;
+      // A raw completion may be consumed before app-server dispatches its
+      // callback. Retain it until another correlated raw item starts a response.
+      let precedingRawBoundary = false;
       try {
         while (!handle.terminal) {
           queue.assertHealthy();
@@ -544,6 +592,7 @@ export async function execute(
               options.signal,
               handle.threadId!,
               handle.turnId!,
+              precedingRawBoundary,
             );
             if (!batchCompleted)
               throw new HttpError(
@@ -609,6 +658,12 @@ export async function execute(
           if (next?.type !== "notification") continue;
           if (!matchesTurn(next.params, handle.threadId, handle.turnId))
             continue;
+          if (next.method === "rawResponseItem/completed") {
+            precedingRawBoundary = false;
+            continue;
+          }
+          if (next.method === "rawResponse/completed")
+            precedingRawBoundary = true;
           for (const event of normalizer.normalize(next.method, next.params)) {
             if (event.terminalError) {
               handle.terminal = true;
@@ -934,8 +989,10 @@ function prepareContinuation(
     // terminal block, which this same selection represents with an empty
     // suffix, so one view serves both without broadening implicit selection.
     const batch = request.toolBatch;
+    // No submitted results means this request cannot resume the pending batch.
+    // Start independently without consuming or acquiring the source checkpoint.
     if (!batch.results.length)
-      continuationFailure(409, "tool_results_required");
+      return { type: "fresh", reason: "tool_results_required" };
     results = validateToolResults(
       batch.assistant,
       batch.results,

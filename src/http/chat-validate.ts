@@ -528,13 +528,18 @@ export function freshExecutionHistory(
  * an ordinary fresh request, which drops unpairable history with a warning, a
  * fallback was selected because the requested continuation was unavailable, so
  * silently discarding the client's calls or results would lose work the
- * transcript claims to carry.
+ * transcript claims to carry. A pending continuation with no result block may
+ * abandon unanswered calls; fresh setup drops them with its existing warning.
  */
 export function validateFallbackHistory(
   messages: readonly ChatMessage[],
+  options: { allowUnansweredCalls?: boolean } = {},
 ): void {
   const prior = toHistoryItems(freshExecutionHistory(messages));
-  if (prior.unansweredCalls || prior.orphanResults)
+  if (
+    (prior.unansweredCalls && !options.allowUnansweredCalls) ||
+    prior.orphanResults
+  )
     invalid(
       "A fresh continuation requires every assistant tool call to be answered and every tool result to follow the assistant message that requested it.",
       "messages",

@@ -989,6 +989,132 @@ test("pending tool results followed by user messages resume the source thread na
   }, "codex-pending-suffix-users-");
 });
 
+test("pending continuations without results execute fresh and remain consumable", async () => {
+  // Eight successful responses each wait through the one-second usage grace.
+  for (const stream of [false, true]) {
+    for (const includeUnansweredCall of [false, true]) {
+      await withTempDir(async (directory) => {
+        const fake = new ContinuationAppServer();
+        const entries: Array<Record<string, unknown>> = [];
+        const responseId = "response_pending_missing_results";
+        const running = await startProxy(
+          directory,
+          fake,
+          pendingWeatherRecord(directory, responseId),
+          createLogger("info", (entry) => entries.push(entry)),
+        );
+        const source = persistedRecords(directory).find(
+          (record) => record.responseId === responseId,
+        );
+        try {
+          const response = await postChatCompletion(running.origin, {
+            model: "m",
+            stream,
+            previous_response_id: responseId,
+            messages: [
+              ...(includeUnansweredCall
+                ? [
+                    { role: "user", content: "earlier question" },
+                    { ...weatherAssistantMessage, content: "checking weather" },
+                  ]
+                : []),
+              { role: "user", content: "new question" },
+            ],
+          });
+          assert.equal(response.status, 200, await response.clone().text());
+          if (stream) {
+            const text = await response.text();
+            const chunks = parseSseChunks(text);
+            assert.deepEqual(chunks[0]?.x_codex, {
+              instructionSources: [],
+              threadReused: false,
+            });
+            assert.ok(text.includes("data: [DONE]"));
+          } else {
+            assert.equal(
+              (
+                (await response.json()) as {
+                  x_codex: { threadReused: boolean };
+                }
+              ).x_codex.threadReused,
+              false,
+            );
+          }
+          assert.deepEqual(fake.methods, [
+            "thread/start",
+            ...(includeUnansweredCall ? ["thread/inject_items"] : []),
+            "turn/start",
+          ]);
+          assert.deepEqual(fake.turnInputs, [
+            [{ type: "text", text: "new question", text_elements: [] }],
+          ]);
+          assert.deepEqual(
+            fake.injected.flatMap((injection) => injection.items),
+            includeUnansweredCall
+              ? [
+                  {
+                    type: "message",
+                    role: "user",
+                    content: [{ type: "input_text", text: "earlier question" }],
+                  },
+                  {
+                    type: "message",
+                    role: "assistant",
+                    content: [
+                      { type: "output_text", text: "checking weather" },
+                    ],
+                  },
+                ]
+              : [],
+          );
+          assert.deepEqual(
+            persistedRecords(directory).find(
+              (record) => record.responseId === responseId,
+            ),
+            source,
+          );
+          assert.deepEqual(
+            entries
+              .filter((entry) => entry.event === "continuation_fresh_fallback")
+              .map((entry) => entry.reason),
+            ["tool_results_required"],
+          );
+          assert.equal(
+            entries.filter(
+              (entry) => entry.event === "unpaired_history_tool_items_dropped",
+            ).length,
+            includeUnansweredCall ? 1 : 0,
+          );
+          // Starting independently must not claim or consume the pending source.
+          fake.methods.length = 0;
+          const continued = await postChatCompletion(running.origin, {
+            model: "m",
+            previous_response_id: responseId,
+            messages: [
+              weatherAssistantMessage,
+              { role: "tool", tool_call_id: "call_x", content: "sunny" },
+            ],
+          });
+          assert.equal(continued.status, 200, await continued.clone().text());
+          assert.equal(
+            ((await continued.json()) as { x_codex: { threadReused: boolean } })
+              .x_codex.threadReused,
+            true,
+          );
+          assert.deepEqual(fake.methods, [
+            "thread/read",
+            "thread/resume",
+            "thread/inject_items",
+            "turn/start",
+          ]);
+        } finally {
+          await running.proxy.close();
+        }
+      }, "codex-pending-no-results-");
+    }
+  }
+}, 15_000);
+
 test("pending suffix admission errors precede any RPC and leave the record consumable", async () => {
   await withTempDir(async (directory) => {
     const fake = new ContinuationAppServer();
@@ -999,11 +1125,16 @@ test("pending suffix admission errors precede any RPC and leave the record consu
       pendingWeatherRecord(directory, responseId),
     );
     const cases = [
-      // No results at all: the pending batch is still awaiting them.
+      // Missing pending results allow unanswered calls to be dropped, but
+      // never allow orphan results elsewhere in the fallback transcript.
       {
-        status: 409,
-        code: "tool_results_required",
-        messages: [{ role: "user", content: "just words" }],
+        status: 400,
+        code: "invalid_request",
+        messages: [
+          { role: "tool", tool_call_id: "call_orphan", content: "orphan" },
+          { role: "assistant", content: "earlier reply" },
+          { role: "user", content: "go" },
+        ],
       },
       // Repeating the call ID and name is not enough: the persisted
       // arguments are byte-identical to what the batch emitted.
@@ -1029,8 +1160,8 @@ test("pending suffix admission errors precede any RPC and leave the record consu
       // The old-round shape from the compatibility note: the only result
       // block belongs to a replayed earlier round while the pending batch's
       // results are missing. The selected final block does not match the
-      // pending batch, so it keeps its typed 400 — only a suffix with no
-      // result block at all is 409 tool_results_required.
+      // pending batch, so it keeps its typed 400. No result block at all
+      // instead selects fresh execution.
       {
         status: 400,
         code: "invalid_request",

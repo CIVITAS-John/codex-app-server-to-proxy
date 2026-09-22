@@ -21,6 +21,7 @@ import {
 import { withTempDir } from "../support/temp.js";
 import {
   createFakeTransport,
+  completeRawResponseBatch,
   completeTurn,
   interruptTurn,
   sendTokenUsage,
@@ -110,6 +111,13 @@ class ToolAppServer {
   replayAndRequestNewToolOnContinuation = false;
   /** Delay between callbacks from one parallel model response. */
   parallelToolGapMs = 0;
+  /** Ordering variants for callbacks dispatched on later event-loop turns. */
+  toolCallbackOrdering:
+    | "normal"
+    | "late"
+    | "new-response"
+    | "foreign-boundary"
+    | "missing-boundary" = "normal";
   /** Whether raw calls precede only the first serialized client callback. */
   serializeParallelCallbacksFromRawBatch = false;
   /** Whether a result turn replays raw history before one newly issued call. */
@@ -409,7 +417,47 @@ class ToolAppServer {
           };
           this.#toolTurnId = turnId;
           this.#toolTurnThread = threadId;
-          if (this.serializeParallelCallbacksFromRawBatch) {
+          if (this.toolCallbackOrdering !== "normal") {
+            if (this.toolCallbackOrdering !== "missing-boundary")
+              completeRawResponseBatch(
+                this.transport.send,
+                threadId,
+                this.toolCallbackOrdering === "foreign-boundary"
+                  ? "turn_foreign"
+                  : turnId,
+              );
+            if (this.toolCallbackOrdering === "new-response")
+              this.#send(
+                protocolNotification({
+                  method: "rawResponseItem/completed",
+                  params: {
+                    threadId,
+                    turnId,
+                    item: {
+                      type: "function_call",
+                      call_id: "internal_call",
+                      name: "internal_only",
+                      arguments: "{}",
+                    },
+                  },
+                }),
+              );
+            // The consumer has time to drain the boundary before either call.
+            for (const [index, call] of parallelCalls.entries())
+              setTimeout(
+                () =>
+                  suspendWithTools(
+                    this.transport.send,
+                    threadId,
+                    turnId,
+                    [call],
+                    {
+                      completeRawResponse: false,
+                    },
+                  ),
+                25 + index * 75,
+              );
+          } else if (this.serializeParallelCallbacksFromRawBatch) {
             for (const call of parallelCalls)
               this.#send(
                 protocolNotification({
@@ -748,18 +796,6 @@ test("parallel fragmented tool calls interrupt the turn and continue by injectin
       );
       assert.equal(first.choices[0]!.message.tool_results, undefined);
 
-      const busy = await postChatCompletion(origin, {
-        model: "m",
-        tools: [
-          { type: "function", function: { name: "first", parameters: {} } },
-          { type: "function", function: { name: "second", parameters: {} } },
-        ],
-        previous_response_id: first.id,
-        messages: [{ role: "user", content: "not results" }],
-      });
-      assert.equal(busy.status, 409);
-      assert.equal(await responseErrorCode(busy), "tool_results_required");
-
       const continuedResponse = await postChatCompletion(origin, {
         model: "m",
         tools: [
@@ -872,6 +908,129 @@ test("parallel fragmented tool calls interrupt the turn and continue by injectin
     }
   }, "codex-dynamic-tools-");
 });
+
+test("a consumed raw boundary still captures delayed parallel callbacks", async () => {
+  for (const stream of [false, true])
+    await withTempDir(async (directory) => {
+      const fake = new ToolAppServer(true, false, undefined, false, {
+        suspendOrder: "on_interrupt",
+      });
+      fake.toolCallbackOrdering = "late";
+      const { origin, proxy } = await startProxyWithTransport(
+        fake.transport.rpc,
+        {
+          root: process.cwd(),
+          stateDir: directory,
+          requestTimeoutMs: 3_000,
+        },
+      );
+      try {
+        const response = await postChatCompletion(origin, {
+          model: "m",
+          stream,
+          tools: [
+            { type: "function", function: { name: "first", parameters: {} } },
+            { type: "function", function: { name: "second", parameters: {} } },
+          ],
+          messages: [{ role: "user", content: "use both tools" }],
+        });
+        assert.equal(response.status, 200);
+        if (stream) {
+          const chunks = parseSseChunks<{
+            choices: Array<{
+              delta: { tool_calls?: Array<{ id: string }> };
+              finish_reason: string | null;
+            }>;
+          }>(await response.text());
+          assert.deepEqual(
+            chunks.flatMap((chunk) =>
+              chunk.choices.flatMap(
+                (choice) =>
+                  choice.delta.tool_calls?.map((call) => call.id) ?? [],
+              ),
+            ),
+            ["call_b", "call_a"],
+          );
+          assert.equal(
+            chunks.flatMap((chunk) => chunk.choices).at(-1)?.finish_reason,
+            "tool_calls",
+          );
+        } else {
+          const completion = (await response.json()) as CompletionBody;
+          assert.equal(completion.choices[0]!.finish_reason, "tool_calls");
+          assert.deepEqual(
+            completion.choices[0]!.message.tool_calls?.map((call) => call.id),
+            ["call_b", "call_a"],
+          );
+          const continued = await postChatCompletion(origin, {
+            model: "m",
+            tools: [
+              { type: "function", function: { name: "first", parameters: {} } },
+              {
+                type: "function",
+                function: { name: "second", parameters: {} },
+              },
+            ],
+            previous_response_id: completion.id,
+            messages: toolTranscript(completion.choices[0]!.message.tool_calls),
+          });
+          assert.equal(continued.status, 200);
+          assert.equal(
+            ((await continued.json()) as CompletionBody).choices[0]!.message
+              .content,
+            "after tools",
+          );
+        }
+        assert.deepEqual(fake.rejections, []);
+        assert.equal(
+          fake.methods.filter((method) => method === "turn/interrupt").length,
+          1,
+        );
+      } finally {
+        await proxy.close();
+      }
+    }, "codex-tool-boundary-before-callbacks-");
+}, 10_000);
+
+test("late callback collection respects cancellation and requires a current raw boundary", async () => {
+  for (const ordering of [
+    "late",
+    "new-response",
+    "foreign-boundary",
+    "missing-boundary",
+  ] as const)
+    await withTempDir(async (directory) => {
+      const fake = new ToolAppServer();
+      fake.toolCallbackOrdering = ordering;
+      const { origin, proxy } = await startProxyWithTransport(
+        fake.transport.rpc,
+        {
+          root: process.cwd(),
+          stateDir: directory,
+          requestTimeoutMs: ordering === "late" ? 500 : 1_800,
+        },
+      );
+      try {
+        const response = await postChatCompletion(origin, {
+          model: "m",
+          tools: [
+            { type: "function", function: { name: "first", parameters: {} } },
+            { type: "function", function: { name: "second", parameters: {} } },
+          ],
+          messages: [{ role: "user", content: "use both tools" }],
+        });
+        assert.equal(response.status, 408, ordering);
+        assert.equal(await responseErrorCode(response), "request_timeout");
+        assert.deepEqual(
+          fake.rejections.map((rejection) => rejection.id).sort(),
+          [901, 902],
+        );
+        assert.ok(fake.methods.includes("turn/interrupt"));
+      } finally {
+        await proxy.close();
+      }
+    }, "codex-tool-invalid-boundary-");
+}, 10_000);
 
 test("raw direct calls preserve a parallel batch when callbacks are serialized", async () => {
   await withTempDir(async (directory) => {
