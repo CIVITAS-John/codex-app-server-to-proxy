@@ -240,4 +240,5 @@ test("property: ignored fields produce exactly one sorted warning per request", 
   } finally {
     await backend.close();
   }
-});
+  // Twelve serial successful requests each include the terminal idle grace.
+}, 20_000);

@@ -114,6 +114,7 @@ interface FakeAppServerOptions {
   usageOnCompletion?: boolean;
   usageAfterTool?: boolean;
   extraModelRequest?: boolean;
+  lateUsageCorrections?: boolean;
   instructionSources?: string[];
 }
 
@@ -128,6 +129,7 @@ function fakeAppServer({
   usageOnCompletion = true,
   usageAfterTool = false,
   extraModelRequest = false,
+  lateUsageCorrections = false,
   instructionSources = [],
 }: FakeAppServerOptions = {}): FakeTransport {
   let thread = "";
@@ -241,6 +243,22 @@ function fakeAppServer({
             priorRequests: extraModelRequest ? 1 : 0,
             includeUsage: usageOnCompletion,
           });
+          if (lateUsageCorrections) {
+            // Two separate reads prove that neither initial usage nor the
+            // first correction closes the collection window early.
+            for (const [delay, reasoning] of [
+              [20, 3],
+              [40, 7],
+            ] as const)
+              setTimeout(() => {
+                sendTokenUsage(
+                  send,
+                  thread,
+                  "turn_test",
+                  tokenUsageFixture(reasoning),
+                );
+              }, delay).unref();
+          }
         }
       } else if (message.method === "turn/interrupt") {
         onInterrupt();
@@ -316,8 +334,7 @@ function policyCapturingAppServer(): {
             turn: protocolTurn("turn_policy", "inProgress"),
           }),
         );
-        // Policy assertions are unrelated to missing usage, so reproduce the
-        // live terminal sequence and avoid the proxy's defensive grace period.
+        // Reproduce the live terminal sequence with exact per-thread usage.
         const threadId = requestedThreadId(message);
         completeTurn(send, threadId, "turn_policy", {
           priorRequests: requestsByThread.get(threadId) ?? 0,
@@ -2279,10 +2296,10 @@ test("reports usage that app-server streams after turn completion", async () => 
     });
     assert.equal(streaming.status, 200);
     const chunks = streamedChunks(await streaming.text());
-    // The usage chunk stays last, after the chunk carrying the finish reason.
-    assert.equal(chunks.at(-2)?.choices?.[0]?.finish_reason, "stop");
+    // A client stopping at the finish reason must already have received usage.
+    assert.equal(chunks.at(-1)?.choices?.[0]?.finish_reason, "stop");
     assert.equal(
-      (chunks.at(-1)?.usage as Usage | undefined)?.completion_tokens_details
+      (chunks.at(-2)?.usage as Usage | undefined)?.completion_tokens_details
         ?.reasoning_tokens,
       0,
     );
@@ -2321,8 +2338,8 @@ test("recovers usage flushed after idle for aggregate and default streaming outp
     });
     assert.equal(streaming.status, 200);
     const chunks = streamedChunks(await streaming.text());
-    assert.equal(chunks.at(-2)?.choices?.[0]?.finish_reason, "stop");
-    assert.deepEqual(chunks.at(-1)?.usage, {
+    assert.equal(chunks.at(-1)?.choices?.[0]?.finish_reason, "stop");
+    assert.deepEqual(chunks.at(-2)?.usage, {
       prompt_tokens: 4,
       completion_tokens: 2,
       total_tokens: 6,
@@ -2331,6 +2348,55 @@ test("recovers usage flushed after idle for aggregate and default streaming outp
     });
   });
 });
+
+test.each([false, true])(
+  "keeps collecting corrected usage after idle (stream=%s)",
+  async (stream) => {
+    await withChatServer(async (origin, _proxy, useTransport) => {
+      useTransport(fakeAppServer({ lateUsageCorrections: true }));
+      const response = await fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "m",
+          messages: [{ role: "user", content: "Hello" }],
+          stream,
+        }),
+      });
+      assert.equal(response.status, 200);
+      const expected: Usage = {
+        prompt_tokens: 4,
+        completion_tokens: 9,
+        total_tokens: 13,
+        prompt_tokens_details: { cached_tokens: 0 },
+        completion_tokens_details: { reasoning_tokens: 7 },
+      };
+      if (!stream) {
+        assert.deepEqual(
+          ((await response.json()) as { usage?: Usage }).usage,
+          expected,
+        );
+        return;
+      }
+      const chunks = streamedChunks(await response.text());
+      let receivedUsage: Usage | undefined;
+      let usageChunks = 0;
+      // Model a consumer that stops as soon as it sees the finish reason.
+      for (const item of chunks) {
+        if (item.choices?.[0]?.finish_reason) break;
+        if (item.usage) {
+          assert.deepEqual(item.choices, []);
+          receivedUsage = item.usage;
+          usageChunks += 1;
+        }
+      }
+      assert.deepEqual(receivedUsage, expected);
+      assert.equal(usageChunks, 1);
+      assert.equal(chunks.filter((item) => item.usage).length, 1);
+      assert.equal(chunks.at(-1)?.choices?.[0]?.finish_reason, "stop");
+    });
+  },
+);
 
 test("warns once when idle grace expires without usage", async () => {
   const captured = captureLogs();
@@ -2540,9 +2606,9 @@ test("reports usage captured with a suspended client tool batch", async () => {
     });
     assert.equal(response.status, 200);
     const chunks = streamedChunks(await response.text());
-    assert.equal(chunks.at(-2)?.choices?.[0]?.finish_reason, "tool_calls");
+    assert.equal(chunks.at(-1)?.choices?.[0]?.finish_reason, "tool_calls");
     assert.equal(
-      (chunks.at(-1)?.usage as Usage | undefined)?.completion_tokens_details
+      (chunks.at(-2)?.usage as Usage | undefined)?.completion_tokens_details
         ?.reasoning_tokens,
       3,
     );
@@ -4375,7 +4441,8 @@ test("request policies map exactly, bind continuations, and honor managed denial
       await proxy?.close();
     }
   }, "codex-policy-http-");
-});
+  // The successful policy variants each wait through the terminal idle grace.
+}, 20_000);
 
 test("refreshing managed requirements on an unchanged transport takes effect", async () => {
   await withTempDir(async (directory) => {

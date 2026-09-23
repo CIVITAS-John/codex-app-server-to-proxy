@@ -348,18 +348,17 @@ export function registerChatContract(
           ),
           true,
         );
-        // Usage closes the stream. App-server reports it separately from turn
-        // completion, so a usage record that arrives with or after the terminal
-        // notification must still reach the client, and only after its chunk.
+        // Usage precedes the finish reason so clients stopping there receive
+        // counts even when app-server reports them after turn completion.
         assert.equal(
-          firstChunks.at(-2)?.choices?.[0]?.finish_reason,
+          firstChunks.at(-1)?.choices?.[0]?.finish_reason,
           "stop",
-          "the finish reason did not immediately precede the usage chunk",
+          "the finish reason did not immediately follow the usage chunk",
         );
-        const usage = firstChunks.at(-1)?.usage;
+        const usage = firstChunks.at(-2)?.usage;
         assert.ok(usage, "high-reasoning stream omitted usage");
         assert.equal(
-          firstChunks.at(-1)?.choices?.length,
+          firstChunks.at(-2)?.choices?.length,
           0,
           "the usage chunk carried choices",
         );
@@ -1032,7 +1031,7 @@ export function registerChatContract(
         // A built-in command splits this turn across more than one model
         // request, and app-server attributes usage per request. The response
         // must account for every request it reported, not the final one alone.
-        const builtInUsage = chunks.at(-1)?.usage;
+        const builtInUsage = chunks.at(-2)?.usage;
         assert.ok(
           builtInUsage,
           "built-in command stream omitted usage for a completed turn",

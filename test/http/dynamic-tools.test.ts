@@ -72,6 +72,8 @@ interface ToolAppServerUsage {
   /** Whether turns that run to completion report usage and an idle boundary. */
   onCompletion?: boolean;
   reasoningOutputTokens?: number;
+  /** Correct an initial zero-reasoning interrupt flush after idle. */
+  correctUsageAfterIdle?: boolean;
 }
 
 /** Scripted failure injection for the interrupt and injection RPCs. */
@@ -310,10 +312,14 @@ class ToolAppServer {
         // Live app-server flushes the interrupted turn's usage within
         // milliseconds of the interrupt, before completion and idle.
         interruptTurn(this.transport.send, threadId, turnId, {
-          reasoningOutputTokens: this.usage.reasoningOutputTokens ?? 0,
+          reasoningOutputTokens: this.usage.correctUsageAfterIdle
+            ? 0
+            : (this.usage.reasoningOutputTokens ?? 0),
           priorRequests: this.#attributedRequests(threadId) - 1,
           includeUsage: (this.usage.suspendOrder ?? "never") === "on_interrupt",
         });
+        if (this.usage.correctUsageAfterIdle)
+          setTimeout(() => this.sendUsage(turnId), 20).unref();
       } else if (message.method === "turn/start") {
         this.#turn += 1;
         if (this.failures.failTurnStartOnTurn === this.#turn) {
@@ -1155,8 +1161,7 @@ test("streaming continuations hide replayed client calls but expose new calls", 
 test("third full-history tool continuation correlates only its terminal result batch", async () => {
   for (const explicitPreviousResponseId of [false, true]) {
     await withTempDir(async (directory) => {
-      // This correlation case is unrelated to missing usage. Match the live
-      // terminal flush so six requests do not each pay the fallback grace.
+      // Match the live terminal flush across all six correlated requests.
       const fake = new ToolAppServer(true, false, undefined, false, {
         suspendOrder: "on_interrupt",
         onCompletion: true,
@@ -1223,7 +1228,8 @@ test("third full-history tool continuation correlates only its terminal result b
       }
     }, "codex-terminal-tool-results-");
   }
-});
+  // Six serial requests now each include the terminal idle grace.
+}, 15_000);
 
 /** Replays one transcript into a fresh thread and reports what it received. */
 async function replayFreshThread(
@@ -1605,9 +1611,7 @@ test("tool results followed by user messages continue natively with the final us
   for (const suffix of suffixes) {
     for (const stream of [false, true]) {
       await withTempDir(async (directory) => {
-        // The suffix behavior is unrelated to usage accounting. Match the
-        // live terminal flush so the loop's twelve requests do not each
-        // pay the trailing idle grace.
+        // Match the live terminal flush for each suffix and output mode.
         const fake = new ToolAppServer(true, false, undefined, false, {
           suspendOrder: "on_interrupt",
           onCompletion: true,
@@ -1738,7 +1742,8 @@ test("tool results followed by user messages continue natively with the final us
       }, "codex-tool-suffix-users-");
     }
   }
-});
+  // Twelve serial requests now each include the terminal idle grace.
+}, 20_000);
 
 test("an explicit pending suffix continuation ignores an earlier completed round reusing a pending call ID", async () => {
   await withTempDir(async (directory) => {
@@ -3107,7 +3112,7 @@ test("a tool batch on a fresh thread persists its exact all-zero boundary and ca
   }, "codex-dynamic-tools-");
 });
 
-test("usage captured before a tool call is reported without waiting", async () => {
+test("usage captured before a tool call still receives the full idle grace", async () => {
   await withTempDir(async (directory) => {
     const fake = new ToolAppServer(true, false, undefined, false, {
       suspendOrder: "before_tool_call",
@@ -3127,8 +3132,8 @@ test("usage captured before a tool call is reported without waiting", async () =
       assert.equal(first.choices[0]!.finish_reason, "tool_calls");
       assert.equal(first.usage?.completion_tokens_details?.reasoning_tokens, 3);
       assert.ok(
-        Date.now() - started < 1_000,
-        "the interrupted turn's idle boundary must end the wait immediately",
+        Date.now() - started >= 1_000,
+        "earlier usage must not close the idle grace window",
       );
     } finally {
       await proxy.close();
@@ -3162,6 +3167,34 @@ test("usage flushed by the interrupt is attributed to the tool-call response", a
         prompt_tokens_details: { cached_tokens: 0 },
         completion_tokens_details: { reasoning_tokens: 3 },
       });
+    } finally {
+      await proxy.close();
+    }
+  }, "codex-dynamic-tools-");
+});
+
+test("usage corrected after interrupted idle establishes the continuation boundary", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ToolAppServer(true, false, undefined, false, {
+      suspendOrder: "on_interrupt",
+      onCompletion: true,
+      reasoningOutputTokens: 3,
+      correctUsageAfterIdle: true,
+    });
+    const { origin, proxy } = await startProxy(directory, fake);
+    try {
+      const { first, continued } = await suspendAndContinue(origin);
+      const expected = {
+        prompt_tokens: 4,
+        completion_tokens: 5,
+        total_tokens: 9,
+        prompt_tokens_details: { cached_tokens: 0 },
+        completion_tokens_details: { reasoning_tokens: 3 },
+      };
+      assert.deepEqual(first.usage, expected);
+      // Persisting the corrected total prevents the continuation from charging
+      // the first response's newly reported reasoning a second time.
+      assert.deepEqual(continued.usage, expected);
     } finally {
       await proxy.close();
     }

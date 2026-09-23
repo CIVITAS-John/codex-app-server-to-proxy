@@ -340,7 +340,7 @@ type ReuseAdmission = Extract<ContinuationAdmission, { type: "reuse" }>;
  */
 const TERMINAL_USAGE_WAIT_MS = 10_000;
 
-/** Maximum trailing-usage grace after idle when no usage has been observed. */
+/** Fixed window after idle for late usage updates, including corrected counts. */
 const IDLE_USAGE_GRACE_MS = 1000;
 
 /** Runs or resumes a Codex thread and yields its normalized event stream. */
@@ -691,16 +691,14 @@ export async function execute(
             }
           }
         }
-        // Completed and interrupted turns normally reach idle. Known usage lets
-        // that boundary end collection immediately; otherwise idle opens a
-        // 1000 ms grace window for one trailsing usage flush.
+        // Earlier usage may cover only part of the turn. Keep collecting for
+        // the full idle grace even after receiving counts or a correction.
         if (!failed) {
           const collected = await collectTerminalUsage(
             queue,
             normalizer,
             handle,
             options.signal,
-            pendingUsage !== undefined,
           );
           if (collected.usage) pendingUsage = collected.usage;
           if (!pendingUsage)
@@ -733,8 +731,9 @@ export async function execute(
             "App-server transport was replaced before completion.",
           );
         if (!failed) {
-          if (pendingFinishReason) yield { finishReason: pendingFinishReason };
+          // Deliver usage once, before clients can stop on the finish reason.
           if (pendingUsage) yield { usage: pendingUsage };
+          if (pendingFinishReason) yield { finishReason: pendingFinishReason };
         }
       } catch (error) {
         // Failures must interrupt the app-server turn before ownership is released;
@@ -762,11 +761,9 @@ async function collectTerminalUsage(
   normalizer: EventNormalizer,
   handle: TurnHandle,
   signal: AbortSignal,
-  hasUsage: boolean,
 ): Promise<{
   usage: Usage | undefined;
   exitReason:
-    | "idle"
     | "idle_grace_expired"
     | "backstop_expired"
     | "aborted"
@@ -776,7 +773,6 @@ async function collectTerminalUsage(
   let usage: Usage | undefined;
   let idleAt: number | undefined;
   const deadline = Date.now() + TERMINAL_USAGE_WAIT_MS;
-  const usageKnown = (): boolean => hasUsage || usage !== undefined;
   while (true) {
     if (signal.aborted) return { usage, exitReason: "aborted" };
     const failureReason = queue.failureReason;
@@ -796,8 +792,6 @@ async function collectTerminalUsage(
         if (normalized.usage) usage = normalized.usage;
     }
     const now = Date.now();
-    if (idleAt !== undefined && usageKnown())
-      return { usage, exitReason: "idle" };
     if (idleAt !== undefined && now >= idleAt + IDLE_USAGE_GRACE_MS)
       return { usage, exitReason: "idle_grace_expired" };
     if (now >= deadline) return { usage, exitReason: "backstop_expired" };
