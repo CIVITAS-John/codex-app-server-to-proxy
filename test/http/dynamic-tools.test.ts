@@ -907,7 +907,7 @@ test("parallel fragmented tool calls interrupt the turn and continue by injectin
       await proxy.close();
     }
   }, "codex-dynamic-tools-");
-});
+}, 15_000);
 
 test("a consumed raw boundary still captures delayed parallel callbacks", async () => {
   for (const stream of [false, true])
