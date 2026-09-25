@@ -360,7 +360,7 @@ interface PreflightFallback {
 const TERMINAL_USAGE_WAIT_MS = 10_000;
 
 /** Fixed window after idle for late usage updates, including corrected counts. */
-const IDLE_USAGE_GRACE_MS = 1000;
+const IDLE_USAGE_GRACE_MS = 5000;
 
 /** Runs or resumes a Codex thread and yields its normalized event stream. */
 export async function execute(
