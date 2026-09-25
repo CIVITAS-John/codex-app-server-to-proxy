@@ -17,19 +17,22 @@ The [store schema](../protocol/schemas/response-mapping.schema.json) describes t
 
 ## Admission before execution
 
-[`prepareContinuation`](../src/http/chat-execute.ts) makes one synchronous choice before any app-server setup RPC. An explicit `previous_response_id` selects a record; without one, a terminal contiguous tool-result block can identify exactly one unexpired pending record by its call IDs. Implicit lookup can be disabled through the CLI. A compatible record must also have an available local thread lease. The proxy reports native reuse only after `thread/resume` and the next `turn/start` succeed.
+[`prepareContinuation`](../src/http/chat-execute.ts) makes one synchronous selection. An explicit `previous_response_id` selects a record; without one, a terminal contiguous tool-result block can identify exactly one unexpired pending record by its call IDs. Implicit lookup can be disabled through the CLI. Request validity and continuation compatibility are separate: malformed values, duplicate assistant IDs, and duplicate results in the selected batch are client errors, while a valid but mismatched batch selects fresh execution. Exact argument strings are required for native reuse, even when two strings parse to equivalent JSON. A ready record receiving results is also incompatible. A compatible record must have an available local thread lease.
 
 | Condition                                                                                                                  | Outcome                                                                                                                                              |
 | -------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | No selector and no terminal tool results                                                                                   | Start a fresh Codex thread.                                                                                                                          |
-| Unknown, expired, or superseded record; ambiguous or unavailable implicit lookup                                           | Execute the supplied transcript on a fresh thread after fallback-history validation.                                                                 |
-| Changed model, reasoning effort, working directory, tools, or effective policy; local thread contention                    | Execute the supplied transcript on a fresh thread, leaving the source mapping and any lease untouched.                                               |
+| Unknown, expired, or superseded record; ambiguous or unavailable implicit lookup                                           | Execute the supplied transcript on a fresh thread.                                                                                                  |
+| Changed model, reasoning effort, canonical working directory, declared tools, or effective policy; local thread contention | Execute the supplied transcript on a fresh thread, leaving the source mapping intact.                                                                |
+| Changed call IDs, names, exact arguments, missing or foreign results; results against a ready record                         | Execute the supplied transcript on a fresh thread, leaving the source mapping intact.                                                                |
 | Active client tools but no raw-response batch capability on the current transport                                          | Execute on a fresh thread. This includes active-tool continuations after an app-server restart. Tool-free restart continuation can reuse the thread. |
-| Matching current record and available lease                                                                                | Read and resume the mapped idle thread, then start one turn.                                                                                         |
-| Invalid results against a live pending batch, duplicate result IDs, or results sent to a live ready record                 | Return a typed client error before execution.                                                                                                        |
-| Remote read/resume failure, non-resumable app-server status, injection/start failure, cancellation, or persistence failure | Return the error; never dispatch a second execution.                                                                                                 |
+| Matching current record, compatible results, and available lease                                                           | Read and resume the mapped thread, inject results, then start one turn.                                                                              |
+| Busy/non-resumable read or resume status, returned thread ID mismatch, or RPC error response                               | Release source ownership and execute once on a fresh thread.                                                                                        |
+| Duplicate assistant call IDs or duplicate results in the selected batch                                                    | Return an ambiguous-input client error before execution.                                                                                            |
+| Malformed response envelope, cancellation, transport failure, local policy/configuration error, or persistence failure     | Return the error; do not dispatch a replacement execution.                                                                                          |
+| Pending replay protection, result injection, or turn start already attempted                                                | Return the error; do not dispatch a replacement execution.                                                                                          |
 
-Fresh fallback replays only the transcript supplied with that request. Its history must pair every assistant client-tool call with the immediately following result block, and must contain no orphan results; the exceptional case of abandoning a selected pending batch with no submitted results may leave its calls unanswered. The source checkpoint remains unchanged on fallback, so separate requests can execute equivalent work on different threads. Native reuse instead keeps Codex's existing thread history and supplies only new input. This is a preference for continuity, not exactly-once execution across requests.
+Fresh execution uses the ordinary fresh-request transcript mapping, whether selected initially or reached after a continuation mismatch or read/resume preflight. System messages become base instructions. Complete historical assistant tool-call/result pairs are injected; unanswered calls and orphan results are dropped and produce one structured `unpaired_history_tool_items_dropped` warning. The final user message becomes turn input, or input is empty when there is no user message. Repeated IDs across historical rounds are allowed, while duplicate assistant IDs and duplicate result IDs within the selected continuation batch remain ambiguous input. Only submitted history can be reconstructed: any earlier context omitted from the transcript is lost. Native reuse retains the stored Codex history and injects only the selected pending results and new user input. A fresh fallback reports `x_codex.threadReused: false` and leaves the source checkpoint intact for a later matching request.
 
 ## Tool batch and result handoff
 
@@ -49,16 +52,21 @@ sequenceDiagram
     Proxy-->>Client: tool_calls and opaque response ID
     Client->>Proxy: Tool results, optional following user messages
     Proxy->>Store: Select, validate, and lease checkpoint
-    Proxy->>Codex: thread/read, thread/resume
-    Proxy->>Store: Mark checkpoint expired before injection
-    Proxy->>Codex: thread/inject_items with call/result pairs
+    Proxy->>Codex: thread/read, thread/resume preflight
+    alt Compatible and resumable
+        Proxy->>Store: Mark checkpoint expired before injection
+        Proxy->>Codex: thread/inject_items with call/result pairs
+    else Incompatible or unavailable
+        Proxy->>Store: Release source lease and settle queued callbacks
+        Proxy->>Codex: thread/start with reconstructed transcript
+    end
     Proxy->>Codex: turn/start with final user message, if any
     Codex-->>Proxy: New turn events
     Proxy->>Store: Persist new response mapping
     Proxy-->>Client: Completion
 ```
 
-For a live pending batch, validation checks the immediately preceding assistant call batch against the recorded IDs, names, and argument strings, requiring each result exactly once. Implicit continuation accepts only a terminal tool-result block. An explicit selector can accept that block followed by consecutive user messages. Earlier suffix users are injected after the call/result pairs in order; the last becomes the new turn's input. A user message splitting a parallel result block is invalid. Earlier completed tool rounds in a replayed transcript do not participate in current-batch correlation.
+For a live pending batch, validation checks the immediately preceding assistant call batch against recorded IDs, names, and exact argument strings, requiring an unambiguous set of results for native reuse. A valid transcript that differs in IDs, names, arguments, or result membership falls back to a fresh thread. In particular, a user message within a parallel result block leaves the selected batch incomplete and selects fallback; it is not by itself malformed input. Implicit continuation accepts only a terminal tool-result block. An explicit selector can accept that block followed by consecutive user messages. On reuse, suffix users are injected after the result pairs in order; the last becomes turn input. On fallback, ordinary transcript mapping injects complete historical tool pairs and uses the last user message as input, dropping unanswered calls or orphan results with the structured warning. Earlier completed tool rounds in a replayed transcript do not participate in current-batch correlation, and repeated IDs across those rounds are allowed.
 
 Before injecting results, the proxy durably marks the pending record `expired`. This replay guard survives an ambiguous injection failure; successful injection then best-effort marks it `superseded`. A new response mapping is written for the continued turn. Process-local tombstones separately prevent delayed callbacks from an interrupted turn from being routed to a newer turn on the same thread.
 

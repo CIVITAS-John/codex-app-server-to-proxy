@@ -46,6 +46,21 @@ class ContinuationAppServer {
   readonly transport: JsonRpcTransport;
   readonly methods: string[] = [];
   readonly responderErrors: Array<Record<string, unknown>> = [];
+  /** All JSON-RPC responses to tool callbacks, including settled source callbacks. */
+  readonly callbackResponses: Array<Record<string, unknown>> = [];
+  /** Emits a source callback during thread/read before fallback preflight resolves. */
+  emitSourceCallbackOnRead = false;
+  /** Source status notifications emitted while a fresh thread starts. */
+  sourceFloodCount = 0;
+  /** Thread the source status flood claims to come from. */
+  sourceFloodThreadId = "thr_continuation";
+  /** Injects one synthetic RPC outcome at a specific continuation stage. */
+  readonly faults: Partial<
+    Record<
+      "thread/read" | "thread/resume" | "thread/inject_items" | "turn/start",
+      "error" | "malformed" | "wrong_thread"
+    >
+  > = {};
   /** Items each thread/inject_items call carried, in arrival order. */
   readonly injected: Array<{ threadId: string; items: unknown[] }> = [];
   /** Turn input lists, one entry per turn/start, in arrival order. */
@@ -66,9 +81,9 @@ class ContinuationAppServer {
   #toolTurn: { threadId: string; turnId: string } | undefined;
 
   constructor(
-    private readonly status: unknown = { type: "idle" },
+    public status: unknown = { type: "idle" },
     private readonly completionDelayMs = 0,
-    private readonly requestTool = false,
+    public requestTool = false,
     private readonly instructionSources: string[] = [],
   ) {
     this.transport = new JsonRpcTransport(this.#fromServer, this.#toServer);
@@ -116,6 +131,8 @@ class ContinuationAppServer {
   /** Implements only the calls needed by continuation tests. */
   #receive(message: Record<string, unknown>): void {
     if (typeof message.method !== "string") {
+      if (message.id === 901 || message.id === 902)
+        this.callbackResponses.push(message);
       if (message.id === 901 && message.error)
         this.responderErrors.push(message.error as Record<string, unknown>);
       return;
@@ -123,6 +140,18 @@ class ContinuationAppServer {
     this.methods.push(message.method);
     const id = message.id as number;
     const params = (message.params ?? {}) as Record<string, unknown>;
+    const fault = this.faults[message.method as keyof typeof this.faults];
+    if (fault === "error") {
+      this.#send({
+        id,
+        error: { code: -32000, message: "synthetic RPC failure" },
+      });
+      return;
+    }
+    if (fault === "malformed") {
+      this.#send({ id, result: { unrelated: true } });
+      return;
+    }
     if (message.method === "thread/start") {
       this.#allocateThreadId();
       this.#send(
@@ -131,9 +160,34 @@ class ContinuationAppServer {
           instructionSources: this.instructionSources,
         }),
       );
+      for (let index = 0; index < this.sourceFloodCount; index += 1)
+        this.#send(
+          protocolNotification({
+            method: "thread/status/changed",
+            params: {
+              threadId: this.sourceFloodThreadId,
+              status: { type: "active", activeFlags: [] },
+            },
+          }),
+        );
     } else if (message.method === "thread/read") {
       // The configurable unknown status is intentionally hostile protocol input.
       this.#observeThreadId(params);
+      if (this.emitSourceCallbackOnRead)
+        this.#send(
+          protocolServerRequest({
+            id: 902,
+            method: "item/tool/call",
+            params: {
+              threadId: String(params.threadId),
+              turnId: "turn_source_pending",
+              callId: "call_source",
+              tool: "weather",
+              namespace: null,
+              arguments: { city: "Chicago" },
+            },
+          }),
+        );
       this.#send({
         id,
         result: {
@@ -144,7 +198,8 @@ class ContinuationAppServer {
       // Echo the requested thread so native continuation of a source thread
       // still works after fallbacks allocated new threads.
       this.#observeThreadId(params);
-      this.#threadId = String(params.threadId);
+      this.#threadId =
+        fault === "wrong_thread" ? "thr_unexpected" : String(params.threadId);
       this.#send(
         protocolResponse("thread/resume", id, {
           ...protocolThreadResumeResponse(protocolThread(this.#threadId)),
@@ -579,7 +634,7 @@ test("an unknown explicit selector executes on a fresh thread", async () => {
   }, "codex-unknown-selector-");
 });
 
-test("fallback transcripts with orphan results or unanswered calls fail before any RPC", async () => {
+test("fresh history drops orphan results and unanswered calls with a warning", async () => {
   const transcripts = [
     {
       name: "orphan_result",
@@ -608,21 +663,38 @@ test("fallback transcripts with orphan results or unanswered calls fail before a
   ] as const;
   for (const transcript of transcripts) {
     await withTempDir(async (directory) => {
+      const entries: Array<Record<string, unknown>> = [];
       const fake = new ContinuationAppServer();
-      const running = await startProxy(directory, fake);
+      const running = await startProxy(
+        directory,
+        fake,
+        undefined,
+        createLogger("warn", (entry) => entries.push(entry)),
+      );
       try {
         const response = await postChatCompletion(running.origin, {
           model: "m",
           previous_response_id: "chatcmpl_missing",
           messages: transcript.messages,
         });
-        assert.equal(response.status, 400);
-        const body = (await response.json()) as {
-          error: { code: string; param: string | null };
-        };
-        assert.equal(body.error.code, "invalid_request");
-        assert.equal(body.error.param, "messages");
-        assert.deepEqual(fake.methods, []);
+        assert.equal(response.status, 200, await response.clone().text());
+        assert.equal(
+          ((await response.json()) as { x_codex?: { threadReused?: boolean } })
+            .x_codex?.threadReused,
+          false,
+        );
+        assert.deepEqual(fake.methods, ["thread/start", "turn/start"]);
+        assert.deepEqual(fake.turnInputs, [
+          [{ type: "text", text: "go", text_elements: [] }],
+        ]);
+        assert.deepEqual(
+          entries
+            .filter(
+              (entry) => entry.event === "unpaired_history_tool_items_dropped",
+            )
+            .map((entry) => [entry.unanswered_calls, entry.orphan_results]),
+          [transcript.name === "orphan_result" ? [0, 1] : [1, 0]],
+        );
       } finally {
         await running.proxy.close();
       }
@@ -780,6 +852,61 @@ test("implicit tool results for one expired pending record execute on a fresh th
   }, "codex-implicit-expired-");
 });
 
+test("explicit tool results with a user suffix for an expired pending record report a tool fallback", async () => {
+  await withTempDir(async (directory) => {
+    const entries: Array<Record<string, unknown>> = [];
+    const fake = new ContinuationAppServer();
+    const running = await startProxy(
+      directory,
+      fake,
+      {
+        responseId: "response_tombstone",
+        threadId: "thr_continuation",
+        state: "expired",
+        model: "m",
+        cwd: join(directory, "workspace"),
+        toolsHash: bindingHash([]),
+        policyHash: defaultPolicyHash(join(directory, "workspace")),
+        pendingCalls: [
+          { callId: "call_tombstone", name: "t", arguments: "{}" },
+        ],
+      },
+      createLogger("info", (entry) => entries.push(entry)),
+    );
+    try {
+      const response = await postChatCompletion(running.origin, {
+        model: "m",
+        previous_response_id: "response_tombstone",
+        messages: [
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                type: "function",
+                id: "call_tombstone",
+                function: { name: "t", arguments: "{}" },
+              },
+            ],
+          },
+          { role: "tool", tool_call_id: "call_tombstone", content: "r" },
+          { role: "user", content: "continue" },
+        ],
+      });
+      assert.equal(response.status, 200, await response.clone().text());
+      // The same record-state view that correlates a pending batch classifies
+      // the expired one, so a user suffix does not hide its tool results.
+      const fallbacks = entries.filter(
+        (entry) => entry.event === "continuation_fresh_fallback",
+      );
+      assert.equal(fallbacks.length, 1);
+      assert.equal(fallbacks[0]?.reason, "expired_tool_continuation");
+    } finally {
+      await running.proxy.close();
+    }
+  }, "codex-explicit-expired-suffix-");
+});
+
 test("implicit tool results matching two expired records execute on a fresh thread", async () => {
   await withTempDir(async (directory) => {
     const entries: Array<Record<string, unknown>> = [];
@@ -884,7 +1011,7 @@ test("implicit duplicate tool result IDs fail before any RPC", async () => {
   }, "codex-implicit-duplicate-");
 });
 
-test("ready continuation rejects trailing tool results before thread work", async () => {
+test("ready continuation with a foreign tool result starts fresh", async () => {
   await withTempDir(async (directory) => {
     const fake = new ContinuationAppServer();
     const responseId = "response_ready_tool";
@@ -898,23 +1025,38 @@ test("ready continuation rejects trailing tool results before thread work", asyn
       policyHash: defaultPolicyHash(join(directory, "workspace")),
     });
     try {
-      const response = await fetch(`${running.origin}/v1/chat/completions`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
+      for (const trailingUser of [false, true]) {
+        const response = await postChatCompletion(running.origin, {
           model: "m",
           previous_response_id: responseId,
           messages: [
             { role: "tool", tool_call_id: "call_stale", content: "result" },
+            ...(trailingUser
+              ? [{ role: "user", content: "next question" }]
+              : []),
           ],
-        }),
-      });
-      assert.equal(response.status, 409);
+        });
+        assert.equal(response.status, 200, await response.clone().text());
+        assert.equal(
+          ((await response.json()) as { x_codex?: { threadReused?: boolean } })
+            .x_codex?.threadReused,
+          false,
+        );
+        assert.deepEqual(fake.methods, ["thread/start", "turn/start"]);
+        assert.deepEqual(fake.turnInputs, [
+          trailingUser
+            ? [{ type: "text", text: "next question", text_elements: [] }]
+            : [],
+        ]);
+        fake.methods.length = 0;
+        fake.turnInputs.length = 0;
+      }
       assert.equal(
-        await responseErrorCode(response),
-        "tool_results_without_pending_call",
+        persistedRecords(directory).find(
+          (record) => record.responseId === responseId,
+        )?.state,
+        "ready",
       );
-      assert.deepEqual(fake.methods, []);
     } finally {
       await running.proxy.close();
     }
@@ -987,6 +1129,130 @@ test("pending tool results followed by user messages resume the source thread na
       await running.proxy.close();
     }
   }, "codex-pending-suffix-users-");
+});
+
+test("partial explicit batch with trailing user falls back over SSE and keeps complete supplied history", async () => {
+  await withTempDir(async (directory) => {
+    const entries: Array<Record<string, unknown>> = [];
+    const fake = new ContinuationAppServer();
+    const responseId = "response_partial_batch";
+    const seed = pendingWeatherRecord(directory, responseId);
+    seed.pendingCalls = [
+      { callId: "call_x", name: "weather", arguments: '{"city":"Chicago"}' },
+      { callId: "call_y", name: "weather", arguments: '{"city":"Phoenix"}' },
+    ];
+    const running = await startProxy(
+      directory,
+      fake,
+      seed,
+      createLogger("warn", (entry) => entries.push(entry)),
+    );
+    const assistant = {
+      role: "assistant",
+      content: "checking both cities",
+      tool_calls: seed.pendingCalls.map((call) => ({
+        id: call.callId,
+        type: "function",
+        function: { name: call.name, arguments: call.arguments },
+      })),
+    };
+    try {
+      const response = await postChatCompletion(running.origin, {
+        model: "m",
+        previous_response_id: responseId,
+        stream: true,
+        messages: [
+          { role: "system", content: "Be concise." },
+          { role: "user", content: "Prior question" },
+          assistant,
+          { role: "tool", tool_call_id: "call_x", content: "sunny" },
+          { role: "user", content: "Next question" },
+        ],
+      });
+      assert.equal(response.status, 200, await response.clone().text());
+      assert.equal(
+        (
+          parseSseChunks(await response.text())[0]?.x_codex as
+            { threadReused?: boolean } | undefined
+        )?.threadReused,
+        false,
+      );
+      assert.deepEqual(fake.methods, [
+        "thread/start",
+        "thread/inject_items",
+        "turn/start",
+      ]);
+      assert.deepEqual(fake.injected, [
+        {
+          threadId: "thr_continuation_2",
+          items: [
+            {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "Prior question" }],
+            },
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "checking both cities" }],
+            },
+            {
+              type: "function_call",
+              name: "weather",
+              arguments: '{"city":"Chicago"}',
+              call_id: "call_x",
+            },
+            {
+              type: "function_call_output",
+              call_id: "call_x",
+              output: "sunny",
+            },
+          ],
+        },
+      ]);
+      assert.deepEqual(fake.turnInputs, [
+        [{ type: "text", text: "Next question", text_elements: [] }],
+      ]);
+      assert.deepEqual(
+        entries
+          .filter(
+            (entry) => entry.event === "unpaired_history_tool_items_dropped",
+          )
+          .map((entry) => [entry.unanswered_calls, entry.orphan_results]),
+        [[1, 0]],
+      );
+      assert.equal(
+        persistedRecords(directory).find(
+          (record) => record.responseId === responseId,
+        )?.state,
+        "pending_tool",
+      );
+      fake.methods.length = 0;
+      const matching = await postChatCompletion(running.origin, {
+        model: "m",
+        previous_response_id: responseId,
+        messages: [
+          assistant,
+          { role: "tool", tool_call_id: "call_x", content: "sunny" },
+          { role: "tool", tool_call_id: "call_y", content: "warm" },
+        ],
+      });
+      assert.equal(matching.status, 200, await matching.clone().text());
+      assert.equal(
+        ((await matching.json()) as { x_codex?: { threadReused?: boolean } })
+          .x_codex?.threadReused,
+        true,
+      );
+      assert.deepEqual(fake.methods, [
+        "thread/read",
+        "thread/resume",
+        "thread/inject_items",
+        "turn/start",
+      ]);
+    } finally {
+      await running.proxy.close();
+    }
+  }, "codex-partial-tool-batch-");
 });
 
 test("pending continuations without results execute fresh and remain consumable", async () => {
@@ -1115,7 +1381,7 @@ test("pending continuations without results execute fresh and remain consumable"
   }
 }, 15_000);
 
-test("pending suffix admission errors precede any RPC and leave the record consumable", async () => {
+test("incompatible pending batches execute fresh and preserve their source checkpoint", async () => {
   await withTempDir(async (directory) => {
     const fake = new ContinuationAppServer();
     const responseId = "response_pending_users";
@@ -1125,22 +1391,16 @@ test("pending suffix admission errors precede any RPC and leave the record consu
       pendingWeatherRecord(directory, responseId),
     );
     const cases = [
-      // Missing pending results allow unanswered calls to be dropped, but
-      // never allow orphan results elsewhere in the fallback transcript.
       {
-        status: 400,
-        code: "invalid_request",
+        name: "orphan history",
         messages: [
           { role: "tool", tool_call_id: "call_orphan", content: "orphan" },
           { role: "assistant", content: "earlier reply" },
           { role: "user", content: "go" },
         ],
       },
-      // Repeating the call ID and name is not enough: the persisted
-      // arguments are byte-identical to what the batch emitted.
       {
-        status: 400,
-        code: "invalid_request",
+        name: "changed arguments",
         messages: [
           {
             role: "assistant",
@@ -1157,14 +1417,65 @@ test("pending suffix admission errors precede any RPC and leave the record consu
           { role: "user", content: "go" },
         ],
       },
-      // The old-round shape from the compatibility note: the only result
-      // block belongs to a replayed earlier round while the pending batch's
-      // results are missing. The selected final block does not match the
-      // pending batch, so it keeps its typed 400. No result block at all
-      // instead selects fresh execution.
       {
-        status: 400,
-        code: "invalid_request",
+        name: "reformatted JSON",
+        messages: [
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_x",
+                type: "function",
+                function: {
+                  name: "weather",
+                  arguments: '{ "city": "Chicago" }',
+                },
+              },
+            ],
+          },
+          { role: "tool", tool_call_id: "call_x", content: "r" },
+          { role: "user", content: "go" },
+        ],
+      },
+      {
+        name: "changed name",
+        messages: [
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_x",
+                type: "function",
+                function: { name: "forecast", arguments: '{"city":"Chicago"}' },
+              },
+            ],
+          },
+          { role: "tool", tool_call_id: "call_x", content: "r" },
+          { role: "user", content: "go" },
+        ],
+      },
+      {
+        name: "changed ID",
+        messages: [
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_y",
+                type: "function",
+                function: { name: "weather", arguments: '{"city":"Chicago"}' },
+              },
+            ],
+          },
+          { role: "tool", tool_call_id: "call_y", content: "r" },
+          { role: "user", content: "go" },
+        ],
+      },
+      {
+        name: "earlier completed round",
         messages: [
           { role: "user", content: "history" },
           {
@@ -1182,20 +1493,15 @@ test("pending suffix admission errors precede any RPC and leave the record consu
           { role: "user", content: "go" },
         ],
       },
-      // A result without its assistant message cannot be correlated.
       {
-        status: 400,
-        code: "invalid_request",
+        name: "result without assistant",
         messages: [
           { role: "tool", tool_call_id: "call_x", content: "r" },
           { role: "user", content: "go" },
         ],
       },
-      // A user message splitting the result block leaves the final group
-      // without its assistant message, so the blocks cannot be merged.
       {
-        status: 400,
-        code: "invalid_request",
+        name: "split result block",
         messages: [
           weatherAssistantMessage,
           { role: "tool", tool_call_id: "call_x", content: "r" },
@@ -1203,10 +1509,8 @@ test("pending suffix admission errors precede any RPC and leave the record consu
           { role: "tool", tool_call_id: "call_x", content: "again" },
         ],
       },
-      // A result for a call the batch never issued is foreign.
       {
-        status: 400,
-        code: "invalid_request",
+        name: "foreign result",
         messages: [
           weatherAssistantMessage,
           { role: "tool", tool_call_id: "foreign", content: "x" },
@@ -1221,14 +1525,37 @@ test("pending suffix admission errors precede any RPC and leave the record consu
           previous_response_id: responseId,
           messages: testCase.messages,
         });
-        assert.equal(response.status, testCase.status);
-        assert.equal(await responseErrorCode(response), testCase.code);
-        // Admission failures happen before any app-server RPC: not even a
-        // thread/read of the source runs.
-        assert.deepEqual(fake.methods, []);
+        assert.equal(
+          response.status,
+          200,
+          `${testCase.name}: ${await response.clone().text()}`,
+        );
+        assert.equal(
+          ((await response.json()) as { x_codex?: { threadReused?: boolean } })
+            .x_codex?.threadReused,
+          false,
+          testCase.name,
+        );
+        assert.equal(
+          fake.methods.includes("thread/read"),
+          false,
+          testCase.name,
+        );
+        assert.equal(
+          fake.methods.includes("thread/resume"),
+          false,
+          testCase.name,
+        );
+        assert.equal(
+          persistedRecords(directory).find(
+            (record) => record.responseId === responseId,
+          )?.state,
+          "pending_tool",
+          testCase.name,
+        );
       }
-      // The source record survived every rejection: the corrected request
-      // still consumes it natively.
+      fake.methods.length = 0;
+      // The exact original batch still consumes the unchanged source natively.
       const fixed = await postChatCompletion(running.origin, {
         model: "m",
         previous_response_id: responseId,
@@ -1247,7 +1574,41 @@ test("pending suffix admission errors precede any RPC and leave the record consu
     } finally {
       await running.proxy.close();
     }
-  }, "codex-pending-suffix-errors-");
+  }, "codex-pending-suffix-fallback-");
+}, 20_000);
+
+test("duplicate IDs within the selected pending batch remain ambiguous input", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ContinuationAppServer();
+    const responseId = "response_duplicate_selected";
+    const running = await startProxy(
+      directory,
+      fake,
+      pendingWeatherRecord(directory, responseId),
+    );
+    try {
+      const response = await postChatCompletion(running.origin, {
+        model: "m",
+        previous_response_id: responseId,
+        messages: [
+          weatherAssistantMessage,
+          { role: "tool", tool_call_id: "call_x", content: "first" },
+          { role: "tool", tool_call_id: "call_x", content: "second" },
+        ],
+      });
+      assert.equal(response.status, 400);
+      assert.equal(await responseErrorCode(response), "duplicate_tool_call_id");
+      assert.deepEqual(fake.methods, []);
+      assert.equal(
+        persistedRecords(directory).find(
+          (record) => record.responseId === responseId,
+        )?.state,
+        "pending_tool",
+      );
+    } finally {
+      await running.proxy.close();
+    }
+  }, "codex-selected-duplicate-");
 });
 
 test("a binding-mismatched pending suffix selector executes the transcript on a fresh thread", async () => {
@@ -1264,20 +1625,6 @@ test("a binding-mismatched pending suffix selector executes the transcript on a 
       ),
     );
     try {
-      // Batch validation precedes the binding check on the suffix shape:
-      // an invalid batch is a client error, never a silent fresh fallback.
-      const invalid = await postChatCompletion(running.origin, {
-        model: "m",
-        previous_response_id: responseId,
-        messages: [
-          weatherAssistantMessage,
-          { role: "tool", tool_call_id: "foreign", content: "x" },
-          { role: "user", content: "go" },
-        ],
-      });
-      assert.equal(invalid.status, 400);
-      assert.equal(await responseErrorCode(invalid), "invalid_request");
-      assert.deepEqual(fake.methods, []);
       const response = await postChatCompletion(running.origin, {
         model: "m",
         previous_response_id: responseId,
@@ -1421,20 +1768,82 @@ test("a completed tool round then a user message stays fresh with implicit conti
   }, "codex-implicit-disabled-history-");
 });
 
-test("non-resumable thread/read states fail closed without resume, turn, or replacement thread", async () => {
+test("busy and non-resumable thread/read states start one fresh thread", async () => {
   const states: unknown[] = [
     { type: "active" },
     { type: "systemError" },
     { type: "archived" },
     { type: "deleted" },
     { type: "futureStatus" },
-    {},
-    null,
   ];
   for (const [index, status] of states.entries()) {
     await withTempDir(async (directory) => {
+      const entries: Array<Record<string, unknown>> = [];
       const fake = new ContinuationAppServer(status);
       const responseId = `response_status_${index}`;
+      const running = await startProxy(
+        directory,
+        fake,
+        {
+          responseId,
+          threadId: "thr_continuation",
+          state: "ready",
+          model: "m",
+          cwd: join(directory, "workspace"),
+          toolsHash: bindingHash([]),
+          policyHash: defaultPolicyHash(join(directory, "workspace")),
+        },
+        createLogger("info", (entry) => entries.push(entry)),
+      );
+      try {
+        const response = await post(running.origin, responseId);
+        assert.equal(response.status, 200, await response.clone().text());
+        assert.equal(
+          ((await response.json()) as { x_codex?: { threadReused?: boolean } })
+            .x_codex?.threadReused,
+          false,
+        );
+        assert.deepEqual(fake.methods, [
+          "thread/read",
+          "thread/start",
+          "turn/start",
+        ]);
+        // Remote activity is reported apart from local lease contention.
+        assert.deepEqual(
+          entries
+            .filter((entry) => entry.event === "continuation_fresh_fallback")
+            .map((entry) => entry.reason),
+          [index === 0 ? "thread_active" : "thread_not_resumable"],
+        );
+        assert.equal(
+          persistedRecords(directory).find(
+            (record) => record.responseId === responseId,
+          )?.state,
+          "ready",
+        );
+      } finally {
+        await running.proxy.close();
+      }
+    }, "codex-thread-status-");
+  }
+}, 15_000);
+
+test("read and resume RPC errors or a different resumed thread select fresh execution", async () => {
+  for (const [method, fault] of [
+    ["thread/read", "error"],
+    ["thread/resume", "error"],
+    ["thread/resume", "wrong_thread"],
+  ] as const) {
+    await withTempDir(async (directory) => {
+      const fake = new ContinuationAppServer();
+      fake.faults[method] = fault;
+      if (fault === "wrong_thread") {
+        // The thread app-server resumed in the source's place must not
+        // overflow fresh startup ingress with its own late events.
+        fake.sourceFloodThreadId = "thr_unexpected";
+        fake.sourceFloodCount = 1_200;
+      }
+      const responseId = `response_preflight_${method}_${fault}`;
       const running = await startProxy(directory, fake, {
         responseId,
         threadId: "thr_continuation",
@@ -1446,20 +1855,154 @@ test("non-resumable thread/read states fail closed without resume, turn, or repl
       });
       try {
         const response = await post(running.origin, responseId);
-        assert.equal(response.status, 409);
+        assert.equal(response.status, 200, await response.clone().text());
         assert.equal(
-          await responseErrorCode(response),
-          status && (status as { type?: string }).type === "active"
-            ? "thread_busy"
-            : "thread_not_resumable",
+          ((await response.json()) as { x_codex?: { threadReused?: boolean } })
+            .x_codex?.threadReused,
+          false,
         );
-        assert.deepEqual(fake.methods, ["thread/read"]);
+        assert.deepEqual(fake.methods, [
+          "thread/read",
+          ...(method === "thread/resume" ? ["thread/resume"] : []),
+          "thread/start",
+          "turn/start",
+        ]);
+        assert.equal(
+          persistedRecords(directory).find(
+            (record) => record.responseId === responseId,
+          )?.state,
+          "ready",
+        );
       } finally {
         await running.proxy.close();
       }
-    }, "codex-thread-status-");
+    }, "codex-preflight-rpc-");
   }
-});
+}, 12_000);
+
+test("malformed preflight envelopes and failed fresh injection or turn start never retry", async () => {
+  for (const [method, fault, expectedMethods] of [
+    ["thread/read", "malformed", ["thread/read"]],
+    ["thread/resume", "malformed", ["thread/read", "thread/resume"]],
+    ["thread/inject_items", "error", ["thread/start", "thread/inject_items"]],
+    ["turn/start", "error", ["thread/start", "turn/start"]],
+  ] as const) {
+    await withTempDir(async (directory) => {
+      const fake = new ContinuationAppServer();
+      fake.faults[method] = fault;
+      const responseId = `response_failure_${method}_${fault}`;
+      const seed =
+        method === "thread/read" || method === "thread/resume"
+          ? {
+              responseId,
+              threadId: "thr_continuation",
+              state: "ready" as const,
+              model: "m",
+              cwd: join(directory, "workspace"),
+              toolsHash: bindingHash([]),
+              policyHash: defaultPolicyHash(join(directory, "workspace")),
+            }
+          : undefined;
+      const running = await startProxy(directory, fake, seed);
+      try {
+        const response = await postChatCompletion(running.origin, {
+          model: "m",
+          ...(seed ? { previous_response_id: responseId } : {}),
+          messages:
+            method === "thread/inject_items"
+              ? [
+                  { role: "user", content: "history" },
+                  { role: "user", content: "new question" },
+                ]
+              : [{ role: "user", content: "new question" }],
+        });
+        assert.notEqual(response.status, 200);
+        assert.deepEqual(fake.methods, expectedMethods);
+        assert.equal(
+          fake.methods.filter((value) => value === "thread/start").length <= 1,
+          true,
+        );
+      } finally {
+        await running.proxy.close();
+      }
+    }, "codex-no-retry-");
+  }
+}, 12_000);
+
+test("preflight fallback settles source callbacks, ignores late source events, and accepts fresh callbacks", async () => {
+  await withTempDir(async (directory) => {
+    const fake = new ContinuationAppServer();
+    const tools = [
+      {
+        type: "function",
+        function: { name: "weather", parameters: { type: "object" } },
+      },
+    ];
+    const running = await startProxy(directory, fake);
+    try {
+      const initial = await postChatCompletion(running.origin, {
+        model: "m",
+        tools,
+        messages: [{ role: "user", content: "initial" }],
+      });
+      assert.equal(initial.status, 200, await initial.clone().text());
+      const responseId = ((await initial.json()) as { id: string }).id;
+      fake.methods.length = 0;
+      fake.status = { type: "active" };
+      fake.requestTool = true;
+      fake.emitSourceCallbackOnRead = true;
+      fake.sourceFloodCount = 1_200;
+      const response = await post(running.origin, responseId, "m", tools);
+      assert.equal(response.status, 200, await response.clone().text());
+      const body = (await response.json()) as {
+        x_codex?: { threadReused?: boolean };
+        choices?: Array<{
+          finish_reason?: string;
+          message?: { tool_calls?: unknown[] };
+        }>;
+      };
+      assert.equal(body.x_codex?.threadReused, false);
+      assert.equal(body.choices?.[0]?.finish_reason, "tool_calls");
+      assert.equal(body.choices?.[0]?.message?.tool_calls?.length, 1);
+      assert.deepEqual(fake.methods.slice(0, 3), [
+        "thread/read",
+        "thread/start",
+        "turn/start",
+      ]);
+      assert.ok(fake.methods.includes("turn/interrupt"));
+      assert.ok(
+        fake.callbackResponses.some((item) => item.id === 902 && item.error),
+      );
+      assert.equal(
+        persistedRecords(directory).find(
+          (record) => record.responseId === responseId,
+        )?.state,
+        "ready",
+      );
+
+      // The source lease was released before fresh startup. Once it reports
+      // idle, the same selector can still resume its original thread.
+      fake.status = { type: "idle" };
+      fake.emitSourceCallbackOnRead = false;
+      fake.sourceFloodCount = 0;
+      fake.methods.length = 0;
+      const matching = await post(running.origin, responseId, "m", tools);
+      assert.equal(matching.status, 200, await matching.clone().text());
+      assert.equal(
+        ((await matching.json()) as { x_codex?: { threadReused?: boolean } })
+          .x_codex?.threadReused,
+        true,
+      );
+      assert.deepEqual(fake.methods.slice(0, 3), [
+        "thread/read",
+        "thread/resume",
+        "turn/start",
+      ]);
+    } finally {
+      await running.proxy.close();
+    }
+  }, "codex-source-callback-fallback-");
+}, 10_000);
 
 test("a request contending with an active thread falls back to a fresh execution", async () => {
   await withTempDir(async (directory) => {

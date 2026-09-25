@@ -1474,6 +1474,7 @@ test("verbatim mixed internal and dynamic calls resolve only the pending batch",
         calls.map((call) => call.id),
         ["internal_before_tools", "call_b", "call_a"],
       );
+      assert.equal(initial.choices[0]!.message.tool_results, undefined);
 
       const continued = await postChatCompletion(origin, {
         model: "m",
@@ -1494,8 +1495,13 @@ test("verbatim mixed internal and dynamic calls resolve only the pending batch",
         ],
       });
       assert.equal(continued.status, 200, await continued.clone().text());
-      // Only the pending dynamic batch is injected; the observational internal
-      // call in the replayed assistant message never reaches thread history.
+      assert.equal(
+        ((await continued.clone().json()) as CompletionBody).x_codex
+          ?.threadReused,
+        true,
+      );
+      // The unfinished observational internal call is not part of the
+      // client-owned pending batch, so only dynamic pairs are injected.
       assert.deepEqual(
         fake.injected.map((item) => [item.type, item.call_id]),
         [
@@ -1511,7 +1517,7 @@ test("verbatim mixed internal and dynamic calls resolve only the pending batch",
   }, "codex-mixed-tool-replay-");
 });
 
-test("missing, foreign, and duplicate tool result IDs and changed tool call arguments fail without consuming the pending batch", async () => {
+test("incompatible tool results fall back while duplicate IDs remain errors", async () => {
   await withTempDir(async (directory) => {
     const fake = new ToolAppServer();
     const { origin, proxy } = await startProxy(directory, fake);
@@ -1573,7 +1579,8 @@ test("missing, foreign, and duplicate tool result IDs and changed tool call argu
           { role: "tool", tool_call_id: "call_b", content: "y" },
         ],
       ];
-      for (const messages of cases) {
+      const beforeFallback = fake.methods.slice();
+      for (const [index, messages] of cases.entries()) {
         const response = await postChatCompletion(origin, {
           model: "m",
           tools: [
@@ -1583,9 +1590,33 @@ test("missing, foreign, and duplicate tool result IDs and changed tool call argu
           previous_response_id: initial.id,
           messages,
         });
-        assert.equal(response.status, 400);
-        assert.equal(await responseErrorCode(response), "invalid_request");
+        if (index === 2) {
+          assert.equal(response.status, 400);
+          assert.equal(
+            await responseErrorCode(response),
+            "duplicate_tool_call_id",
+          );
+        } else {
+          assert.equal(response.status, 200, await response.clone().text());
+          assert.equal(
+            ((await response.json()) as CompletionBody).x_codex?.threadReused,
+            false,
+          );
+        }
+        assert.equal(fake.methods.includes("thread/read"), false);
+        assert.equal(fake.methods.includes("thread/resume"), false);
+        assert.equal(
+          persistedRecords(directory).find(
+            (record) => record.responseId === initial.id,
+          )?.state,
+          "pending_tool",
+        );
       }
+      assert.equal(
+        fake.methods.filter((method) => method === "thread/start").length -
+          beforeFallback.filter((method) => method === "thread/start").length,
+        3,
+      );
       const success = await postChatCompletion(origin, {
         model: "m",
         tools: [
@@ -1596,11 +1627,15 @@ test("missing, foreign, and duplicate tool result IDs and changed tool call argu
         messages: toolTranscript(calls, "final"),
       });
       assert.equal(success.status, 200);
+      assert.equal(
+        ((await success.json()) as CompletionBody).x_codex?.threadReused,
+        true,
+      );
     } finally {
       await proxy.close();
     }
-  }, "codex-tool-results-invalid-");
-});
+  }, "codex-tool-results-fallback-");
+}, 15_000);
 
 test("tool results followed by user messages continue natively with the final user as input", async () => {
   const suffixes = [
@@ -1834,7 +1869,7 @@ test("an explicit pending suffix continuation ignores an earlier completed round
   }, "codex-tool-suffix-history-");
 });
 
-test("invalid suffix continuations fail before any RPC and leave the pending batch consumable", async () => {
+test("incompatible suffix continuations fall back and leave the pending batch consumable", async () => {
   await withTempDir(async (directory) => {
     const fake = new ToolAppServer();
     const { origin, proxy } = await startProxy(directory, fake);
@@ -1925,23 +1960,34 @@ test("invalid suffix continuations fail before any RPC and leave the pending bat
           { role: "user", content: "go" },
         ],
       ];
-      // The suspension's own RPCs are the baseline: admission failures must
-      // add nothing, not even a thread/read of the source.
+      // The suspension's own RPCs are the baseline; fallback starts new
+      // threads without reading or resuming the source.
       const afterSuspension = fake.methods.slice();
-      for (const messages of cases) {
+      for (const [index, messages] of cases.entries()) {
         const response = await postChatCompletion(origin, {
           model: "m",
           tools,
           previous_response_id: initial.id,
           messages,
         });
-        assert.equal(response.status, 400);
-        assert.equal(await responseErrorCode(response), "invalid_request");
-        assert.deepEqual(fake.methods, afterSuspension);
+        if (index === 2) {
+          assert.equal(response.status, 400);
+          assert.equal(
+            await responseErrorCode(response),
+            "duplicate_tool_call_id",
+          );
+        } else {
+          assert.equal(response.status, 200, await response.clone().text());
+          assert.equal(
+            ((await response.json()) as CompletionBody).x_codex?.threadReused,
+            false,
+          );
+        }
+        assert.equal(fake.methods.includes("thread/read"), false);
+        assert.equal(fake.methods.includes("thread/resume"), false);
       }
-      // A user message splitting the result block leaves the final result
-      // group without its assistant message, so the separated blocks cannot
-      // be merged to satisfy the batch.
+      // A user message splitting the result block prevents native reuse.
+      // Fresh replay keeps the complete pair and drops the orphan result.
       const split = await postChatCompletion(origin, {
         model: "m",
         tools,
@@ -1953,18 +1999,17 @@ test("invalid suffix continuations fail before any RPC and leave the pending bat
           { role: "tool", tool_call_id: "call_a", content: "y" },
         ],
       });
-      assert.equal(split.status, 400);
-      const splitBody = (await split.json()) as {
-        error: { code: string; message: string };
-      };
-      assert.equal(splitBody.error.code, "invalid_request");
+      assert.equal(split.status, 200, await split.clone().text());
       assert.equal(
-        splitBody.error.message,
-        "The assistant tool-call message is required.",
+        ((await split.json()) as CompletionBody).x_codex?.threadReused,
+        false,
       );
-      assert.deepEqual(fake.methods, afterSuspension);
-      // No rejection consumed the source: its record is still pending and a
-      // corrected request continues it natively.
+      assert.equal(
+        fake.methods.filter((method) => method === "thread/start").length -
+          afterSuspension.filter((method) => method === "thread/start").length,
+        5,
+      );
+      // Fresh requests leave the pending source consumable.
       assert.equal(
         persistedRecords(directory).find(
           (record) => record.responseId === initial.id,
@@ -1986,8 +2031,8 @@ test("invalid suffix continuations fail before any RPC and leave the pending bat
     } finally {
       await proxy.close();
     }
-  }, "codex-tool-suffix-invalid-");
-});
+  }, "codex-tool-suffix-fallback-");
+}, 18_000);
 
 test("a pending tool continuation falls back to a fresh thread after proxy restart", async () => {
   for (const selection of ["explicit", "implicit"] as const) {
@@ -2202,7 +2247,7 @@ test("a post-restart tool continuation falls back even when the next response is
   }, "codex-tool-restart-text-");
 });
 
-test("completed continuations survive restart, fall back from superseded selectors, and reject a resume race", async () => {
+test("completed continuations survive restart and resume races fall back", async () => {
   await withTempDir(async (directory) => {
     const firstFake = new ToolAppServer(false);
     const firstServer = await startProxy(directory, firstFake);
@@ -2267,16 +2312,24 @@ test("completed continuations survive restart, fall back from superseded selecto
         previous_response_id: secondId,
         messages: [{ role: "user", content: "race" }],
       });
-      assert.equal(raced.status, 409);
-      assert.equal(await responseErrorCode(raced), "thread_not_resumable");
-      assert.deepEqual(raceFake.methods, ["thread/read", "thread/resume"]);
+      assert.equal(raced.status, 200, await raced.clone().text());
+      assert.equal(
+        ((await raced.json()) as CompletionBody).x_codex?.threadReused,
+        false,
+      );
+      assert.deepEqual(raceFake.methods, [
+        "thread/read",
+        "thread/resume",
+        "thread/start",
+        "turn/start",
+      ]);
     } finally {
       await raceServer.proxy.close();
     }
   }, "codex-continuation-ready-");
 });
 
-test("a mismatched resumed thread is rejected without starting a turn or leaking ownership", async () => {
+test("a mismatched resumed thread falls back without consuming its source", async () => {
   await withTempDir(async (directory) => {
     const firstFake = new ToolAppServer(false);
     const firstServer = await startProxy(directory, firstFake);
@@ -2302,14 +2355,27 @@ test("a mismatched resumed thread is rejected without starting a turn or leaking
           previous_response_id: responseId,
           messages: [{ role: "user", content }],
         });
-        assert.equal(response.status, 409);
-        assert.equal(await responseErrorCode(response), "thread_not_resumable");
+        assert.equal(response.status, 200, await response.clone().text());
+        assert.equal(
+          ((await response.json()) as CompletionBody).x_codex?.threadReused,
+          false,
+        );
+        assert.equal(
+          persistedRecords(directory).find(
+            (record) => record.responseId === responseId,
+          )?.state,
+          "ready",
+        );
       }
       assert.deepEqual(fake.methods, [
         "thread/read",
         "thread/resume",
+        "thread/start",
+        "turn/start",
         "thread/read",
         "thread/resume",
+        "thread/start",
+        "turn/start",
       ]);
     } finally {
       await server.proxy.close();

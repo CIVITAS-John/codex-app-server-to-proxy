@@ -3472,6 +3472,21 @@ test("tool results without previous_response_id require enabled implicit continu
           code: "invalid_request",
         },
       });
+      // A repeated result ID gets the same actionable error, not the
+      // duplicate-result error that only applies to a continuation candidate.
+      const duplicate = await fetch(`${started.origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...request,
+          messages: [...request.messages, request.messages.at(-1)],
+        }),
+      });
+      assert.equal(duplicate.status, 400);
+      assert.equal(
+        ((await duplicate.json()) as { error: { param: string } }).error.param,
+        "previous_response_id",
+      );
       // Validation rejects before admission, so the app-server sees no frame.
       assert.deepEqual(methods, []);
     } finally {

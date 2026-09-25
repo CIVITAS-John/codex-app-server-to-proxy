@@ -1,4 +1,4 @@
-import type { JsonRpcTransport } from "../app-server/json-rpc.js";
+import { RpcError, type JsonRpcTransport } from "../app-server/json-rpc.js";
 import type { ThreadConfigResolver } from "../app-server/windows-sandbox.js";
 import { bindingHash, record } from "../core/canonical.js";
 import type { Logger } from "../core/logger.js";
@@ -35,7 +35,6 @@ import {
   toBaseInstructions,
   toHistoryItem,
   toHistoryItems,
-  validateFallbackHistory,
   validateToolResults,
   type ChatMessage,
   type ChatRequest,
@@ -255,9 +254,12 @@ class IngressQueue {
     }
   }
 
-  /** Rejects every retained dynamic request during unsuspended cleanup. */
-  rejectQueuedDynamicCalls(): void {
-    for (const event of this.#ingress)
+  /**
+   * Drops all retained ingress and rejects its dynamic requests, during
+   * unsuspended cleanup or before a fallback abandons its source thread.
+   */
+  discardIngress(): void {
+    for (const event of this.drainAll())
       if (event.type === "dynamic_tool") this.#rejectDynamicCall(event.call);
   }
 }
@@ -290,7 +292,11 @@ export type ContinuationFallbackReason =
   | "continuation_tools_mismatch"
   | "continuation_policy_mismatch"
   | "raw_response_capability_unavailable"
-  | "thread_busy";
+  | "thread_busy"
+  | "thread_active"
+  | "thread_not_resumable"
+  | "pending_batch_mismatch"
+  | "tool_results_without_pending_call";
 
 /** One eagerly prepared execution with cleanup independent of generator startup. */
 export interface ExecutionSession {
@@ -302,11 +308,11 @@ export interface ExecutionSession {
 
 /** Shared mutable lifecycle state for one app-server turn. */
 interface TurnHandle {
-  threadId?: string;
-  turnId?: string;
+  threadId?: string | undefined;
+  turnId?: string | undefined;
   rawResponseBoundaries: boolean;
   terminal: boolean;
-  lease?: ThreadLease;
+  lease?: ThreadLease | undefined;
 }
 
 /** Setup output shared by ready and pending-tool continuation paths. */
@@ -333,6 +339,19 @@ type ContinuationAdmission =
 
 /** The reuse branch of {@link ContinuationAdmission}. */
 type ReuseAdmission = Extract<ContinuationAdmission, { type: "reuse" }>;
+
+/** A read/resume preflight outcome that selects fresh execution instead. */
+interface PreflightFallback {
+  reason: Extract<
+    ContinuationFallbackReason,
+    "thread_active" | "thread_not_resumable"
+  >;
+  /**
+   * Every thread the preflight addressed or app-server resumed in its place,
+   * whose late events must not consume fresh startup ingress.
+   */
+  threadIds: string[];
+}
 
 /**
  * Absolute deadline for terminal usage collection, normally a backstop for a
@@ -365,7 +384,12 @@ export async function execute(
     rawResponseBoundaries: false,
     terminal: false,
   };
+  const excludedThreadIds = new Set<string>();
   const onNotification = (method: string, params: unknown): void => {
+    // A preflight fallback must not let a flood of late source events exhaust
+    // fresh startup ingress. The new thread's early events remain eligible.
+    const threadId = record(params)?.threadId;
+    if (typeof threadId === "string" && excludedThreadIds.has(threadId)) return;
     if (method === "rawResponseItem/completed") {
       if (
         isEstablishedUnrelatedNotification(
@@ -478,12 +502,12 @@ export async function execute(
       // interrupted at its batch, so nothing app-server-side stays pending.
       handle.lease?.release();
     }
-    queue.rejectQueuedDynamicCalls();
+    queue.discardIngress();
   };
   options.signal.addEventListener("abort", onAbort, { once: true });
   let usageBaseline: TokenUsageCounters | undefined;
-  let instructionSources: string[];
-  let threadReused: boolean;
+  let instructionSources: string[] = [];
+  let threadReused = false;
   try {
     assertDispatchable(options);
     const admission = prepareContinuation(
@@ -493,32 +517,43 @@ export async function execute(
       handle,
       onToolRequest,
     );
+    let fallbackReason =
+      admission.type === "fresh" ? admission.reason : undefined;
     if (admission.type === "reuse") {
-      const continuation = await resumeContinuation(
-        request,
-        options,
-        admission,
-        handle,
-      );
-      usageBaseline = continuation.usageBaseline;
-      instructionSources = continuation.instructionSources;
-      // Reuse is reported only after the mapped thread has passed preflight,
-      // resumed with the expected ID, and accepted its next turn.
-      threadReused = true;
-    } else {
+      const preflight = await resumeIdleThread(request, options, handle);
+      queue.assertHealthy();
+      if (Array.isArray(preflight)) {
+        const continuation = await resumeContinuation(
+          request,
+          options,
+          admission,
+          handle,
+          preflight,
+        );
+        usageBaseline = continuation.usageBaseline;
+        instructionSources = continuation.instructionSources;
+        threadReused = true;
+      } else {
+        fallbackReason = preflight.reason;
+        for (const threadId of preflight.threadIds)
+          excludedThreadIds.add(threadId);
+        // Release the source before starting a new thread, and settle callbacks
+        // queued during read/resume without touching its durable checkpoint.
+        releaseSource(handle);
+        queue.discardIngress();
+      }
+    }
+    if (!threadReused) {
       assertDispatchable(options);
-      if (admission.reason) {
-        validateFallbackHistory(request.messages, {
-          allowUnansweredCalls: admission.reason === "tool_results_required",
-        });
+      queue.assertHealthy();
+      if (fallbackReason) {
         // One diagnostic per dispatched fallback: fixed reason and request ID
         // only, so transcripts, tool arguments, and raw thread IDs stay out
         // of logs. Emitted after the gates that can still reject the request,
-        // so a cancelled or unpaired fallback never logs an execution that
-        // never started.
+        // so a cancelled fallback never logs an execution that never started.
         options.log("info", "continuation_fresh_fallback", {
           request_id: options.requestId,
-          reason: admission.reason,
+          reason: fallbackReason,
         });
       }
       instructionSources = await startFreshThread(
@@ -529,7 +564,6 @@ export async function execute(
       );
       // A thread this request created has provably consumed nothing yet.
       usageBaseline = ZERO_TOKEN_USAGE;
-      threadReused = false;
     }
   } catch (error) {
     // Setup failures occur before HTTP headers, but still must release any
@@ -942,9 +976,8 @@ function* emitCapturedBatch(
 /**
  * Decides synchronously, before any app-server RPC, whether this request
  * continues a mapped thread or executes on a fresh one. Every named local
- * unavailability selects fresh execution with a fixed reason; duplicate client
- * IDs, results that fail validation against a live pending batch, and tool
- * results against a live ready mapping remain typed client errors. The thread
+ * unavailability or compatibility mismatch selects fresh execution with a
+ * fixed reason; ambiguous client result IDs remain typed client errors. The thread
  * lease is claimed last, only for reuse, and is attached to the handle only
  * after acquisition so a fresh result never retains the rejected source's
  * thread or lease.
@@ -972,9 +1005,9 @@ function prepareContinuation(
   if (!responseId) return { type: "fresh" };
   const stored = options.continuations.store.get(responseId);
   if (!stored) return { type: "fresh", reason: "unknown_previous_response_id" };
-  // Pending-result validation precedes binding, capability, and contention
-  // checks so a live mapping's client errors surface before any fallback
-  // consideration.
+  // Pending-result compatibility precedes binding, capability, and contention
+  // checks so the first mismatch selects fresh execution without touching the
+  // source checkpoint.
   let results: Map<string, string> | undefined;
   let suffixUsers: ChatMessage[] | undefined;
   if (stored.state === "pending_tool") {
@@ -992,15 +1025,16 @@ function prepareContinuation(
       batch.results,
       stored.pendingCalls!,
     );
+    if (!results) return { type: "fresh", reason: "pending_batch_mismatch" };
     suffixUsers = batch.suffixUsers;
   } else if (stored.state === "expired") {
-    return stored.pendingCalls?.length && request.terminalToolResults.length
+    return stored.pendingCalls?.length && request.toolBatch.results.length
       ? { type: "fresh", reason: "expired_tool_continuation" }
       : { type: "fresh", reason: "expired_previous_response_id" };
   } else if (stored.state === "superseded") {
     return { type: "fresh", reason: "superseded_previous_response_id" };
-  } else if (request.terminalToolResults.length) {
-    continuationFailure(409, "tool_results_without_pending_call");
+  } else if (request.toolBatch.results.length) {
+    return { type: "fresh", reason: "tool_results_without_pending_call" };
   }
   if (stored.model !== binding.model)
     return { type: "fresh", reason: "continuation_model_mismatch" };
@@ -1073,9 +1107,9 @@ async function resumeContinuation(
   options: ChatHandlerOptions,
   admission: ReuseAdmission,
   handle: TurnHandle,
+  instructionSources: string[],
 ): Promise<ContinuationSetup> {
   const stored = admission.record;
-  const instructionSources = await resumeIdleThread(request, options, handle);
   if (stored.state !== "pending_tool") {
     await startTurn(request, options, handle);
     return { usageBaseline: stored.usageTotal, instructionSources };
@@ -1125,52 +1159,76 @@ async function resumeContinuation(
   return { usageBaseline: stored.usageTotal, instructionSources };
 }
 
-/** Gates on a resumable thread status and resumes it under this request's policy. */
+/** Releases a reuse admission's source ownership before fresh execution. */
+function releaseSource(handle: TurnHandle): void {
+  handle.lease?.release();
+  // Reset every source-bound field so no source state reaches fresh setup.
+  handle.threadId = undefined;
+  handle.turnId = undefined;
+  handle.lease = undefined;
+  handle.rawResponseBoundaries = false;
+  handle.terminal = false;
+}
+
+/** Reads and resumes a source thread before any replay or turn-start attempt. */
 async function resumeIdleThread(
   request: ChatRequest,
   options: ChatHandlerOptions,
   handle: TurnHandle,
-): Promise<string[]> {
-  let resumed: Record<string, unknown>;
+): Promise<string[] | PreflightFallback> {
+  const sourceThreadId = handle.threadId!;
+  const fallback = (
+    reason: PreflightFallback["reason"],
+    ...otherThreadIds: string[]
+  ): PreflightFallback => ({
+    reason,
+    threadIds: [sourceThreadId, ...otherThreadIds],
+  });
+  let readValue: unknown;
   try {
-    const read = asRecord(
-      await options.rpc.request(
-        "thread/read",
-        { threadId: handle.threadId, includeTurns: false },
-        options.signal,
-      ),
+    readValue = await options.rpc.request(
       "thread/read",
-    );
-    const readThread = asRecord(read.thread, "thread/read.thread");
-    const status = record(readThread.status)?.type;
-    if (status === "active") continuationFailure(409, "thread_busy");
-    // Only protocol states that can safely enter thread/resume are accepted.
-    // Missing, malformed, and future status values fail closed.
-    if (status !== "idle" && status !== "notLoaded")
-      continuationFailure(409, "thread_not_resumable");
-    resumed = asRecord(
-      await options.rpc.request(
-        "thread/resume",
-        {
-          threadId: handle.threadId,
-          excludeTurns: true,
-          ...(await threadPolicyParams(request.policy, options)),
-        },
-        options.signal,
-      ),
-      "thread/resume",
+      { threadId: sourceThreadId, includeTurns: false },
+      options.signal,
     );
   } catch (error) {
-    if (error instanceof HttpError) throw error;
-    continuationFailure(409, "thread_not_resumable");
+    if (error instanceof RpcError) return fallback("thread_not_resumable");
+    throw error;
   }
+  const read = asRecord(readValue, "thread/read");
+  const readThread = asRecord(read.thread, "thread/read.thread");
+  if (requiredId(read.thread, "thread/read.thread") !== sourceThreadId)
+    return fallback("thread_not_resumable");
+  const status = asRecord(readThread.status, "thread/read.thread.status").type;
+  if (typeof status !== "string")
+    throw new Error("Invalid thread/read.thread.status response.");
+  // Distinct from local lease contention (`thread_busy`): app-server itself
+  // reports a turn running on the mapped thread.
+  if (status === "active") return fallback("thread_active");
+  if (status !== "idle" && status !== "notLoaded")
+    return fallback("thread_not_resumable");
+  // Configuration resolution remains outside the RPC-error fallback boundary.
+  const policyParams = await threadPolicyParams(request.policy, options);
+  let resumedValue: unknown;
+  try {
+    resumedValue = await options.rpc.request(
+      "thread/resume",
+      { threadId: sourceThreadId, excludeTurns: true, ...policyParams },
+      options.signal,
+    );
+  } catch (error) {
+    if (error instanceof RpcError) return fallback("thread_not_resumable");
+    throw error;
+  }
+  const resumed = asRecord(resumedValue, "thread/resume");
   const resumedThreadId = requiredId(resumed.thread, "thread/resume.thread");
   // The durable mapping is authoritative. A mismatched resume result must
-  // never transfer ownership to, or start work on, an unexpected thread.
-  if (resumedThreadId !== handle.threadId)
-    continuationFailure(409, "thread_not_resumable");
+  // never transfer ownership to, or start work on, an unexpected thread, and
+  // the thread app-server subscribed in its place must not flood fresh ingress.
+  if (resumedThreadId !== sourceThreadId)
+    return fallback("thread_not_resumable", resumedThreadId);
   handle.rawResponseBoundaries = rawResponseThreads(options.rpc).has(
-    handle.threadId,
+    sourceThreadId,
   );
   return requiredStringArray(
     resumed.instructionSources,
@@ -1216,10 +1274,7 @@ async function startFreshThread(
   // Only a trailing user message becomes new turn input. Any other trailing
   // non-system message joins injected history and the empty-input turn asks the
   // model to continue from it. System messages are already represented by the
-  // thread base. A terminal tool-result block reaches this path only through
-  // fallback, whose admission check already required its complete preceding
-  // assistant batch; ordinary fresh requests keep their existing warn-and-drop
-  // handling of unpairable history.
+  // thread base. Unpairable history is dropped with one structured warning.
   const prior = toHistoryItems(freshExecutionHistory(request.messages));
   if (prior.unansweredCalls || prior.orphanResults)
     options.log("warn", "unpaired_history_tool_items_dropped", {

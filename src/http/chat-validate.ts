@@ -7,7 +7,7 @@ import {
   type RequestPolicy,
 } from "../core/policy.js";
 import type { StoredToolCall } from "../continuation/state.js";
-import { HttpError } from "./errors.js";
+import { HttpError, toolCorrelationErrorForStatus } from "./errors.js";
 
 /** Chat Completions reasoning-effort values supported by the public API. */
 const REASONING_EFFORTS = [
@@ -97,9 +97,8 @@ export interface ChatRequest {
   messages: ChatMessage[];
   /**
    * The terminal contiguous `role: "tool"` block, derived once during
-   * validation. Implicit continuation lookup, the expired-record fallback
-   * reason, and the ready-record tool-result rejection read this terminal
-   * view; explicit pending-batch correlation instead reads `toolBatch`.
+   * validation. Implicit continuation lookup reads this terminal view; record
+   * correlation and fallback reasons read `toolBatch`.
    */
   terminalToolResults: ChatMessage[];
   /**
@@ -176,6 +175,19 @@ export function validateRequest(
     invalid(
       "Tool results require previous_response_id when implicit tool continuation is disabled.",
       "previous_response_id",
+    );
+  // Only the selected result block is a continuation candidate. IDs reused
+  // in older, separate tool rounds do not make this request ambiguous.
+  if (
+    (body.previous_response_id || terminalToolResults.length) &&
+    new Set(toolBatch.results.map((message) => message.toolCallId)).size !==
+      toolBatch.results.length
+  )
+    throw toolCorrelationErrorForStatus(
+      400,
+      "A tool call has more than one result.",
+      "duplicate_tool_call_id",
+      "tool_call_id",
     );
   if (
     body.previous_response_id &&
@@ -523,29 +535,6 @@ export function freshExecutionHistory(
   return messages.at(-1)?.role === "user" ? messages.slice(0, -1) : messages;
 }
 
-/**
- * Validates that a fallback transcript supplies complete tool pairing. Unlike
- * an ordinary fresh request, which drops unpairable history with a warning, a
- * fallback was selected because the requested continuation was unavailable, so
- * silently discarding the client's calls or results would lose work the
- * transcript claims to carry. A pending continuation with no result block may
- * abandon unanswered calls; fresh setup drops them with its existing warning.
- */
-export function validateFallbackHistory(
-  messages: readonly ChatMessage[],
-  options: { allowUnansweredCalls?: boolean } = {},
-): void {
-  const prior = toHistoryItems(freshExecutionHistory(messages));
-  if (
-    (prior.unansweredCalls && !options.allowUnansweredCalls) ||
-    prior.orphanResults
-  )
-    invalid(
-      "A fresh continuation requires every assistant tool call to be answered and every tool result to follow the assistant message that requested it.",
-      "messages",
-    );
-}
-
 /** Builds the Responses API function_call item for one recorded dynamic call. */
 export function toFunctionCallItem(
   call: StoredToolCall,
@@ -570,14 +559,20 @@ export function toFunctionCallOutputItem(
   };
 }
 
-/** Validates a complete, single-use result set for a pending tool batch. */
+/**
+ * Checks native reuse compatibility of a selected result block, returning
+ * undefined on any mismatch. `validateRequest` already rejected duplicate
+ * result IDs in this block.
+ */
 export function validateToolResults(
   assistant: ChatMessage | undefined,
   toolResults: ChatMessage[],
   pending: StoredToolCall[],
-): Map<string, string> {
-  if (!assistant?.toolCalls)
-    invalid("The assistant tool-call message is required.", "messages");
+): Map<string, string> | undefined {
+  const results = new Map(
+    toolResults.map((message) => [message.toolCallId!, message.content!]),
+  );
+  if (!assistant?.toolCalls) return undefined;
   const expected = new Map(pending.map((call) => [call.callId, call]));
   // Internal calls in a replayed assistant message are observational. Only
   // calls owned by the pending dynamic batch participate in continuation.
@@ -594,23 +589,12 @@ export function validateToolResults(
         call.arguments !== expected.get(call.id)?.arguments,
     )
   )
-    invalid(
-      "The assistant tool calls do not match the pending continuation.",
-      "messages",
-    );
-  const results = new Map<string, string>();
-  for (const message of toolResults) {
-    if (!message.toolCallId || !expected.has(message.toolCallId))
-      invalid("The tool result references a foreign call ID.", "messages");
-    if (results.has(message.toolCallId))
-      invalid("A tool call has more than one result.", "messages");
-    results.set(message.toolCallId, message.content!);
-  }
-  if (results.size !== expected.size)
-    invalid(
-      "Exactly one result is required for every pending tool call.",
-      "messages",
-    );
+    return undefined;
+  if (
+    results.size !== expected.size ||
+    [...results.keys()].some((id) => !expected.has(id))
+  )
+    return undefined;
   return results;
 }
 
