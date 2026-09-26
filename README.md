@@ -252,7 +252,7 @@ The JSON Schema ships with the package at `protocol/schemas/x-codex.schema.json`
 
 When Codex reports exact usage for the turn, responses include standard `prompt_tokens`, `completion_tokens`, and `total_tokens`, plus cached-input and reasoning-token detail when available. When no complete record exists, `usage` is omitted — never estimated.
 
-After app-server reports the thread idle, the proxy collects usage updates for one full second, even if earlier counts exist. This delays aggregate responses and streaming terminal frames so late reasoning counts can replace earlier usage. Request aborts, transport failure, and a ten-second terminal collection limit can end the wait sooner; updates after the response ends cannot amend it.
+After app-server reports the thread idle, the proxy collects usage updates for five full seconds, even if earlier counts exist. This delays aggregate responses and streaming terminal frames so late reasoning counts can replace earlier usage. Request aborts, transport failure, and a ten-second terminal collection limit can end the wait sooner; updates after the response ends cannot amend it.
 
 Streaming emits usage once, in a `choices: []` chunk **before** the `finish_reason` chunk, followed by `[DONE]`. This deliberately changes the previous finish-then-usage ordering so clients that stop at `finish_reason` already have the counts. Read usage by its field rather than assuming it is the last chunk. `stream_options.include_usage: false` still omits it.
 

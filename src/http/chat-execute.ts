@@ -40,6 +40,7 @@ import {
   type ChatRequest,
 } from "./chat-validate.js";
 import { HttpError, toolCorrelationErrorForStatus } from "./errors.js";
+import { IDLE_USAGE_GRACE_MS } from "./chat-timing.js";
 import {
   usageLimitErrorResolver,
   type UsageLimitErrorResolver,
@@ -358,9 +359,6 @@ interface PreflightFallback {
  * missing idle boundary. A request-timeout abort can end collection sooner.
  */
 const TERMINAL_USAGE_WAIT_MS = 10_000;
-
-/** Fixed window after idle for late usage updates, including corrected counts. */
-const IDLE_USAGE_GRACE_MS = 5000;
 
 /** Runs or resumes a Codex thread and yields its normalized event stream. */
 export async function execute(

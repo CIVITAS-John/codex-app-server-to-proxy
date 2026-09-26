@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test, vi } from "vitest";
+import { offlineUsageTiming } from "../support/offline-timing.js";
 import { ResponseStore } from "../../src/continuation/state.js";
 import { createLogger, type Logger } from "../../src/core/logger.js";
 import {
@@ -1228,8 +1229,7 @@ test("third full-history tool continuation correlates only its terminal result b
       }
     }, "codex-terminal-tool-results-");
   }
-  // Six serial requests now each include the terminal idle grace.
-}, 15_000);
+});
 
 /** Replays one transcript into a fresh thread and reports what it received. */
 async function replayFreshThread(
@@ -1777,8 +1777,7 @@ test("tool results followed by user messages continue natively with the final us
       }, "codex-tool-suffix-users-");
     }
   }
-  // Twelve serial requests now each include the terminal idle grace.
-}, 20_000);
+});
 
 test("an explicit pending suffix continuation ignores an earlier completed round reusing a pending call ID", async () => {
   await withTempDir(async (directory) => {
@@ -3178,7 +3177,7 @@ test("a tool batch on a fresh thread persists its exact all-zero boundary and ca
   }, "codex-dynamic-tools-");
 });
 
-test("usage captured before a tool call still receives the full idle grace", async () => {
+test("usage captured before a tool call is reported in its response", async () => {
   await withTempDir(async (directory) => {
     const fake = new ToolAppServer(true, false, undefined, false, {
       suspendOrder: "before_tool_call",
@@ -3187,7 +3186,6 @@ test("usage captured before a tool call still receives the full idle grace", asy
     });
     const { origin, proxy } = await startProxy(directory, fake);
     try {
-      const started = Date.now();
       const response = await postChatCompletion(origin, {
         model: "m",
         tools: USAGE_TOOLS,
@@ -3197,10 +3195,6 @@ test("usage captured before a tool call still receives the full idle grace", asy
       const first = (await response.json()) as CompletionBody;
       assert.equal(first.choices[0]!.finish_reason, "tool_calls");
       assert.equal(first.usage?.completion_tokens_details?.reasoning_tokens, 3);
-      assert.ok(
-        Date.now() - started >= 1_000,
-        "earlier usage must not close the idle grace window",
-      );
     } finally {
       await proxy.close();
     }
@@ -3240,6 +3234,7 @@ test("usage flushed by the interrupt is attributed to the tool-call response", a
 });
 
 test("usage corrected after interrupted idle establishes the continuation boundary", async () => {
+  offlineUsageTiming.idleGraceMs = 100;
   await withTempDir(async (directory) => {
     const fake = new ToolAppServer(true, false, undefined, false, {
       suspendOrder: "on_interrupt",

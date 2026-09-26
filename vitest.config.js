@@ -16,6 +16,7 @@ export default defineConfig({
   test: {
     include: ["test/**/*.test.ts"],
     exclude: ["test/**/*.live.test.ts"],
+    setupFiles: ["test/support/offline-timing.ts"],
     watch: false,
     coverage: {
       enabled: coverageEnabled,

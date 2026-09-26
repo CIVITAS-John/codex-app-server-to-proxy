@@ -534,9 +534,7 @@ test("model, reasoning, cwd, tool, and policy binding mismatches select a fresh 
       }
     }, `codex-continuation-${item.name}-`);
   }
-  // Each case now completes one fresh turn, whose idle-usage grace costs
-  // about a second, so the loop needs more than the default budget.
-}, 20_000);
+});
 
 test("a record without reasoning effort falls back to a fresh thread for an explicit effort", async () => {
   await withTempDir(async (directory) => {
@@ -1256,7 +1254,6 @@ test("partial explicit batch with trailing user falls back over SSE and keeps co
 });
 
 test("pending continuations without results execute fresh and remain consumable", async () => {
-  // Eight successful responses each wait through the one-second usage grace.
   for (const stream of [false, true]) {
     for (const includeUnansweredCall of [false, true]) {
       await withTempDir(async (directory) => {

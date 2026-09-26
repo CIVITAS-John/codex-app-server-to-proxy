@@ -5,6 +5,7 @@ import { mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, vi } from "vitest";
+import { offlineUsageTiming } from "../support/offline-timing.js";
 import {
   EventNormalizer,
   HANDLED_NOTIFICATION_METHODS,
@@ -2307,6 +2308,7 @@ test("reports usage that app-server streams after turn completion", async () => 
 });
 
 test("recovers usage flushed after idle for aggregate and default streaming output", async () => {
+  offlineUsageTiming.idleGraceMs = 100;
   await withChatServer(async (origin, _proxy, useTransport) => {
     useTransport(fakeAppServer({ usageOrder: "after_idle" }));
     const aggregate = await fetch(`${origin}/v1/chat/completions`, {
@@ -2352,6 +2354,7 @@ test("recovers usage flushed after idle for aggregate and default streaming outp
 test.each([false, true])(
   "keeps collecting corrected usage after idle (stream=%s)",
   async (stream) => {
+    offlineUsageTiming.idleGraceMs = 100;
     await withChatServer(async (origin, _proxy, useTransport) => {
       useTransport(fakeAppServer({ lateUsageCorrections: true }));
       const response = await fetch(`${origin}/v1/chat/completions`, {
@@ -4456,8 +4459,7 @@ test("request policies map exactly, bind continuations, and honor managed denial
       await proxy?.close();
     }
   }, "codex-policy-http-");
-  // The successful policy variants each wait through the terminal idle grace.
-}, 20_000);
+});
 
 test("refreshing managed requirements on an unchanged transport takes effect", async () => {
   await withTempDir(async (directory) => {
@@ -4515,13 +4517,16 @@ interface ExecuteFixture {
 async function newExecuteFixture(
   stateDirectory: string,
   signal: AbortSignal,
+  appServer?: FakeTransport,
 ): Promise<{ request: ChatRequest; fixture: ExecuteFixture }> {
   const methods: string[] = [];
-  const fake = createFakeTransport({
-    onMessage(message) {
-      if (typeof message.method === "string") methods.push(message.method);
-    },
-  });
+  const fake =
+    appServer ??
+    createFakeTransport({
+      onMessage(message) {
+        if (typeof message.method === "string") methods.push(message.method);
+      },
+    });
   const continuations = new ContinuationCoordinator(
     new ResponseStore(stateDirectory),
     fake.rpc,
@@ -4560,6 +4565,162 @@ async function newExecuteFixture(
     },
   };
 }
+
+test.each(["completed", "interrupted"] as const)(
+  "%s turns retain the production grace through late usage and repeated idle",
+  async (status) => {
+    const timing = await vi.importActual<
+      typeof import("../../src/http/chat-timing.js")
+    >("../../src/http/chat-timing.js");
+    offlineUsageTiming.idleGraceMs = timing.IDLE_USAGE_GRACE_MS;
+    assert.equal(timing.IDLE_USAGE_GRACE_MS, 5_000);
+    await withTempDir(async (directory) => {
+      const fake = fakeAppServer({ complete: false });
+      const { request, fixture } = await newExecuteFixture(
+        directory,
+        new AbortController().signal,
+        fake,
+      );
+      vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+      try {
+        const execution = await execute(
+          request,
+          fixture.options,
+          "chatcmpl_grace",
+        );
+        const events: Array<{ usage?: Usage; finishReason?: string }> = [];
+        let ended = false;
+        const collected = (async () => {
+          for await (const event of execution.events) events.push(event);
+          ended = true;
+        })();
+        sendTokenUsage(fake.send, "thr_test", "turn_test", tokenUsageFixture());
+        fake.send(
+          protocolNotification({
+            method: "turn/completed",
+            params: {
+              threadId: "thr_test",
+              turn: protocolTurn("turn_test", status),
+            },
+          }),
+        );
+        const idle = (): void =>
+          fake.send(
+            protocolNotification({
+              method: "thread/status/changed",
+              params: { threadId: "thr_test", status: { type: "idle" } },
+            }),
+          );
+        idle();
+        await vi.advanceTimersByTimeAsync(0);
+        assert.equal(vi.getTimerCount(), 1);
+        await vi.advanceTimersByTimeAsync(4_500);
+        assert.equal(ended, false);
+        sendTokenUsage(
+          fake.send,
+          "thr_test",
+          "turn_test",
+          tokenUsageFixture(7),
+        );
+        idle();
+        await vi.advanceTimersByTimeAsync(499);
+        assert.equal(ended, false);
+        assert.equal(
+          events.some((event) => event.finishReason),
+          false,
+        );
+        await vi.advanceTimersByTimeAsync(1);
+        await collected;
+        assert.equal(events.filter((event) => event.usage).length, 1);
+        assert.equal(
+          events.find((event) => event.usage)?.usage?.completion_tokens,
+          9,
+        );
+        assert.equal(
+          events.at(-1)?.finishReason,
+          status === "interrupted" ? "length" : "stop",
+        );
+        assert.equal(vi.getTimerCount(), 0);
+      } finally {
+        fixture.continuations.dispose();
+        fake.close();
+        vi.useRealTimers();
+      }
+    }, "codex-grace-clock-");
+  },
+);
+
+test.each(["backstop", "abort"])(
+  "terminal usage collection stops on %s without inventing usage",
+  async (exit) => {
+    const timing = await vi.importActual<
+      typeof import("../../src/http/chat-timing.js")
+    >("../../src/http/chat-timing.js");
+    offlineUsageTiming.idleGraceMs = timing.IDLE_USAGE_GRACE_MS;
+    await withTempDir(async (directory) => {
+      const fake = fakeAppServer({ complete: false });
+      const controller = new AbortController();
+      const { request, fixture } = await newExecuteFixture(
+        directory,
+        controller.signal,
+        fake,
+      );
+      const captured = captureLogs();
+      fixture.options.log = captured.log;
+      vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+      try {
+        const execution = await execute(
+          request,
+          fixture.options,
+          "chatcmpl_backstop",
+        );
+        const events: Array<{ usage?: Usage; finishReason?: string }> = [];
+        let ended = false;
+        const collected = (async () => {
+          for await (const event of execution.events) events.push(event);
+          ended = true;
+        })();
+        fake.send(
+          protocolNotification({
+            method: "turn/completed",
+            params: {
+              threadId: "thr_test",
+              turn: protocolTurn("turn_test", "completed"),
+            },
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(9_000);
+        assert.equal(ended, false);
+        // A late idle cannot move the fixed ten-second backstop.
+        fake.send(
+          protocolNotification({
+            method: "thread/status/changed",
+            params: { threadId: "thr_test", status: { type: "idle" } },
+          }),
+        );
+        await vi.advanceTimersByTimeAsync(999);
+        assert.equal(ended, false);
+        if (exit === "abort") controller.abort();
+        else await vi.advanceTimersByTimeAsync(1);
+        await collected;
+        assert.equal(
+          events.some((event) => event.usage),
+          false,
+        );
+        assert.equal(events.at(-1)?.finishReason, "stop");
+        assert.equal(
+          capturedEvent(captured.entries, "usage_unreported")[0]?.reason,
+          exit === "abort" ? "aborted" : "backstop_expired",
+        );
+        assert.equal(vi.getTimerCount(), 0);
+      } finally {
+        fixture.continuations.dispose();
+        fake.close();
+        vi.useRealTimers();
+      }
+    }, "codex-usage-backstop-");
+  },
+);
 
 test("a disposed coordinator rejects execution before any RPC", async () => {
   await withTempDir(async (directory) => {
