@@ -7,7 +7,10 @@ import { protocolNotification } from "../support/protocol-fixtures.js";
 import { tokenUsageFixture } from "../support/transport.js";
 
 /** Builds a typed completion with distinguishable exact model-request usage. */
-function raw(responseId: string, reasoning = 3): Extract<ServerNotification, { method: "rawResponse/completed" }> {
+function raw(
+  responseId: string,
+  reasoning = 3,
+): Extract<ServerNotification, { method: "rawResponse/completed" }> {
   return {
     method: "rawResponse/completed",
     params: {
@@ -113,8 +116,8 @@ test("missing raw reasoning stays absent and cannot preserve a stale continuatio
   const normalizer = new EventNormalizer(ZERO_TOKEN_USAGE);
   const notification = raw("partial");
   // Malformed wire data deliberately violates the generated required field.
-  const { reasoningOutputTokens: _reasoning, ...partial } =
-    notification.params.usage!;
+  const partial = { ...notification.params.usage! };
+  Reflect.deleteProperty(partial, "reasoningOutputTokens");
   normalizer.normalize(notification.method, {
     ...notification.params,
     usage: partial,
@@ -143,4 +146,40 @@ test("zero reasoning is available usage and invalid counts are never exposed", (
     usage: { ...invalid.params.usage, inputTokens: -1 },
   });
   assert.equal(normalizer.usageSnapshot(), undefined);
+});
+
+test("raw fallback after a cumulative reset never advances the obsolete baseline", () => {
+  const normalizer = new EventNormalizer(tokenUsageFixture(3, 9).total);
+  threadUsage(normalizer, 3);
+  const notification = raw("after_reset");
+  normalizer.normalize(notification.method, notification.params);
+  assert.equal(normalizer.usageSnapshot()?.total_tokens, 9);
+  assert.equal(normalizer.usageBoundary(), undefined);
+});
+
+test("raw responses without identifiers invalidate a deduplicated sum", () => {
+  const normalizer = new EventNormalizer(ZERO_TOKEN_USAGE);
+  const notification = raw("valid");
+  normalizer.normalize(notification.method, {
+    ...notification.params,
+    responseId: undefined,
+  });
+  normalizer.normalize(notification.method, notification.params);
+  assert.equal(normalizer.usageSnapshot(), undefined);
+});
+
+test("incomplete late thread usage cannot retain an older raw boundary", () => {
+  const normalizer = new EventNormalizer(ZERO_TOKEN_USAGE);
+  const notification = raw("raw");
+  normalizer.normalize(notification.method, notification.params);
+  const tokenUsage = tokenUsageFixture(7);
+  normalizer.normalize("thread/tokenUsage/updated", {
+    tokenUsage: { ...tokenUsage, total: null },
+  });
+  assert.equal(normalizer.usageSource(), "thread_token_usage");
+  assert.equal(
+    normalizer.usageSnapshot()?.completion_tokens_details?.reasoning_tokens,
+    7,
+  );
+  assert.equal(normalizer.usageBoundary(), undefined);
 });

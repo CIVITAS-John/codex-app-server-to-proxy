@@ -420,7 +420,11 @@ export async function execute(
         options.log("debug", "usage_notification", {
           request_id: options.requestId,
           method,
-          correlated,
+          correlation: !correlated
+            ? "rejected"
+            : handle.threadId && handle.turnId
+              ? "matched"
+              : "pending",
           has_usage: Boolean(counters),
           has_reasoning: typeof counters?.reasoningOutputTokens === "number",
           elapsed_ms: Date.now() - usageStartedAt,
@@ -466,6 +470,11 @@ export async function execute(
       // are correlated by thread alone and must bypass the turn-id filter below.
       if (handle.threadId && record(params)?.threadId !== handle.threadId)
         return;
+      if (isIdleThreadStatus(params, handle.threadId))
+        options.log("debug", "usage_thread_idle", {
+          request_id: options.requestId,
+          elapsed_ms: Date.now() - usageStartedAt,
+        });
       queue.enqueue({ type: "notification", method, params });
       return;
     }
@@ -719,10 +728,9 @@ export async function execute(
               normalizer,
               handle,
             )) {
-              // Emit usage after the authoritative tool_calls frame.
-              if (event.usage) pendingUsage = event.usage;
-              else if (event.finishReason) continue;
-              else yield event;
+              // Usage is selected once after terminal collection.
+              if (event.usage || event.finishReason) continue;
+              yield event;
             }
             pendingFinishReason = "tool_calls";
             handle.terminal = true;
@@ -760,9 +768,7 @@ export async function execute(
               // terminal success frame until the continuation can be recorded.
               handle.terminal = true;
               pendingFinishReason = event.finishReason;
-            } else if (event.usage) {
-              pendingUsage = event.usage;
-            } else {
+            } else if (!event.usage) {
               yield event;
             }
           }
@@ -857,7 +863,6 @@ async function collectTerminalUsage(
   handle: TurnHandle,
   signal: AbortSignal,
 ): Promise<{
-  usage: Usage | undefined;
   exitReason:
     | "idle_grace_expired"
     | "backstop_expired"
@@ -865,13 +870,12 @@ async function collectTerminalUsage(
     | "transport_failed"
     | "queue_overflowed";
 }> {
-  let usage: Usage | undefined;
   let idleAt: number | undefined;
   const deadline = Date.now() + TERMINAL_USAGE_WAIT_MS;
   while (true) {
-    if (signal.aborted) return { usage, exitReason: "aborted" };
+    if (signal.aborted) return { exitReason: "aborted" };
     const failureReason = queue.failureReason;
-    if (failureReason) return { usage, exitReason: failureReason };
+    if (failureReason) return { exitReason: failureReason };
     for (const event of queue.drainNotifications()) {
       if (
         notificationBehavior(event.method) === "lifecycle" &&
@@ -881,15 +885,14 @@ async function collectTerminalUsage(
         continue;
       }
       if (!matchesTurn(event.params, handle.threadId, handle.turnId)) continue;
-      for (const normalized of normalizer.normalize(event.method, event.params))
-        // Only usage is recovered here. Every other late event would have to
-        // follow the terminal frame this response has already committed to.
-        if (normalized.usage) usage = normalized.usage;
+      // The normalizer retains final usage. Other late output cannot follow
+      // the terminal event this response has already committed to.
+      normalizer.normalize(event.method, event.params);
     }
     const now = Date.now();
     if (idleAt !== undefined && now >= idleAt + IDLE_USAGE_GRACE_MS)
-      return { usage, exitReason: "idle_grace_expired" };
-    if (now >= deadline) return { usage, exitReason: "backstop_expired" };
+      return { exitReason: "idle_grace_expired" };
+    if (now >= deadline) return { exitReason: "backstop_expired" };
     const ready = (): boolean => queue.hasNotification;
     const waitUntil = Math.min(
       deadline,

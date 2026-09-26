@@ -252,11 +252,15 @@ The JSON Schema ships with the package at `protocol/schemas/x-codex.schema.json`
 
 When Codex reports exact usage for the turn, responses include standard `prompt_tokens`, `completion_tokens`, and `total_tokens`, plus cached-input and reasoning-token detail when available. When no complete record exists, `usage` is omitted — never estimated.
 
+Exact raw completion counters provide a fallback when thread usage updates are missing, including after a tool-turn interrupt. The proxy sums distinct upstream response IDs; later attributable thread usage replaces that sum. The two sources are never added together. Missing reasoning remains absent; a reported zero remains zero.
+
 After app-server reports the thread idle, the proxy collects usage updates for five full seconds, even if earlier counts exist. This delays aggregate responses and streaming terminal frames so late reasoning counts can replace earlier usage. Request aborts, transport failure, and a ten-second terminal collection limit can end the wait sooner; updates after the response ends cannot amend it.
 
 Streaming emits usage once, in a `choices: []` chunk **before** the `finish_reason` chunk, followed by `[DONE]`. This deliberately changes the previous finish-then-usage ordering so clients that stop at `finish_reason` already have the counts. Read usage by its field rather than assuming it is the last chunk. `stream_options.include_usage: false` still omits it.
 
-One response can span several Codex model requests, for example when internal tools run before the answer. Usage subtracts the stored cumulative boundary from the latest complete total, preserving reasoning from earlier requests. A response ending in `finish_reason: "tool_calls"` interrupts its Codex turn to flush usage, collects late updates, and stores the reported boundary for the continuation. If no usage arrives, the response omits it and retains its starting boundary so a later continuation can account for the unreported work.
+One response can span several Codex model requests, for example when internal tools run before the answer. Usage subtracts the stored cumulative boundary from the latest complete total, preserving reasoning from earlier requests. A response ending in `finish_reason: "tool_calls"` interrupts its Codex turn, collects late updates, and stores the reported boundary for the continuation. Complete raw fallback counts advance the starting boundary by the reported amounts to prevent double counting. If no usage arrives, the response omits it and retains its starting boundary so a later continuation can account for the unreported work.
+
+`usage_unreported` warnings distinguish `missing: "all"` from `missing: "reasoning"` and identify the selected `usage_source`. At `--log-level debug`, usage notification, tool-interrupt, idle, and collection-completion events include elapsed times and structural metadata for diagnosing ordering. These diagnostics omit provider payloads and token values.
 
 ## Quota errors
 

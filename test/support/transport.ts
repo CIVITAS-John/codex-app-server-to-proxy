@@ -143,11 +143,9 @@ export type UsageWireOrder =
 const LATER_READ_DELAY_MS = 5;
 
 /**
- * Wire position of a tool-call turn's usage. Live app-server (codex 0.145.0)
- * flushes usage within milliseconds of `turn/interrupt`, but may also have
- * attributed the model request before `item/tool/call`; a broken server may
- * never flush at all. Every position must produce exactly-once attribution
- * across the tool-call response and its continuation.
+ * Wire position of a tool-call turn's thread usage. An interrupted turn may
+ * report it before the call, at interruption, or never. Raw completion usage
+ * is independent. Each ordering must avoid charging the continuation twice.
  */
 export type ToolUsageWireOrder = "before_tool_call" | "on_interrupt" | "never";
 
@@ -242,9 +240,8 @@ export interface InterruptTurnOptions {
 }
 
 /**
- * Emits the wire sequence live app-server produces when a turn is interrupted:
- * the terminal usage flush, `turn/completed` with status `interrupted`, and
- * the thread's idle boundary.
+ * Scripts an optional usage flush, `turn/completed` with status `interrupted`,
+ * and the thread's idle boundary.
  */
 export function interruptTurn(
   send: FakeTransportSend,

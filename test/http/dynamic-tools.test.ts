@@ -3423,8 +3423,7 @@ test("a server that never flushes usage leaves it omitted rather than estimated"
       assert.equal(response.status, 200);
       const first = (await response.json()) as CompletionBody;
       assert.equal(first.choices[0]!.finish_reason, "tool_calls");
-      // Live app-server flushes usage at the interrupt; against a server that
-      // does not, the response reports none instead of guessing.
+      // Neither raw nor thread usage arrived, so no counters can be reported.
       assert.equal(first.usage, undefined);
       const warnings = entries.filter(
         (entry) => entry.event === "usage_unreported",

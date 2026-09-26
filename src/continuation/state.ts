@@ -55,7 +55,7 @@ export interface ResponseRecord extends ThreadBinding {
    * a pending record survives proxy restarts with nothing process-local.
    */
   pendingCalls?: StoredToolCall[];
-  /** Latest exact cumulative app-server total at this response boundary. */
+  /** Exact accounting boundary, including any reported raw-completion fallback. */
   usageTotal?: TokenUsageCounters;
 }
 

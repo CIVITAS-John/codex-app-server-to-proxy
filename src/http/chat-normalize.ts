@@ -217,13 +217,10 @@ export class EventNormalizer {
   }
 
   /**
-   * Returns the exact cumulative counter the next response must subtract from:
-   * the newest total this response reported, or the boundary it started from
-   * when app-server attributed nothing to it. Both are exact app-server values,
-   * so a response that could report no usage still leaves its successor a
-   * boundary that covers the model requests it could not report. A reset keeps the
-   * newest total, which remains the correct boundary even once subtraction has
-   * been abandoned for the rest of this response.
+   * Returns the accounting boundary for the next response: the selected thread
+   * total, or the starting boundary plus the exact raw counts reported here.
+   * No reported usage preserves the starting boundary. Incomplete raw details
+   * leave no exact cumulative boundary, so the next response must use `last`.
    */
   usageBoundary(): TokenUsageCounters | undefined {
     if (this.#usageSource === "raw_response") {
@@ -233,6 +230,7 @@ export class EventNormalizer {
       const raw = this.#rawUsage;
       if (
         !this.#usageBaseline ||
+        !this.#cumulativeUsageValid ||
         !raw?.prompt_tokens_details ||
         !raw.completion_tokens_details
       )
@@ -288,27 +286,31 @@ export class EventNormalizer {
     const params = record(value);
     if (!params) return [];
     if (method === "rawResponse/completed") {
-      if (
-        typeof params.responseId !== "string" ||
-        this.#rawResponses.has(params.responseId)
-      )
-        return [];
-      this.#rawResponses.add(params.responseId);
-      const breakdown = record(params.usage);
-      const usage = breakdown ? toUsage(breakdown) : undefined;
-      // A turn can contain multiple model responses. Never present a partial
-      // sum as its usage when any raw completion lacks its base counters.
-      if (!usage) this.#rawUsageComplete = false;
-      if (!this.#rawUsageComplete || !usage) {
+      if (typeof params.responseId !== "string" || !params.responseId) {
+        this.#rawUsageComplete = false;
         this.#usageSource = this.#threadUsage
           ? "thread_token_usage"
           : undefined;
         return [];
       }
-      this.#rawUsage = addUsage(
-        this.#rawUsage ?? countersToUsage(ZERO_TOKEN_USAGE),
-        usage,
-      );
+      if (this.#rawResponses.has(params.responseId)) return [];
+      this.#rawResponses.add(params.responseId);
+      const breakdown = record(params.usage);
+      const usage = breakdown ? toUsage(breakdown) : undefined;
+      // A turn can contain multiple model responses. Never present a partial
+      // sum as its usage when any raw completion lacks its base counters.
+      const combined =
+        this.#rawUsageComplete && usage
+          ? addUsage(this.#rawUsage ?? countersToUsage(ZERO_TOKEN_USAGE), usage)
+          : undefined;
+      if (!combined) {
+        this.#rawUsageComplete = false;
+        this.#usageSource = this.#threadUsage
+          ? "thread_token_usage"
+          : undefined;
+        return [];
+      }
+      this.#rawUsage = combined;
       this.#usageSource = "raw_response";
       return [{ usage: this.#rawUsage }];
     }
@@ -800,30 +802,22 @@ function toUsage(value: Record<string, unknown>): Usage | undefined {
 }
 
 /** Adds disjoint raw completions, retaining only details present in both. */
-function addUsage(left: Usage, right: Usage): Usage {
-  return {
-    prompt_tokens: left.prompt_tokens + right.prompt_tokens,
-    completion_tokens: left.completion_tokens + right.completion_tokens,
-    total_tokens: left.total_tokens + right.total_tokens,
-    ...(left.prompt_tokens_details && right.prompt_tokens_details
-      ? {
-          prompt_tokens_details: {
-            cached_tokens:
-              left.prompt_tokens_details.cached_tokens +
-              right.prompt_tokens_details.cached_tokens,
-          },
-        }
-      : {}),
-    ...(left.completion_tokens_details && right.completion_tokens_details
-      ? {
-          completion_tokens_details: {
-            reasoning_tokens:
-              left.completion_tokens_details.reasoning_tokens +
-              right.completion_tokens_details.reasoning_tokens,
-          },
-        }
-      : {}),
-  };
+function addUsage(left: Usage, right: Usage): Usage | undefined {
+  return toUsage({
+    inputTokens: left.prompt_tokens + right.prompt_tokens,
+    outputTokens: left.completion_tokens + right.completion_tokens,
+    totalTokens: left.total_tokens + right.total_tokens,
+    cachedInputTokens:
+      left.prompt_tokens_details && right.prompt_tokens_details
+        ? left.prompt_tokens_details.cached_tokens +
+          right.prompt_tokens_details.cached_tokens
+        : undefined,
+    reasoningOutputTokens:
+      left.completion_tokens_details && right.completion_tokens_details
+        ? left.completion_tokens_details.reasoning_tokens +
+          right.completion_tokens_details.reasoning_tokens
+        : undefined,
+  });
 }
 
 /** Records plain structural metadata once per unexposed method and transport. */
