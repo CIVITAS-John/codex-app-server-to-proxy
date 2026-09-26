@@ -68,6 +68,8 @@ interface CapturedRejection {
 
 /** Token-usage reporting scripted by one fake app-server run. */
 interface ToolAppServerUsage {
+  /** Exact raw completion counters, independent of later thread accounting. */
+  rawUsage?: ReturnType<typeof tokenUsageFixture>["last"];
   /** Wire position of the tool-call turn's usage, if it reports any. */
   suspendOrder?: ToolUsageWireOrder;
   /** Whether turns that run to completion report usage and an idle boundary. */
@@ -418,6 +420,7 @@ class ToolAppServer {
             },
           ];
           const usageOptions = {
+            ...(this.usage.rawUsage ? { rawUsage: this.usage.rawUsage } : {}),
             usageOrder: suspendOrder,
             reasoningOutputTokens: this.usage.reasoningOutputTokens ?? 0,
             priorRequests: this.#attributedRequests(threadId),
@@ -3290,6 +3293,114 @@ test("usage observed after a tool-call response ends never advances its boundary
   }, "codex-dynamic-tools-");
 });
 
+test.each([false, true])(
+  "raw tool usage survives an absent flush and late correction=%s without double charging",
+  async (corrected) => {
+    if (corrected) offlineUsageTiming.idleGraceMs = 100;
+    await withTempDir(async (directory) => {
+      const entries: Array<Record<string, unknown>> = [];
+      const fake = new ToolAppServer(true, false, undefined, false, {
+        rawUsage: tokenUsageFixture(corrected ? 1 : 3).last,
+        suspendOrder: corrected ? "on_interrupt" : "never",
+        onCompletion: true,
+        reasoningOutputTokens: 3,
+        correctUsageAfterIdle: corrected,
+      });
+      const { origin, proxy } = await startProxy(
+        directory,
+        fake,
+        createLogger("debug", (entry) => entries.push(entry)),
+      );
+      try {
+        const { first, continued } = await suspendAndContinue(origin);
+        assert.equal(
+          first.usage?.completion_tokens_details?.reasoning_tokens,
+          3,
+        );
+        assert.equal(first.usage?.total_tokens, 9);
+        assert.deepEqual(continued.usage, first.usage);
+        assert.equal(
+          entries.some((entry) => entry.event === "usage_unreported"),
+          false,
+        );
+        const report = entries.find(
+          (entry) => entry.event === "usage_collection_completed",
+        );
+        assert.equal(
+          report?.usage_source,
+          corrected ? "thread_token_usage" : "raw_response",
+        );
+        assert.equal(report?.missing, "none");
+        assert.equal(report?.raw_with_usage, 1);
+        assert.equal(
+          entries.some((entry) => entry.event === "usage_tool_interrupt"),
+          true,
+        );
+      } finally {
+        await proxy.close();
+      }
+    }, "codex-raw-usage-");
+  },
+);
+
+test.each([false, true])(
+  "streaming raw tool usage reports missing reasoning=%s before the finish frame",
+  async (missingReasoning) => {
+    await withTempDir(async (directory) => {
+      const entries: Array<Record<string, unknown>> = [];
+      const rawUsage = tokenUsageFixture(3).last;
+      // The fake starts typed; deliberately remove a required wire field to test
+      // partial provider data without inventing a zero reasoning count.
+      if (missingReasoning)
+        Reflect.deleteProperty(rawUsage, "reasoningOutputTokens");
+      const fake = new ToolAppServer(true, false, undefined, false, {
+        rawUsage,
+        suspendOrder: "never",
+      });
+      const { origin, proxy } = await startProxy(
+        directory,
+        fake,
+        createLogger("debug", (entry) => entries.push(entry)),
+      );
+      try {
+        const response = await postChatCompletion(origin, {
+          model: "m",
+          tools: USAGE_TOOLS,
+          stream: true,
+          messages: [{ role: "user", content: "use tools" }],
+        });
+        assert.equal(response.status, 200);
+        const chunks = parseSseChunks<{
+          usage?: CompletionUsage;
+          choices: Array<{ finish_reason?: string }>;
+        }>(await response.text());
+        const usageIndex = chunks.findIndex((chunk) => chunk.usage);
+        const finishIndex = chunks.findIndex((chunk) =>
+          chunk.choices.some((choice) => choice.finish_reason === "tool_calls"),
+        );
+        assert.ok(usageIndex >= 0 && finishIndex > usageIndex);
+        assert.equal(chunks.filter((chunk) => chunk.usage).length, 1);
+        assert.equal(chunks[usageIndex]?.usage?.total_tokens, 9);
+        assert.equal(
+          chunks[usageIndex]?.usage?.completion_tokens_details
+            ?.reasoning_tokens,
+          missingReasoning ? undefined : 3,
+        );
+        const warnings = entries.filter(
+          (entry) => entry.event === "usage_unreported",
+        );
+        assert.equal(warnings.length, missingReasoning ? 1 : 0);
+        if (missingReasoning) {
+          assert.equal(warnings[0]?.missing, "reasoning");
+          assert.equal(warnings[0]?.usage_source, "raw_response");
+        }
+      } finally {
+        await proxy.close();
+      }
+    }, "codex-raw-stream-");
+  },
+);
+
 test("a server that never flushes usage leaves it omitted rather than estimated", async () => {
   await withTempDir(async (directory) => {
     const entries: Array<Record<string, unknown>> = [];
@@ -3322,6 +3433,7 @@ test("a server that never flushes usage leaves it omitted rather than estimated"
       assert.equal(warnings[0]?.level, "warn");
       assert.equal(warnings[0]?.reason, "idle_grace_expired");
       assert.equal(warnings[0]?.pending_tool_batch, true);
+      assert.equal(warnings[0]?.missing, "all");
       assert.equal(typeof warnings[0]?.request_id, "string");
     } finally {
       await proxy.close();

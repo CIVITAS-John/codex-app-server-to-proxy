@@ -1786,10 +1786,8 @@ test("hands the next response a boundary even when nothing was attributed", () =
   assert.equal(new EventNormalizer().usageBoundary(), undefined);
 });
 
-test("raw-response completion is handled as an unexposed boundary", () => {
-  // `rawResponse/completed` carries exact per-request usage, but it is an
-  // internal-only per-request delta. The executor consumes its ordering while
-  // the normalizer deliberately excludes its payload from the HTTP surface.
+test("raw-response completion exposes only normalized usage", () => {
+  // Exact counters can supply the fallback without publishing raw metadata.
   assert.equal(HANDLED_NOTIFICATION_METHODS.has("rawResponse/completed"), true);
   assert.deepEqual(
     new EventNormalizer().normalize("rawResponse/completed", {
@@ -1805,7 +1803,17 @@ test("raw-response completion is handled as an unexposed boundary", () => {
         totalTokens: 6,
       },
     }),
-    [],
+    [
+      {
+        usage: {
+          prompt_tokens: 4,
+          completion_tokens: 2,
+          total_tokens: 6,
+          prompt_tokens_details: { cached_tokens: 0 },
+          completion_tokens_details: { reasoning_tokens: 1 },
+        },
+      },
+    ],
   );
 });
 

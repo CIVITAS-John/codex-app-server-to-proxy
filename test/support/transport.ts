@@ -162,6 +162,7 @@ export interface ScriptedToolCall {
 /** Usage ordering selected by one scripted dynamic-tool batch. */
 export interface SuspendWithToolsOptions {
   completeRawResponse?: boolean;
+  rawUsage?: ThreadTokenUsage["last"];
   reasoningOutputTokens?: number;
   priorRequests?: number;
   usageOrder?: ToolUsageWireOrder;
@@ -180,6 +181,7 @@ export function suspendWithTools(
   calls: readonly ScriptedToolCall[],
   {
     completeRawResponse = true,
+    rawUsage,
     reasoningOutputTokens = 0,
     priorRequests = 0,
     usageOrder = "never",
@@ -207,7 +209,8 @@ export function suspendWithTools(
         },
       }),
     );
-  if (completeRawResponse) completeRawResponseBatch(send, threadId, turnId);
+  if (completeRawResponse)
+    completeRawResponseBatch(send, threadId, turnId, rawUsage);
 }
 
 /** Emits the authoritative end of one upstream Responses completion. */
@@ -215,6 +218,7 @@ export function completeRawResponseBatch(
   send: FakeTransportSend,
   threadId: string,
   turnId: string,
+  usage: ThreadTokenUsage["last"] | null = null,
 ): void {
   send(
     protocolNotification({
@@ -223,7 +227,7 @@ export function completeRawResponseBatch(
         threadId,
         turnId,
         responseId: `raw_${turnId}`,
-        usage: null,
+        usage,
         usageMetadata: null,
       },
     }),

@@ -383,11 +383,50 @@ export async function execute(
     terminal: false,
   };
   const excludedThreadIds = new Set<string>();
+  const usageStartedAt = Date.now();
+  const usageDiagnostics = {
+    raw_completions: 0,
+    raw_with_usage: 0,
+    thread_usage_updates: 0,
+    usage_updates_rejected: 0,
+  };
   const onNotification = (method: string, params: unknown): void => {
     // A preflight fallback must not let a flood of late source events exhaust
     // fresh startup ingress. The new thread's early events remain eligible.
     const threadId = record(params)?.threadId;
     if (typeof threadId === "string" && excludedThreadIds.has(threadId)) return;
+    if (
+      method === "rawResponse/completed" ||
+      method === "thread/tokenUsage/updated"
+    ) {
+      const correlated = !isEstablishedUnrelatedNotification(
+        params,
+        handle.threadId,
+        handle.turnId,
+      );
+      // Log only correlation and counter presence, never provider payloads,
+      // tool arguments, or raw thread/response identifiers.
+      if (threadId === handle.threadId || !handle.threadId) {
+        const value = record(params);
+        const counters =
+          method === "rawResponse/completed"
+            ? record(value?.usage)
+            : record(record(value?.tokenUsage)?.last);
+        if (!correlated) usageDiagnostics.usage_updates_rejected += 1;
+        else if (method === "rawResponse/completed") {
+          usageDiagnostics.raw_completions += 1;
+          if (counters) usageDiagnostics.raw_with_usage += 1;
+        } else usageDiagnostics.thread_usage_updates += 1;
+        options.log("debug", "usage_notification", {
+          request_id: options.requestId,
+          method,
+          correlated,
+          has_usage: Boolean(counters),
+          has_reasoning: typeof counters?.reasoningOutputTokens === "number",
+          elapsed_ms: Date.now() - usageStartedAt,
+        });
+      }
+    }
     if (method === "rawResponseItem/completed") {
       if (
         isEstablishedUnrelatedNotification(
@@ -651,6 +690,11 @@ export async function execute(
               handle.turnId!,
             );
             try {
+              options.log("debug", "usage_tool_interrupt", {
+                request_id: options.requestId,
+                elapsed_ms: Date.now() - usageStartedAt,
+                ...usageDiagnostics,
+              });
               await options.rpc.request("turn/interrupt", {
                 threadId: handle.threadId,
                 turnId: handle.turnId,
@@ -732,12 +776,31 @@ export async function execute(
             handle,
             options.signal,
           );
-          if (collected.usage) pendingUsage = collected.usage;
-          if (!pendingUsage)
+          // Raw usage can be invalidated by a later completion without counts.
+          // Read the final selection instead of retaining an earlier partial sum.
+          pendingUsage = normalizer.usageSnapshot();
+          const missing = !pendingUsage
+            ? "all"
+            : pendingUsage.completion_tokens_details?.reasoning_tokens ===
+                undefined
+              ? "reasoning"
+              : undefined;
+          const diagnostic = {
+            request_id: options.requestId,
+            reason: collected.exitReason,
+            pending_tool_batch: Boolean(capturedBatch),
+            usage_source: normalizer.usageSource() ?? "none",
+            elapsed_ms: Date.now() - usageStartedAt,
+            ...usageDiagnostics,
+          };
+          options.log("debug", "usage_collection_completed", {
+            ...diagnostic,
+            missing: missing ?? "none",
+          });
+          if (missing)
             options.log("warn", "usage_unreported", {
-              request_id: options.requestId,
-              reason: collected.exitReason,
-              pending_tool_batch: Boolean(capturedBatch),
+              ...diagnostic,
+              missing,
             });
         }
         // Usage is optional output. Persisting the boundary for the next

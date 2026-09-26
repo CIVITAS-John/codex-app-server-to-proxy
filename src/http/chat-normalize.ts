@@ -2,6 +2,7 @@ import type { JsonRpcTransport } from "../app-server/json-rpc.js";
 import { record } from "../core/canonical.js";
 import type { Logger } from "../core/logger.js";
 import {
+  ZERO_TOKEN_USAGE,
   subtractTokenUsage,
   tokenUsageCounters,
   type TokenUsageCounters,
@@ -123,7 +124,7 @@ const NOTIFICATION_BEHAVIORS = new Map<string, NotificationBehavior>([
   // every other provider-native raw item remains unexposed.
   ["rawResponseItem/completed", "ignore"],
   // The event closes one upstream Responses completion and therefore one
-  // dynamic-tool callback batch. Its per-request usage remains unexposed.
+  // dynamic-tool callback batch. Exact counters also provide a usage fallback.
   ["rawResponse/completed", "boundary"],
   ["serverRequest/resolved", "ignore"],
   ["thread/status/changed", "lifecycle"],
@@ -195,6 +196,12 @@ export class EventNormalizer {
   readonly #warnedReasons = new Set<string>();
   #latestUsageTotal: TokenUsageCounters | undefined;
   #cumulativeUsageValid = true;
+  readonly #rawResponses = new Set<string>();
+  #rawUsage: Usage | undefined;
+  #rawUsageComplete = true;
+  #threadUsage: Usage | undefined;
+  #threadUsageTotal: TokenUsageCounters | undefined;
+  #usageSource: "raw_response" | "thread_token_usage" | undefined;
 
   /**
    * Binds the exact cumulative total at this response's attribution boundary.
@@ -219,8 +226,45 @@ export class EventNormalizer {
    * been abandoned for the rest of this response.
    */
   usageBoundary(): TokenUsageCounters | undefined {
+    if (this.#usageSource === "raw_response") {
+      // Advance by exactly the raw counters we reported, so a later cumulative
+      // update cannot charge this response again. Partial details cannot form
+      // an exact boundary; omit it instead of retaining a stale baseline.
+      const raw = this.#rawUsage;
+      if (
+        !this.#usageBaseline ||
+        !raw?.prompt_tokens_details ||
+        !raw.completion_tokens_details
+      )
+        return undefined;
+      const baseline = this.#usageBaseline;
+      return tokenUsageCounters({
+        inputTokens: baseline.inputTokens + raw.prompt_tokens,
+        cachedInputTokens:
+          baseline.cachedInputTokens + raw.prompt_tokens_details.cached_tokens,
+        outputTokens: baseline.outputTokens + raw.completion_tokens,
+        reasoningOutputTokens:
+          baseline.reasoningOutputTokens +
+          raw.completion_tokens_details.reasoning_tokens,
+        totalTokens: baseline.totalTokens + raw.total_tokens,
+      });
+    }
+    if (this.#rawResponses.size && this.#usageSource === "thread_token_usage")
+      return this.#threadUsageTotal ? { ...this.#threadUsageTotal } : undefined;
     const boundary = this.#latestUsageTotal ?? this.#usageBaseline;
     return boundary ? { ...boundary } : undefined;
+  }
+
+  /** Identifies the source of the most recently emitted exact usage. */
+  usageSource(): "raw_response" | "thread_token_usage" | undefined {
+    return this.#usageSource;
+  }
+
+  /** Returns the selected usage, excluding incomplete raw-response sums. */
+  usageSnapshot(): Usage | undefined {
+    return this.#usageSource === "raw_response"
+      ? this.#rawUsage
+      : this.#threadUsage;
   }
 
   /**
@@ -243,6 +287,31 @@ export class EventNormalizer {
   normalize(method: string, value: unknown): NormalizedEvent[] {
     const params = record(value);
     if (!params) return [];
+    if (method === "rawResponse/completed") {
+      if (
+        typeof params.responseId !== "string" ||
+        this.#rawResponses.has(params.responseId)
+      )
+        return [];
+      this.#rawResponses.add(params.responseId);
+      const breakdown = record(params.usage);
+      const usage = breakdown ? toUsage(breakdown) : undefined;
+      // A turn can contain multiple model responses. Never present a partial
+      // sum as its usage when any raw completion lacks its base counters.
+      if (!usage) this.#rawUsageComplete = false;
+      if (!this.#rawUsageComplete || !usage) {
+        this.#usageSource = this.#threadUsage
+          ? "thread_token_usage"
+          : undefined;
+        return [];
+      }
+      this.#rawUsage = addUsage(
+        this.#rawUsage ?? countersToUsage(ZERO_TOKEN_USAGE),
+        usage,
+      );
+      this.#usageSource = "raw_response";
+      return [{ usage: this.#rawUsage }];
+    }
     if (
       method === "item/agentMessage/delta" &&
       typeof params.delta === "string"
@@ -284,6 +353,11 @@ export class EventNormalizer {
       }
       if (total) this.#latestUsageTotal = total;
       const usage = this.#turnUsage(last, total);
+      if (usage) {
+        this.#threadUsage = usage;
+        this.#threadUsageTotal = total;
+        this.#usageSource = "thread_token_usage";
+      }
       return usage ? [{ usage }] : [];
     }
     if (method === "error") {
@@ -714,13 +788,42 @@ function toUsage(value: Record<string, unknown>): Usage | undefined {
     completion_tokens: output,
     total_tokens: total,
   };
-  if (typeof value.cachedInputTokens === "number")
-    result.prompt_tokens_details = { cached_tokens: value.cachedInputTokens };
-  if (typeof value.reasoningOutputTokens === "number")
+  const cached = finite(value.cachedInputTokens);
+  const reasoning = finite(value.reasoningOutputTokens);
+  if (cached !== undefined)
+    result.prompt_tokens_details = { cached_tokens: cached };
+  if (reasoning !== undefined)
     result.completion_tokens_details = {
-      reasoning_tokens: value.reasoningOutputTokens,
+      reasoning_tokens: reasoning,
     };
   return result;
+}
+
+/** Adds disjoint raw completions, retaining only details present in both. */
+function addUsage(left: Usage, right: Usage): Usage {
+  return {
+    prompt_tokens: left.prompt_tokens + right.prompt_tokens,
+    completion_tokens: left.completion_tokens + right.completion_tokens,
+    total_tokens: left.total_tokens + right.total_tokens,
+    ...(left.prompt_tokens_details && right.prompt_tokens_details
+      ? {
+          prompt_tokens_details: {
+            cached_tokens:
+              left.prompt_tokens_details.cached_tokens +
+              right.prompt_tokens_details.cached_tokens,
+          },
+        }
+      : {}),
+    ...(left.completion_tokens_details && right.completion_tokens_details
+      ? {
+          completion_tokens_details: {
+            reasoning_tokens:
+              left.completion_tokens_details.reasoning_tokens +
+              right.completion_tokens_details.reasoning_tokens,
+          },
+        }
+      : {}),
+  };
 }
 
 /** Records plain structural metadata once per unexposed method and transport. */
@@ -766,7 +869,7 @@ export function isEstablishedUnrelatedNotification(
 
 /** Returns a usage count only when app-server reported it exactly. */
 function finite(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value)
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? value
     : undefined;
 }
