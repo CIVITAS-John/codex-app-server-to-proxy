@@ -203,8 +203,8 @@ async function startLiveChatBackendOnce(
         "live contract started without the Responses Lite model-catalog override",
       );
     assertLivePolicyPrerequisites(appServer.requirements);
-    // Report only the dynamic-tool dispatch offset; token-usage notifications
-    // are asserted through HTTP output and stay off stdout.
+    // Report the dynamic-tool dispatch offset here; the contract reports token
+    // counts from final HTTP output instead of raw app-server notifications.
     let turnStartedAt = 0;
     const rawToolCounts = new Map<
       string,

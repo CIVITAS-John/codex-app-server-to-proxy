@@ -32,6 +32,7 @@ registerChatContract(
     // The interrupted tool-call response must return quickly with exact usage;
     // the run reports how long it and its continuation took. Numbers only.
     reportToolTimings: true,
+    reportUsage: true,
   },
 );
 
@@ -40,6 +41,7 @@ registerChatContract(
   () => startLiveSpawnChatBackend(providerBudget, LIVE_MODEL),
   {
     scenarios: ["spawn-child-agent"],
+    reportUsage: true,
     maxProviderCalls: MAX_LIVE_PROVIDER_CALLS,
     model: LIVE_MODEL,
   },

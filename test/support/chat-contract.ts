@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import { afterAll, beforeAll, describe, test } from "vitest";
 import { parseSseFrames } from "./http.js";
+import { readContractResponse } from "./live-usage.js";
 
 /** Model fixed by the repository's live-test cost policy. */
 export const CONTRACT_MODEL = "gpt-6-luna";
@@ -156,6 +157,8 @@ export interface ChatContractOptions {
    * keep timing evidence without exposing request content.
    */
   reportToolTimings?: boolean;
+  /** Prints final HTTP usage for each live response, including missing counters. */
+  reportUsage?: boolean;
 }
 
 /** Complete deterministic contract exercised by the fake app-server. */
@@ -186,6 +189,14 @@ export function registerChatContract(
     const maxProviderCalls =
       options.maxProviderCalls ?? MAX_OFFLINE_PROVIDER_CALLS;
     const model = options.model ?? CONTRACT_MODEL;
+    let completedRequests = 0;
+
+    /** Reports usage before scenario assertions so failures retain their counts. */
+    const readResponse = (response: Response): Promise<string> =>
+      readContractResponse(
+        response,
+        options.reportUsage ? ++completedRequests : undefined,
+      );
 
     beforeAll(async () => {
       backend = await startBackend();
@@ -233,7 +244,7 @@ export function registerChatContract(
             },
           ],
         });
-        const raw = await response.text();
+        const raw = await readResponse(response);
         assert.equal(response.status, 200, diagnostic(raw));
         const body = parseJson<{
           id?: string;
@@ -279,7 +290,7 @@ export function registerChatContract(
             ],
             x_codex: { sandbox: "disabled", web_search: "disabled" },
           });
-          const raw = await response.text();
+          const raw = await readResponse(response);
           assert.equal(response.status, 200, diagnostic(raw));
           if (stream) {
             const chunks = parseSse(raw);
@@ -329,7 +340,7 @@ export function registerChatContract(
           first.headers.get("content-type"),
           "text/event-stream; charset=utf-8",
         );
-        const firstChunks = parseSse(await first.text());
+        const firstChunks = parseSse(await readResponse(first));
         assert.equal(firstChunks[0]?.choices?.[0]?.delta?.role, "assistant");
         const firstReasoning = firstChunks
           .flatMap((chunk) => chunk.choices ?? [])
@@ -404,7 +415,7 @@ export function registerChatContract(
           stream: true,
         });
         assert.equal(second.status, 200);
-        const secondChunks = parseSse(await second.text());
+        const secondChunks = parseSse(await readResponse(second));
         const secondContent = secondChunks
           .flatMap((chunk) => chunk.choices ?? [])
           .map((choice) => choice.delta?.content ?? "")
@@ -470,7 +481,7 @@ export function registerChatContract(
           messages: transcript,
           tools,
         });
-        const firstRaw = await firstResponse.text();
+        const firstRaw = await readResponse(firstResponse);
         const firstElapsedMs = Date.now() - firstStarted;
         assert.equal(firstResponse.status, 200, diagnostic(firstRaw));
         let callBody = parseToolCompletion(
@@ -567,7 +578,7 @@ export function registerChatContract(
             messages: transcript,
             tools,
           });
-          const resultRaw = await resultResponse.text();
+          const resultRaw = await readResponse(resultResponse);
           if (options.reportToolTimings)
             console.info(
               `[live] tool-result request ${roundIndex + 1} took ${Date.now() - resultStarted} ms`,
@@ -636,7 +647,7 @@ export function registerChatContract(
           ],
           tools,
         });
-        const restartedRaw = await restarted.text();
+        const restartedRaw = await readResponse(restarted);
         assert.equal(restarted.status, 200, diagnostic(restartedRaw));
         const restartedBody = parseToolCompletion(
           restartedRaw,
@@ -734,7 +745,7 @@ export function registerChatContract(
           ],
           tools,
         });
-        const firstRaw = await firstResponse.text();
+        const firstRaw = await readResponse(firstResponse);
         assert.equal(firstResponse.status, 200, diagnostic(firstRaw));
         const firstBody = parseToolCompletion(
           firstRaw,
@@ -826,7 +837,7 @@ export function registerChatContract(
             },
           ],
         });
-        const continuedRaw = await continuedResponse.text();
+        const continuedRaw = await readResponse(continuedResponse);
         assert.equal(continuedResponse.status, 200, diagnostic(continuedRaw));
         const continuedBody = parseToolCompletion(
           continuedRaw,
@@ -893,7 +904,7 @@ export function registerChatContract(
             },
           ],
         });
-        const raw = await response.text();
+        const raw = await readResponse(response);
         assert.equal(response.status, 200, diagnostic(raw));
         const body = parseToolCompletion(raw, "disabled-sandbox chat");
         const choice = body.choices?.[0];
@@ -955,7 +966,7 @@ export function registerChatContract(
           stream_options: { include_usage: true },
           x_codex: policy,
         });
-        const raw = await response.text();
+        const raw = await readResponse(response);
         assert.equal(response.status, 200, diagnostic(raw));
         const chunks = parseSse(raw);
         const calls = chunks.flatMap(
@@ -1057,7 +1068,7 @@ export function registerChatContract(
           ],
           x_codex: policy,
         });
-        const continuedRaw = await continued.text();
+        const continuedRaw = await readResponse(continued);
         assert.equal(continued.status, 200, diagnostic(continuedRaw));
         const body = parseToolCompletion(continuedRaw, "built-in continuation");
         assert.ok(
@@ -1098,7 +1109,7 @@ export function registerChatContract(
           ],
           x_codex: policy,
         });
-        const replayedRaw = await replayed.text();
+        const replayedRaw = await readResponse(replayed);
         assert.equal(replayed.status, 200, diagnostic(replayedRaw));
         const replayedBody = parseToolCompletion(
           replayedRaw,
@@ -1147,7 +1158,7 @@ export function registerChatContract(
             ],
             x_codex: policy,
           });
-          const raw = await response.text();
+          const raw = await readResponse(response);
           logLiveFilesystemTiming(
             options,
             "initial",
@@ -1181,7 +1192,7 @@ export function registerChatContract(
               ],
               x_codex: policy,
             });
-            const correctionRaw = await correction.text();
+            const correctionRaw = await readResponse(correction);
             logLiveFilesystemTiming(
               options,
               "correction",
@@ -1290,7 +1301,7 @@ export function registerChatContract(
           ],
           x_codex: { sandbox: "disabled", web_search: "live" },
         });
-        const raw = await response.text();
+        const raw = await readResponse(response);
         assert.equal(response.status, 200, diagnostic(raw));
         const choice = parseToolCompletion(raw, "live web search").choices?.[0];
         assert.equal(choice?.finish_reason, "stop");
@@ -1356,7 +1367,7 @@ export function registerChatContract(
           ],
           x_codex: { sandbox: "disabled", web_search: "disabled" },
         });
-        const raw = await response.text();
+        const raw = await readResponse(response);
         assert.equal(response.status, 200, diagnostic(raw));
         const choice = parseToolCompletion(raw, "spawned child").choices?.[0];
         assert.equal(choice?.finish_reason, "stop");
@@ -1493,7 +1504,7 @@ export function registerChatContract(
               body: JSON.stringify(body),
             },
           );
-          const raw = await response.text();
+          const raw = await readResponse(response);
           assert.equal(response.status, 400, diagnostic(raw));
           const error = parseJson<{ error?: { code?: string } }>(
             raw,
@@ -1543,7 +1554,7 @@ export function registerChatContract(
             { role: "user", content: "Reply with one short acknowledgment." },
           ],
         });
-        const raw = await followup.text();
+        const raw = await readResponse(followup);
         assert.equal(followup.status, 200, diagnostic(raw));
         const body = parseJson<{
           choices?: Array<{ message?: { content?: string } }>;

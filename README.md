@@ -70,6 +70,8 @@ npm run test:live -- test/contract/system-prompt.live.test.ts
 
 The live budget guard lets a root final answer without tool work finish naturally at the limit, preserving `finish_reason: "stop"`. It interrupts responses that can require more work and rejects further root turns before dispatch.
 
+Live tests print each completed proxy request's input, output, cached input, reasoning, and total token counts from its JSON response or final SSE usage object. Missing counts show `unreported`, distinct from a reported `0`, for manual accounting checks. See [live-test reporting](docs/development.md#live-contract-tests) for budgets and interpretation.
+
 ## Use an OpenAI client
 
 Point any OpenAI-compatible client at `http://127.0.0.1:8787/v1`. No API key is required; use any placeholder if your library demands one.

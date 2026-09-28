@@ -12,7 +12,12 @@ const providerBudget = new ProviderCallBudget(2);
 registerChatContract(
   "real Codex system prompt",
   () => startLiveChatBackend(providerBudget, LIVE_MODEL),
-  { scenarios: ["system-prompt"], maxProviderCalls: 2, model: LIVE_MODEL },
+  {
+    scenarios: ["system-prompt"],
+    maxProviderCalls: 2,
+    model: LIVE_MODEL,
+    reportUsage: true,
+  },
 );
 
 afterAll(async () => {
