@@ -5,6 +5,7 @@ import { relative, resolve } from "node:path";
 import { afterAll, beforeAll, describe, test } from "vitest";
 import { parseSseFrames } from "./http.js";
 import { readContractResponse } from "./live-usage.js";
+import type { LiveUsageDiagnostics } from "./live-usage-diagnostics.js";
 
 /** Model fixed by the repository's live-test cost policy. */
 export const CONTRACT_MODEL = "gpt-6-luna";
@@ -113,6 +114,7 @@ export function isBoundedObservationCommand(command: string): boolean {
 
 /** A ready proxy backed by either a scripted or real app-server. */
 export interface ChatContractBackend {
+  usageDiagnostics?: LiveUsageDiagnostics | undefined;
   origin: string;
   root: string;
   observationToken: string;
@@ -196,6 +198,8 @@ export function registerChatContract(
       readContractResponse(
         response,
         options.reportUsage ? ++completedRequests : undefined,
+        (usage, requestNumber) =>
+          backend?.usageDiagnostics?.report(response, requestNumber, usage),
       );
 
     beforeAll(async () => {
@@ -216,7 +220,7 @@ export function registerChatContract(
       );
     }, 20_000);
 
-    /** Sends a request that is expected to reach app-server. */
+    /** Sends model-reaching contract requests with consistent high reasoning effort. */
     const chat = async (
       body: Record<string, unknown>,
       signal?: AbortSignal,
@@ -225,10 +229,14 @@ export function registerChatContract(
         (backend?.providerCalls().total ?? 0) < maxProviderCalls,
         `contract attempted more than ${maxProviderCalls} provider calls`,
       );
+      // Keep effort consistent across initial turns and continuations so usage
+      // comparisons do not depend on defaults or change thread bindings.
+      const requestBody = { ...body, reasoning_effort: "high" };
+      if (options.reportUsage) backend?.usageDiagnostics?.begin(requestBody);
       return fetch(`${backend!.origin}/v1/chat/completions`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify(requestBody),
         ...(signal ? { signal } : {}),
       });
     };
@@ -275,7 +283,6 @@ export function registerChatContract(
           const expected = `contract-system-${randomBytes(16).toString("hex")}`;
           const response = await chat({
             model: model,
-            reasoning_effort: "low",
             stream,
             messages: [
               {
@@ -322,7 +329,6 @@ export function registerChatContract(
         const callsBefore = backend!.modelCalls();
         const first = await chat({
           model: model,
-          reasoning_effort: "xhigh",
           messages: [
             { role: "system", content: "Answer briefly." },
             { role: "developer", content: "Do not use markdown." },
@@ -392,7 +398,6 @@ export function registerChatContract(
 
         const second = await chat({
           model: model,
-          reasoning_effort: "high",
           messages: [
             { role: "system", content: "Answer briefly." },
             { role: "developer", content: "Do not use markdown." },
@@ -1149,7 +1154,6 @@ export function registerChatContract(
           );
           const response = await chat({
             model: model,
-            reasoning_effort: "medium",
             messages: [
               {
                 role: "user",
@@ -1182,7 +1186,6 @@ export function registerChatContract(
             );
             const correction = await chat({
               model: model,
-              reasoning_effort: "medium",
               previous_response_id: body.id,
               messages: [
                 {

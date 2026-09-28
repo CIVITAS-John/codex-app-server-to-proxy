@@ -48,6 +48,7 @@ import {
 } from "./provider-call-budget.js";
 import { startProxyWithTransport } from "./http.js";
 import { silentLogger } from "./logger.js";
+import { LiveUsageDiagnostics } from "./live-usage-diagnostics.js";
 import {
   completeTurn,
   createFakeTransport,
@@ -203,8 +204,8 @@ async function startLiveChatBackendOnce(
         "live contract started without the Responses Lite model-catalog override",
       );
     assertLivePolicyPrerequisites(appServer.requirements);
-    // Report the dynamic-tool dispatch offset here; the contract reports token
-    // counts from final HTTP output instead of raw app-server notifications.
+    const usageDiagnostics = new LiveUsageDiagnostics(appServer.rpc);
+    // Tool timing stays independent of the per-request usage evidence collector.
     let turnStartedAt = 0;
     const rawToolCounts = new Map<
       string,
@@ -256,15 +257,17 @@ async function startLiveChatBackendOnce(
         rawToolCounts.delete(value.turnId);
       }
     });
-    return await startProxy(
+    const backend = await startProxy(
       appServer.rpc,
       async () => appServer?.stop(),
       environment,
       appServer.requirements,
-      silentLogger,
+      usageDiagnostics.log,
       providerBudget,
       appServer.resolveThreadConfig,
     );
+    backend.usageDiagnostics = usageDiagnostics;
+    return backend;
   } catch (error) {
     await appServer?.stop().catch(() => undefined);
     throw new Error(
@@ -421,6 +424,9 @@ async function startRestartableBackend(
   return {
     get origin() {
       return current.origin;
+    },
+    get usageDiagnostics() {
+      return current.usageDiagnostics;
     },
     root: environment.root,
     observationToken: environment.observationToken,

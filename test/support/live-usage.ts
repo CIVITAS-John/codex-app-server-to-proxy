@@ -4,6 +4,7 @@ import { parseSseFrames } from "./http.js";
 export async function readContractResponse(
   response: Response,
   requestNumber?: number,
+  reportEvidence?: (usage: unknown, requestNumber: number) => void,
 ): Promise<string> {
   const raw = await response.text();
   if (requestNumber !== undefined && response.ok) {
@@ -44,6 +45,7 @@ export async function readContractResponse(
         ` reasoning_tokens=${count(record(usage?.completion_tokens_details)?.reasoning_tokens)}` +
         ` total_tokens=${count(usage?.total_tokens)}`,
     );
+    reportEvidence?.(usage, requestNumber);
   }
   return raw;
 }
