@@ -250,7 +250,7 @@ const model = {
   modelSpecialty: null, hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "low", description: "" }],
   defaultReasoningEffort: "low", inputModalities: ["text"], supportsPersonality: false,
   multiAgentVersion: null,
-  additionalSpeedTiers: [], serviceTiers: [], defaultServiceTier: null, isDefault: true
+  additionalSpeedTiers: [], serviceTiers: [], defaultServiceTier: null, availableAccessPrograms: null, isDefault: true
 };
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
 createInterface({ input: process.stdin }).on("line", (line) => {
@@ -268,7 +268,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     send({ id: message.id, result: { config: { windows: null }, origins: {}, layers: null }});
   else if (message.method === "account/read") send({ id: message.id, result: {
     account: { type: "chatgpt", email: null, planType: "unknown" },
-    requiresOpenaiAuth: true
+    requiresOpenaiAuth: true, workspaceRouting: null
   }});
   else if (message.method === "model/list") {
     writeFileSync(join(process.env.CODEX_HOME, "models_cache.json"), JSON.stringify({
@@ -278,7 +278,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     send({ id: message.id, result: { data: [model], nextCursor: null }});
   }
   else if (message.method === "thread/start") send({ id: message.id, result: {
-    thread, model: "gpt-6-luna", modelProvider: "openai", serviceTier: null, cwd,
+    thread, model: "gpt-6-luna", modelProvider: "openai", serviceTier: null, disabledPluginIds: [], cwd,
     runtimeWorkspaceRoots: [], instructionSources: [], approvalPolicy: "never",
     approvalsReviewer: "auto_review", sandbox: { type: "readOnly", networkAccess: false },
     activePermissionProfile: null, reasoningEffort: null, multiAgentMode: "explicitRequestOnly"

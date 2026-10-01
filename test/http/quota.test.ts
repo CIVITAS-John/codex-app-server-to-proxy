@@ -72,6 +72,8 @@ test("only codex usageLimitExceeded becomes a quota error", () => {
     null,
     "contextWindowExceeded",
     "sessionBudgetExceeded",
+    "flexUnavailable",
+    "tooManyDenials",
     "other",
   ])
     assert.equal(

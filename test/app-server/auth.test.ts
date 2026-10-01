@@ -66,7 +66,7 @@ function fakeRpc(
           );
         } else if (kind === "refresh-error-still-unauthenticated") {
           input.write(
-            `${JSON.stringify(protocolResponse("account/read", message.id, { account: null, requiresOpenaiAuth: true }))}\n`,
+            `${JSON.stringify(protocolResponse("account/read", message.id, { account: null, requiresOpenaiAuth: true, workspaceRouting: null }))}\n`,
           );
         } else if (
           kind === "refresh-error" ||
@@ -93,7 +93,11 @@ function fakeRpc(
                 message.id,
                 kind === "logged-in"
                   ? protocolAuthenticatedAccountResponse()
-                  : { account: null, requiresOpenaiAuth: true },
+                  : {
+                      account: null,
+                      requiresOpenaiAuth: true,
+                      workspaceRouting: null,
+                    },
               ),
             )}\n`,
           );

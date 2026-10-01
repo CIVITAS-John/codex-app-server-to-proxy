@@ -555,7 +555,7 @@ function terminalFailureAppServer({
   duplicateTerminal = false,
   resetAt,
 }: {
-  terminal: "error" | "completed";
+  terminal: "error" | "completed" | "interrupted";
   emitContent?: boolean;
   codexErrorInfo?: CodexErrorInfo | null;
   message?: string;
@@ -640,7 +640,10 @@ function terminalFailureAppServer({
               params: {
                 threadId: "thr_quota",
                 turn: {
-                  ...protocolTurn("turn_quota", "failed"),
+                  ...protocolTurn(
+                    "turn_quota",
+                    terminal === "interrupted" ? "interrupted" : "failed",
+                  ),
                   error,
                 },
               },
@@ -1190,6 +1193,36 @@ test("normalizes interleaved text, reasoning, internal items, tools, usage, and 
     new EventNormalizer().normalize(error.method, error.params)[0]
       ?.terminalError?.message,
     "failed",
+  );
+});
+
+test("an interrupted turn with a Guardian error fails without a separate error notification", () => {
+  const notification = protocolNotification({
+    method: "turn/completed",
+    params: {
+      threadId: "thread",
+      turn: {
+        ...protocolTurn("turn", "interrupted"),
+        error: {
+          message: "Synthetic Guardian denial limit reached.",
+          codexErrorInfo: "tooManyDenials",
+          additionalDetails: null,
+          misalignment: null,
+        },
+      },
+    },
+  });
+  const events = new EventNormalizer().normalize(
+    notification.method,
+    notification.params,
+  );
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.finishReason, undefined);
+  assert.equal(events[0]?.terminalError?.status, 502);
+  assert.equal(events[0]?.terminalError?.code, "app_server_error");
+  assert.equal(
+    events[0]?.terminalError?.message,
+    "Synthetic Guardian denial limit reached.",
   );
 });
 
@@ -3305,6 +3338,50 @@ test("unclassified turn failures before output are JSON errors on a streaming re
     });
   });
 });
+
+test.each([false, true])(
+  "Guardian interrupted errors fail HTTP without quota lookup (visible content: %s)",
+  async (emitContent) => {
+    await withChatServer(async (origin, _proxy, useTransport) => {
+      const fake = terminalFailureAppServer({
+        terminal: "interrupted",
+        emitContent,
+        codexErrorInfo: "tooManyDenials",
+        message: "Synthetic Guardian denial limit reached.",
+        resetAt: 2_000_000_060,
+      });
+      useTransport(fake);
+      const response = await fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "m",
+          stream: true,
+          messages: [{ role: "user", content: "synthetic denied turn" }],
+        }),
+      });
+      const envelope = {
+        message: "Synthetic Guardian denial limit reached.",
+        type: "server_error",
+        param: null,
+        code: "app_server_error",
+      };
+      assert.equal(response.status, emitContent ? 200 : 502);
+      assert.equal(response.headers.has("retry-after"), false);
+      if (emitContent) {
+        const frames = parseSseFrames(await response.text());
+        assert.equal(frames.includes("[DONE]"), false);
+        const errors = frames
+          .map((frame) => JSON.parse(frame) as { error?: unknown })
+          .filter((frame) => frame.error !== undefined);
+        assert.deepEqual(errors, [{ error: envelope }]);
+      } else {
+        assert.deepEqual(await response.json(), { error: envelope });
+      }
+      assert.equal(fake.rateLimitReads(), 0);
+    });
+  },
+);
 
 test("initial SSE write failure disposes a primed streaming execution", async () => {
   await withChatServer(async (origin, proxy, useTransport) => {

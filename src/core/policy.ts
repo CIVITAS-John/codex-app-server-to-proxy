@@ -50,6 +50,7 @@ export type ApprovalsReviewer = (typeof APPROVAL_REVIEWER_ORDER)[number];
 export const WINDOWS_SANDBOX_IMPLEMENTATIONS = [
   "elevated",
   "unelevated",
+  "mxc",
 ] as const;
 
 /** A native Windows sandbox implementation accepted by app-server. */

@@ -52,6 +52,7 @@ export function protocolAuthenticatedAccountResponse(): GetAccountResponse {
   return {
     account: { type: "chatgpt", email: null, planType: "unknown" },
     requiresOpenaiAuth: true,
+    workspaceRouting: null,
   };
 }
 
@@ -81,6 +82,7 @@ export function protocolModel(
     additionalSpeedTiers: [],
     serviceTiers: [],
     defaultServiceTier: null,
+    availableAccessPrograms: null,
     isDefault: false,
   };
 }
@@ -132,6 +134,7 @@ export function protocolThreadStartResponse(
     model: "gpt-6-luna",
     modelProvider: "openai",
     serviceTier: null,
+    disabledPluginIds: [],
     cwd,
     runtimeWorkspaceRoots: [],
     instructionSources: [],
@@ -151,6 +154,7 @@ export function protocolThreadResumeResponse(
 ): ThreadResumeResponse {
   return {
     ...protocolThreadStartResponse(thread, cwd),
+    collaborationMode: null,
     initialTurnsPage: null,
     turnsBackwardsCursor: null,
     itemsBackwardsCursor: null,

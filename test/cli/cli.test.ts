@@ -39,6 +39,7 @@ const embeddedProtocolResults = {
   unauthenticatedAccount: JSON.stringify({
     account: null,
     requiresOpenaiAuth: true,
+    workspaceRouting: null,
   } satisfies ReturnType<typeof protocolAuthenticatedAccountResponse>),
   login: JSON.stringify(
     protocolResponse("account/login/start", 0, {

@@ -122,7 +122,7 @@ function renderConfig(existing: string, catalogPath: string): string {
   const remainder = configWithoutModelCatalogOverride(existing);
   const managedBlock = [
     CONFIG_BLOCK_START,
-    "# Temporary workaround for the Codex 0.154.0 Responses request framing.",
+    "# Temporary workaround for Codex Responses Lite request framing.",
     `model_catalog_json = ${JSON.stringify(catalogPath)}`,
     CONFIG_BLOCK_END,
     "",

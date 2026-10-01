@@ -371,11 +371,14 @@ export class EventNormalizer {
       const status = turn?.status;
       if (status === "completed")
         return [{ finishReason: this.#sawClientTool ? "tool_calls" : "stop" }];
-      if (status === "interrupted") return [{ finishReason: "length" }];
       const error = record(turn?.error);
+      // Strict Guardian circuit breaks end as interrupted with an error and
+      // no separate error notification. Preserve the terminal failure.
+      if (status === "interrupted" && !error)
+        return [{ finishReason: "length" }];
       return [
         terminalEvent(
-          status === "failed" ? error : undefined,
+          status === "failed" || status === "interrupted" ? error : undefined,
           `The app-server turn ended with status ${String(status)}.`,
         ),
       ];

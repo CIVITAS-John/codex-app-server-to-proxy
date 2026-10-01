@@ -4,6 +4,9 @@ All notable user-facing changes are recorded here. This project follows semantic
 
 ## Unreleased
 
+- Updated the `@openai/codex` runtime and generated experimental app-server contract from `0.155.1` to `0.159.3`. Existing proxy homes and schema-version-0 continuation stores need no migration; the Responses Lite workaround remains installed.
+- Preserved explicitly configured Windows `mxc` sandboxing and its managed allowlist entries. Strict Guardian denial-limit errors on interrupted turns now use the existing terminal error envelope instead of returning a successful length finish.
+
 - Updated the `@openai/codex` runtime and generated experimental app-server contract from `0.154.0` to `0.155.1`. The proxy's Chat Completions surface and persisted home/store formats are unchanged; new generated methods remain private and the Responses Lite workaround remains installed.
 
 ## 0.1.0-rc.25 — September 14, 2026

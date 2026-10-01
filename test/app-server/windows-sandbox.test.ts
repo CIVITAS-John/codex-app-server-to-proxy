@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import { resolveWindowsSandboxThreadConfig } from "../../src/app-server/windows-sandbox.js";
-import { UNRESTRICTED_POLICY_REQUIREMENTS } from "../../src/core/policy.js";
+import {
+  parsePolicyRequirements,
+  UNRESTRICTED_POLICY_REQUIREMENTS,
+} from "../../src/core/policy.js";
 
 /** Creates a request recorder returning one effective config/read response. */
 function configReader(config: Record<string, unknown>): {
@@ -41,6 +44,7 @@ test("Windows preserves effective current and legacy sandbox selections", async 
   for (const config of [
     { windows: { sandbox: "elevated" } },
     { windows: { sandbox: "unelevated" } },
+    { windows: { sandbox: "mxc" } },
     { features: { experimental_windows_sandbox: true } },
     { features: { elevated_windows_sandbox: true } },
     { features: { enable_experimental_windows_sandbox: true } },
@@ -95,6 +99,29 @@ test("managed policy that permits unelevated still receives the safe default", a
       ),
       { "windows.sandbox": "unelevated" },
     );
+  }
+});
+
+test("managed MXC restrictions survive parsing and prevent an unelevated override", async () => {
+  for (const allowed of [["mxc"], ["mxc", "unelevated"]]) {
+    const requirements = parsePolicyRequirements({
+      requirements: { allowedWindowsSandboxImplementations: allowed },
+    });
+    assert.deepEqual(
+      requirements.allowedWindowsSandboxImplementations,
+      allowed,
+    );
+    const reader = configReader({ windows: { sandbox: "mxc" } });
+    assert.deepEqual(
+      await resolveWindowsSandboxThreadConfig(
+        reader,
+        "C:\\workspace",
+        requirements,
+        "win32",
+      ),
+      {},
+    );
+    assert.equal(reader.calls.length, allowed.includes("unelevated") ? 1 : 0);
   }
 });
 

@@ -41,7 +41,11 @@ function hasConfiguredWindowsSandbox(config: Record<string, unknown>): boolean {
       throw new Error("config/read returned malformed windows configuration.");
     const sandbox = windows.sandbox;
     if (sandbox !== undefined && sandbox !== null) {
-      if (sandbox !== "elevated" && sandbox !== "unelevated")
+      if (
+        sandbox !== "elevated" &&
+        sandbox !== "unelevated" &&
+        sandbox !== "mxc"
+      )
         throw new Error(
           "config/read returned an unsupported Windows sandbox implementation.",
         );

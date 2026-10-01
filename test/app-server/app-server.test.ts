@@ -299,6 +299,7 @@ const embeddedDeclinedRequests = JSON.stringify([
       turnId: "turn_decline",
       serverName: "fixture",
       mode: "openai/userVerification",
+      _meta: null,
       title: "Synthetic verification",
       description: "Decline this synthetic challenge.",
       challenge: "fixture-challenge",
@@ -1019,6 +1020,9 @@ testWithPosixExecutable(
         0,
         {
           requirements: {
+            modelProvider: null,
+            modelProviders: null,
+            allowedLoginMethods: null,
             cliAuthCredentialsStore: null,
             chatgptBaseUrl: null,
             additionalDeveloperInstructions: null,
@@ -1049,7 +1053,6 @@ testWithPosixExecutable(
             checkForUpdateOnStartup: null,
             allowLoginShell: null,
             feedback: null,
-            windowsSandboxPrivateDesktop: null,
           },
         },
       ).result;

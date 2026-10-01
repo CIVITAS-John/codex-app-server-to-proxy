@@ -45,6 +45,8 @@ test("only the overloaded turn error maps to a retryable 503", () => {
   for (const codexErrorInfo of [
     "usageLimitExceeded",
     "internalServerError",
+    "flexUnavailable",
+    "tooManyDenials",
     null,
     undefined,
   ])
