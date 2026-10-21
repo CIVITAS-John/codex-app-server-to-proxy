@@ -22,6 +22,7 @@ test("Responses Lite override clones every model and preserves other config", as
         fetched_at: "fixture",
         client_version: "0.154.0",
         etag: "synthetic-etag",
+        identity: "synthetic-provider-auth-identity",
         models: [
           {
             slug: "gpt-6-luna",
@@ -71,6 +72,7 @@ test("Responses Lite override clones every model and preserves other config", as
     assert.equal(override.fetched_at, "fixture");
     assert.equal(override.client_version, "0.154.0");
     assert.equal(override.etag, "synthetic-etag");
+    assert.equal(override.identity, "synthetic-provider-auth-identity");
     assert.deepEqual(
       (override.models as Array<Record<string, unknown>>).map((model) => ({
         slug: model.slug,

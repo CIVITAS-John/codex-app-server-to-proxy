@@ -314,6 +314,7 @@ function policyCapturingAppServer(): {
       } else if (message.method === "thread/read")
         send(
           protocolResponse("thread/read", id, {
+            readState: null,
             thread: protocolThread(requestedThreadId(message)),
           }),
         );
@@ -1226,6 +1227,82 @@ test("an interrupted turn with a Guardian error fails without a separate error n
   );
 });
 
+test.each([
+  "futurePolicyFailure",
+  { futurePolicyFailure: { privateDetail: "synthetic" } },
+])(
+  "unknown app-server error classifications remain terminal: %j",
+  (codexErrorInfo) => {
+    const notification = protocolNotification({
+      method: "turn/completed",
+      params: {
+        threadId: "thread",
+        turn: {
+          ...protocolTurn("turn", "failed"),
+          error: {
+            message: "Synthetic future failure.",
+            codexErrorInfo,
+            additionalDetails: null,
+            misalignment: null,
+          },
+        },
+      },
+    });
+    const events = new EventNormalizer().normalize(
+      notification.method,
+      notification.params,
+    );
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.finishReason, undefined);
+    assert.equal(events[0]?.terminalError?.status, 502);
+    assert.equal(events[0]?.terminalError?.code, "app_server_error");
+    assert.equal(
+      events[0]?.terminalError?.message,
+      "Synthetic future failure.",
+    );
+  },
+);
+
+test("upstream read receipts and prompt-only tool schemas remain private", () => {
+  const normalizer = new EventNormalizer();
+  const notifications = [
+    protocolNotification({
+      method: "thread/readState/changed",
+      params: {
+        threadId: "thread",
+        readState: { firstUnread: null, revision: "synthetic-revision" },
+      },
+    }),
+    protocolNotification({
+      method: "rawResponseItem/completed",
+      params: {
+        threadId: "thread",
+        turnId: "turn",
+        item: {
+          type: "additional_tools",
+          role: "developer",
+          tools: [{ name: "synthetic-private-tool" }],
+        },
+      },
+    }),
+  ];
+  for (const notification of notifications)
+    assert.deepEqual(
+      normalizer.normalize(notification.method, notification.params),
+      [],
+    );
+  const completed = protocolNotification({
+    method: "turn/completed",
+    params: {
+      threadId: "thread",
+      turn: { ...protocolTurn("turn", "completed"), rootTurnId: "root_turn" },
+    },
+  });
+  assert.deepEqual(normalizer.normalize(completed.method, completed.params), [
+    { finishReason: "stop" },
+  ]);
+});
+
 test("tool lifecycle output is emitted without truncation", () => {
   const normalizer = new EventNormalizer();
   const content = "o".repeat(70 * 1024);
@@ -1360,6 +1437,8 @@ test("preserves sub-agent activity correlation without exposing agent paths", ()
         completedAtMs: 1,
         item: {
           type: "subAgentActivity",
+          model: "gpt-6-luna",
+          reasoningEffort: "high",
           id: `activity_${kind}`,
           kind,
           agentThreadId: "thr_child",

@@ -32,8 +32,10 @@ export function fakeCodexScript(options: FakeCodexScriptOptions): string {
     options.initializeResponse ?? protocolInitializeResponse();
   const requirementsResponse =
     options.requirementsResponse ??
-    protocolResponse("configRequirements/read", 0, { requirements: null })
-      .result;
+    protocolResponse("configRequirements/read", 0, {
+      supportsIndependentSpeedModes: null,
+      requirements: null,
+    }).result;
   const versionOutput = JSON.stringify(`codex-cli ${options.version}`);
   const initializeJson = JSON.stringify(initializeResponse);
   const requirementsJson = JSON.stringify(requirementsResponse);

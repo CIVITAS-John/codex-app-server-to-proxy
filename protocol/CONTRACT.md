@@ -1,8 +1,8 @@
 # Compatibility contract
 
-This contract targets `codex-cli 0.159.3`, pinned by the exact `@openai/codex` runtime dependency. The checked-in TypeScript and JSON Schema artifacts were generated from that package-owned executable with `--experimental`; they are the wire-type source of truth. Regenerate them with `npm run generate:protocol` after changing the package pin.
+This contract targets `codex-cli 0.163.0`, pinned by the exact `@openai/codex` runtime dependency. The checked-in TypeScript and JSON Schema artifacts were generated from that package-owned executable with `--experimental`; they are the wire-type source of truth. Regenerate them with `npm run generate:protocol` after changing the package pin.
 
-The [0.159.3 compatibility review](../docs/codex-app-server.md#pinned-compatibility-note) preserves the public request and output shapes. Explicit Windows `mxc` configuration and managed restrictions are preserved. An interrupted turn carrying an error uses the existing terminal error mapping; an error-free interruption retains `finish_reason: "length"`. `account/rateLimits/read` still omits capability parameters, and usage metadata never authorizes retry or recovery. Raw `configuration_update` items and new gateway OAuth methods remain private; `openai/userVerification` elicitation is declined. Existing proxy homes and schema-version-0 continuation stores require no migration.
+The [0.163.0 compatibility review](../docs/codex-app-server.md#pinned-compatibility-note) preserves the public request and output shapes. Turn ancestry, read receipts, prediction events, model/reasoning metadata on subagent activity, and raw `additional_tools` items remain private. Open-ended app-server error classifications use existing terminal error mapping without authorizing retries. Resume explicitly reapplies requested policy instead of inheriting restored permissions. The Responses Lite override remains necessary. Existing proxy homes and schema-version-0 continuation stores require no migration; startup refresh preserves model-cache identity metadata.
 
 ## Request fields
 

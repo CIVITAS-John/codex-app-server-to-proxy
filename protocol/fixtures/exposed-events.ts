@@ -160,6 +160,7 @@ export const exposedEvents = [
       threadId: "thr_fixture",
       turn: {
         id: "turn_fixture",
+        rootTurnId: null,
         items: [],
         itemsView: "full",
         status: "completed",

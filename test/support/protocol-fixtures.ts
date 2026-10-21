@@ -165,6 +165,7 @@ export function protocolThreadResumeResponse(
 export function protocolTurn(id: string, status: Turn["status"]): Turn {
   return {
     id,
+    rootTurnId: null,
     items: [],
     itemsView: "full",
     status,

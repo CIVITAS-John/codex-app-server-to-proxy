@@ -241,7 +241,7 @@ const thread = {
   gitInfo: null, name: null, turns: []
 };
 const turn = (status) => ({
-  id: "turn_package_smoke", items: [], itemsView: "full", status,
+  id: "turn_package_smoke", rootTurnId: null, items: [], itemsView: "full", status,
   error: null, startedAt: null, completedAt: null, durationMs: null
 });
 const model = {
@@ -263,7 +263,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     platformOs: process.platform
   }});
   else if (message.method === "configRequirements/read")
-    send({ id: message.id, result: { requirements: null }});
+    send({ id: message.id, result: { supportsIndependentSpeedModes: null, requirements: null }});
   else if (message.method === "config/read")
     send({ id: message.id, result: { config: { windows: null }, origins: {}, layers: null }});
   else if (message.method === "account/read") send({ id: message.id, result: {

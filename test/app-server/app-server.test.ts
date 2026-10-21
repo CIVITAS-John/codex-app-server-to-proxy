@@ -1019,6 +1019,7 @@ testWithPosixExecutable(
         "configRequirements/read",
         0,
         {
+          supportsIndependentSpeedModes: null,
           requirements: {
             modelProvider: null,
             modelProviders: null,

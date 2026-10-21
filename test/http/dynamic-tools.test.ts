@@ -233,6 +233,7 @@ class ToolAppServer {
       } else if (message.method === "thread/read")
         this.#send(
           protocolResponse("thread/read", id, {
+            readState: null,
             thread: protocolThread(
               String((message.params as { threadId?: unknown }).threadId),
             ),
