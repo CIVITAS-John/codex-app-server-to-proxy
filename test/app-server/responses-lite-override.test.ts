@@ -27,6 +27,7 @@ test("Responses Lite override clones every model and preserves other config", as
           {
             slug: "gpt-6-luna",
             use_responses_lite: true,
+            include_plugin_usage_instructions: true,
             tool_mode: "code_mode_only",
             priority: 1,
           },
@@ -37,7 +38,12 @@ test("Responses Lite override clones every model and preserves other config", as
             tool_mode: "code_mode_only",
             priority: 2,
           },
-          { slug: "unchanged-model", tool_mode: "code_mode", priority: 3 },
+          {
+            slug: "unchanged-model",
+            tool_mode: "code_mode",
+            include_plugin_usage_instructions: false,
+            priority: 3,
+          },
         ],
       },
       null,
@@ -77,23 +83,32 @@ test("Responses Lite override clones every model and preserves other config", as
       (override.models as Array<Record<string, unknown>>).map((model) => ({
         slug: model.slug,
         use_responses_lite: model.use_responses_lite,
+        include_plugin_usage_instructions:
+          model.include_plugin_usage_instructions,
         tool_mode: model.tool_mode,
+        priority: model.priority,
       })),
       [
         {
           slug: "gpt-6-luna",
           use_responses_lite: false,
+          include_plugin_usage_instructions: false,
           tool_mode: undefined,
+          priority: 1,
         },
         {
           slug: "legacy-catalog-model",
           use_responses_lite: false,
+          include_plugin_usage_instructions: false,
           tool_mode: undefined,
+          priority: 2,
         },
         {
           slug: "unchanged-model",
           use_responses_lite: false,
+          include_plugin_usage_instructions: false,
           tool_mode: "code_mode",
+          priority: 3,
         },
       ],
     );

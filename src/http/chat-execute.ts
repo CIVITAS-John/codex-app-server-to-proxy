@@ -360,6 +360,33 @@ interface PreflightFallback {
  */
 const TERMINAL_USAGE_WAIT_MS = 10_000;
 
+/**
+ * Optional injected Codex context suppressed on every thread start and resume,
+ * independently of sandbox enforcement and of client instructions carried in
+ * base/history messages. Recheck these keys on every Codex upgrade.
+ */
+const SUPPRESSED_CONTEXT_CONFIG = {
+  include_collaboration_mode_instructions: false,
+  include_apps_instructions: false,
+  "skills.include_instructions": false,
+  "memories.use_memories": false,
+  "features.token_budget": false,
+  "features.current_time_reminder": false,
+  "features.tool_suggest": false,
+  "features.recommended_plugins": false,
+  project_doc_max_bytes: 0,
+} as const;
+
+/**
+ * Permission and environment context suppressed only for the `disabled`
+ * sandbox. Sandboxes with an execution environment keep them so the model
+ * knows its cwd, shell, sandbox limits, and how to request approval.
+ */
+const DISABLED_SANDBOX_CONTEXT_CONFIG = {
+  include_permissions_instructions: false,
+  include_environment_context: false,
+} as const;
+
 /** Runs or resumes a Codex thread and yields its normalized event stream. */
 export async function execute(
   request: ChatRequest,
@@ -1439,11 +1466,15 @@ async function threadPolicyParams(
     ...(options.resolveThreadConfig
       ? await options.resolveThreadConfig(policy.cwd, options.signal)
       : {}),
+    // Spread last so resolved configuration cannot re-enable suppressed context.
+    ...SUPPRESSED_CONTEXT_CONFIG,
+    ...(policy.sandbox === "disabled" ? DISABLED_SANDBOX_CONTEXT_CONFIG : {}),
   };
   return {
     cwd: policy.cwd,
     sandbox: policy.threadSandbox,
     approvalPolicy: policy.approvalPolicy,
+    developerInstructions: "",
     ...(policy.approvalsReviewer
       ? { approvalsReviewer: policy.approvalsReviewer }
       : {}),

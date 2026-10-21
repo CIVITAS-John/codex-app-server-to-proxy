@@ -2869,6 +2869,10 @@ test("maps system messages to fresh-thread base instructions", async () => {
       (thread?.params as Record<string, unknown>)?.baseInstructions,
       "base one\n\nbase two",
     );
+    assert.equal(
+      (thread?.params as Record<string, unknown>)?.developerInstructions,
+      "",
+    );
     const injected = fake.messages.find(
       (message) => message.method === "thread/inject_items",
     );
@@ -4102,6 +4106,25 @@ test("request policies map exactly, bind continuations, and honor managed denial
     const root = await realpath(configuredRoot);
     const cwd = await realpath(configuredCwd);
     const fake = policyCapturingAppServer();
+    // Context suppressed for every sandbox selection.
+    const suppressedContextConfig = {
+      include_collaboration_mode_instructions: false,
+      include_apps_instructions: false,
+      "skills.include_instructions": false,
+      "memories.use_memories": false,
+      "features.token_budget": false,
+      "features.current_time_reminder": false,
+      "features.tool_suggest": false,
+      "features.recommended_plugins": false,
+      project_doc_max_bytes: 0,
+    };
+    // Permission and environment context suppressed only without an
+    // execution environment.
+    const disabledSandboxContextConfig = {
+      ...suppressedContextConfig,
+      include_permissions_instructions: false,
+      include_environment_context: false,
+    };
     // The fallback reasons are info-level structured entries carrying only a
     // request id and a fixed reason, so an in-memory capture can assert them.
     const fallbackEntries: Array<Record<string, unknown>> = [];
@@ -4150,10 +4173,12 @@ test("request policies map exactly, bind continuations, and honor managed denial
         cwd,
         sandbox: "workspace-write",
         approvalPolicy: "never",
+        developerInstructions: "",
         approvalsReviewer: "auto_review",
         config: {
           web_search: "indexed",
           "windows.sandbox": "unelevated",
+          ...suppressedContextConfig,
         },
       });
       const turn = fake.messages.find(
@@ -4201,10 +4226,12 @@ test("request policies map exactly, bind continuations, and honor managed denial
         cwd,
         sandbox: "workspace-write",
         approvalPolicy: "never",
+        developerInstructions: "",
         approvalsReviewer: "auto_review",
         config: {
           web_search: "indexed",
           "windows.sandbox": "unelevated",
+          ...suppressedContextConfig,
         },
       });
       const nativeContinuationMessages = fake.messages.slice(
@@ -4266,10 +4293,12 @@ test("request policies map exactly, bind continuations, and honor managed denial
         cwd,
         sandbox: "read-only",
         approvalPolicy: "never",
+        developerInstructions: "",
         approvalsReviewer: "auto_review",
         config: {
           web_search: "indexed",
           "windows.sandbox": "unelevated",
+          ...suppressedContextConfig,
         },
       });
 
@@ -4302,10 +4331,12 @@ test("request policies map exactly, bind continuations, and honor managed denial
         cwd,
         sandbox: "workspace-write",
         approvalPolicy: "never",
+        developerInstructions: "",
         approvalsReviewer: "auto_review",
         config: {
           web_search: "disabled",
           "windows.sandbox": "unelevated",
+          ...suppressedContextConfig,
         },
       });
       assert.deepEqual(resolvedCwds, [cwd, cwd, cwd, cwd]);
@@ -4351,8 +4382,9 @@ test("request policies map exactly, bind continuations, and honor managed denial
         cwd,
         sandbox: "workspace-write",
         approvalPolicy: "on-request",
+        developerInstructions: "",
         approvalsReviewer: "user",
-        config: { web_search: "indexed" },
+        config: { web_search: "indexed", ...suppressedContextConfig },
       });
       assert.deepEqual(managedFake.messages[1]?.params, {
         threadId: "thr_policy",
@@ -4410,8 +4442,12 @@ test("request policies map exactly, bind continuations, and honor managed denial
           cwd: root,
           sandbox: "read-only",
           approvalPolicy: "never",
+          developerInstructions: "",
           approvalsReviewer: "auto_review",
-          config: { web_search: "disabled" },
+          config: {
+            web_search: "disabled",
+            ...disabledSandboxContextConfig,
+          },
           environments: [],
         },
       );
@@ -4475,8 +4511,12 @@ test("request policies map exactly, bind continuations, and honor managed denial
           cwd: root,
           sandbox: "read-only",
           approvalPolicy: "never",
+          developerInstructions: "",
           approvalsReviewer: "auto_review",
-          config: { web_search: "disabled" },
+          config: {
+            web_search: "disabled",
+            ...disabledSandboxContextConfig,
+          },
         },
       );
       assert.deepEqual(
@@ -4535,8 +4575,9 @@ test("request policies map exactly, bind continuations, and honor managed denial
         cwd: root,
         sandbox: "read-only",
         approvalPolicy: "never",
+        developerInstructions: "",
         approvalsReviewer: "auto_review",
-        config: { web_search: "disabled" },
+        config: { web_search: "disabled", ...suppressedContextConfig },
       });
       assert.deepEqual(changedDisabledMessages[1]?.params, {
         threadId: "thr_policy_2",
