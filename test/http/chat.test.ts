@@ -4106,7 +4106,7 @@ test("request policies map exactly, bind continuations, and honor managed denial
     const root = await realpath(configuredRoot);
     const cwd = await realpath(configuredCwd);
     const fake = policyCapturingAppServer();
-    // Context suppressed for every sandbox selection.
+    // Context and built-in tools suppressed for every sandbox selection.
     const suppressedContextConfig = {
       include_collaboration_mode_instructions: false,
       include_apps_instructions: false,
@@ -4117,6 +4117,12 @@ test("request policies map exactly, bind continuations, and honor managed denial
       "features.tool_suggest": false,
       "features.recommended_plugins": false,
       project_doc_max_bytes: 0,
+      // Built-in tools a Chat Completions client cannot observe or answer.
+      "features.apps": false,
+      "features.goals": false,
+      "features.sleep_tool": false,
+      "features.image_generation": false,
+      "tools.experimental_request_user_input.enabled": false,
     };
     // Permission and environment context suppressed only without an
     // execution environment.

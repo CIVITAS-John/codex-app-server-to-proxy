@@ -378,6 +378,20 @@ const SUPPRESSED_CONTEXT_CONFIG = {
 } as const;
 
 /**
+ * Built-in Codex tools a Chat Completions client can neither observe nor
+ * answer, disabled on every thread start and resume. `features.apps` also
+ * removes the built-in `codex_apps` MCP server, which is what registers the
+ * MCP resource tools and the deferred connector tools behind `tool_search`.
+ */
+const DISABLED_BUILT_IN_TOOLS_CONFIG = {
+  "features.apps": false,
+  "features.goals": false,
+  "features.sleep_tool": false,
+  "features.image_generation": false,
+  "tools.experimental_request_user_input.enabled": false,
+} as const;
+
+/**
  * Permission and environment context suppressed only for the `disabled`
  * sandbox. Sandboxes with an execution environment keep them so the model
  * knows its cwd, shell, sandbox limits, and how to request approval.
@@ -1466,8 +1480,10 @@ async function threadPolicyParams(
     ...(options.resolveThreadConfig
       ? await options.resolveThreadConfig(policy.cwd, options.signal)
       : {}),
-    // Spread last so resolved configuration cannot re-enable suppressed context.
+    // Spread last so resolved configuration cannot re-enable suppressed
+    // context or tools. Managed feature pins still win upstream, silently.
     ...SUPPRESSED_CONTEXT_CONFIG,
+    ...DISABLED_BUILT_IN_TOOLS_CONFIG,
     ...(policy.sandbox === "disabled" ? DISABLED_SANDBOX_CONTEXT_CONFIG : {}),
   };
   return {

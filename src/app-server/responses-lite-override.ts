@@ -98,6 +98,11 @@ function disableResponsesLite(source: string): {
     // This is model metadata; the per-thread app-instruction option does not
     // suppress Codex's generic plugin instructions.
     model.include_plugin_usage_instructions = false;
+    // Model metadata listing "clock" registers clock.curr_time regardless of
+    // any feature flag, so the proxy-owned catalog drops it.
+    if (Array.isArray(model.experimental_supported_tools))
+      model.experimental_supported_tools =
+        model.experimental_supported_tools.filter((tool) => tool !== "clock");
     // Code-only routing turns dynamic functions into nested exec callbacks.
     // Codex 0.154.0 no longer exposes supports_parallel_tool_calls in model
     // metadata. Gating on that removed field silently retains code-only tools.
