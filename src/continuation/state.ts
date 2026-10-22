@@ -1,7 +1,9 @@
+import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   unlinkSync,
@@ -59,6 +61,38 @@ export interface ResponseRecord extends ThreadBinding {
   usageTotal?: TokenUsageCounters;
 }
 
+/** Atomic-write temporary file name, capturing the writer's process ID. */
+const TEMPORARY_FILE = /^continuations\.json\.(\d+)\.[0-9a-f-]{36}\.tmp$/;
+
+/**
+ * Deletes temporary files whose writer process no longer exists. Each crash
+ * mid-write strands a full store copy under a unique name, and no later write
+ * reuses that name. A live process, including an unrelated one that reused the
+ * PID, keeps its file.
+ */
+function removeOrphanedTemporaries(directory: string): void {
+  for (const name of readdirSync(directory)) {
+    const writer = TEMPORARY_FILE.exec(name)?.[1];
+    if (writer === undefined || processExists(Number(writer))) continue;
+    try {
+      unlinkSync(join(directory, name));
+    } catch {
+      // A concurrently starting store may have removed it first.
+    }
+  }
+}
+
+/** Reports whether a process ID currently names any process. */
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the process exists but belongs to another user.
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 /** Durable atomic response mapping store with bounded retention. */
 export class ResponseStore {
   readonly #path: string;
@@ -72,6 +106,7 @@ export class ResponseStore {
     hardenStatePath(directory, "directory");
     this.#path = join(directory, "continuations.json");
     hardenExistingStateFile(this.#path);
+    removeOrphanedTemporaries(directory);
     this.#load();
   }
 
@@ -176,7 +211,9 @@ export class ResponseStore {
 
   /** Replaces the state file atomically so abrupt termination preserves the old file. */
   #save(): void {
-    const temporary = `${this.#path}.tmp`;
+    // Each writer owns its temporary file; cleanup must never remove another
+    // process's in-progress write, even with an explicitly shared state path.
+    const temporary = `${this.#path}.${process.pid}.${randomUUID()}.tmp`;
     try {
       writeFileSync(
         temporary,

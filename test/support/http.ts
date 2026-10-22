@@ -2,7 +2,7 @@ import type { JsonRpcTransport } from "../../src/app-server/json-rpc.js";
 import type { ThreadConfigResolver } from "../../src/app-server/windows-sandbox.js";
 import {
   parseServeOptions,
-  resolveServeOptions,
+  prepareServeOptions,
   type ServeOptions,
 } from "../../src/core/config.js";
 import type { Logger } from "../../src/core/logger.js";
@@ -60,15 +60,16 @@ export async function startProxyWithTransport(
   // to reach the CLI argument list.
   if (settings.implicitToolContinuation === false)
     args.push("--implicit-tool-continuation", "false");
-  const options = await resolveServeOptions(parseServeOptions(args));
-  const proxy = createProxyServer(options, settings.log ?? silentLogger);
+  const prepared = await prepareServeOptions(parseServeOptions(args));
+  const proxy = createProxyServer(prepared, settings.log ?? silentLogger);
+  const address = await proxy.listen();
+  const options = address.options;
   proxy.setTransport(
     rpc,
     settings.requirements ?? UNRESTRICTED_POLICY_REQUIREMENTS,
     settings.resolveThreadConfig,
   );
   proxy.setReady(true);
-  const address = await proxy.listen();
   const host = address.address.includes(":")
     ? `[${address.address}]`
     : address.address;

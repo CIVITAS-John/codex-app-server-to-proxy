@@ -24,7 +24,7 @@ export interface Usage {
   completion_tokens_details?: { reasoning_tokens: number };
 }
 
-/** Request-scoped logger context for usage-attribution degradation warnings. */
+/** Request-scoped logger context for retry and usage-attribution diagnostics. */
 export interface NormalizerDiagnostics {
   log: Logger;
   requestId: string;
@@ -364,6 +364,17 @@ export class EventNormalizer {
     }
     if (method === "error") {
       const error = record(params.error);
+      // App-server owns retry timing and preserves the active turn and output.
+      // The retry is invisible over HTTP, so the log is its only trace.
+      if (params.willRetry === true) {
+        this.#diagnostics?.log("warn", "app_server_retry", {
+          request_id: this.#diagnostics.requestId,
+          error_kind: codexErrorKind(error?.codexErrorInfo),
+          message:
+            typeof error?.message === "string" ? error.message : undefined,
+        });
+        return [];
+      }
       return [terminalEvent(error, "The app-server turn failed.")];
     }
     if (method === "turn/completed") {
@@ -553,6 +564,12 @@ function terminalEvent(
       serverOverloadedError(error, message) ??
       appServerError(message),
   };
+}
+
+/** Names a Codex error variant, which is a bare string or a one-key object. */
+function codexErrorKind(info: unknown): string | undefined {
+  if (typeof info === "string") return info;
+  return Object.keys(record(info) ?? {})[0];
 }
 
 /** Returns only the completed reasoning suffix not already streamed. */

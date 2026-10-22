@@ -2,13 +2,16 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import net from "node:net";
 import { once } from "node:events";
+import { existsSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
 import {
   parseServeOptions,
-  resolveServeOptions,
-  type ServeOptions,
+  prepareServeOptions,
+  type ParsedServeOptions,
+  type PreparedServeOptions,
 } from "../../src/core/config.js";
 import { createLogger } from "../../src/core/logger.js";
 import { UNRESTRICTED_POLICY_REQUIREMENTS } from "../../src/core/policy.js";
@@ -22,13 +25,14 @@ import {
   protocolTurn,
 } from "../support/protocol-fixtures.js";
 import { createFakeTransport } from "../support/transport.js";
+import { withTempDir } from "../support/temp.js";
 
 /** Builds safe ephemeral listener options for a server test. */
 async function options(
-  overrides: Partial<ServeOptions> = {},
-): Promise<ServeOptions> {
+  overrides: Partial<ParsedServeOptions> = {},
+): Promise<PreparedServeOptions> {
   return {
-    ...(await resolveServeOptions(
+    ...(await prepareServeOptions(
       parseServeOptions([
         "--port",
         "0",
@@ -42,7 +46,7 @@ async function options(
 
 /** Runs a test callback against an ephemeral proxy and always closes it. */
 async function withServer(
-  overrides: Partial<ServeOptions>,
+  overrides: Partial<ParsedServeOptions>,
   run: (origin: string, proxy: ProxyServer) => Promise<void>,
 ): Promise<void> {
   const proxy = createProxyServer(await options(overrides), silentLogger);
@@ -70,6 +74,72 @@ test("health is live while readiness remains false", async () => {
     response = await fetch(`${origin}/ready`);
     assert.equal(response.status, 200);
   });
+});
+
+test("a duplicate listener never creates or rewrites state or a Codex home", async () => {
+  await withTempDir(async (directory) => {
+    const stateDir = join(directory, "state");
+    const codexHome = join(directory, "home");
+    await mkdir(stateDir);
+    const stateFile = join(stateDir, "continuations.json");
+    const original = '{"version":0,"records":[]}';
+    await writeFile(stateFile, original);
+    const owner = createProxyServer(
+      await options({ stateDir: join(directory, "owner-state"), codexHome }),
+      silentLogger,
+    );
+    const address = await owner.listen();
+    try {
+      const duplicate = createProxyServer(
+        await options({ port: address.port, stateDir, codexHome }),
+        silentLogger,
+      );
+      assert.equal(await readFile(stateFile, "utf8"), original);
+      await assert.rejects(duplicate.listen(), { code: "EADDRINUSE" });
+      assert.equal(await readFile(stateFile, "utf8"), original);
+      assert.equal(existsSync(codexHome), false);
+      const absentState = join(directory, "absent-state");
+      const absent = createProxyServer(
+        await options({ port: address.port, stateDir: absentState, codexHome }),
+        silentLogger,
+      );
+      await assert.rejects(absent.listen(), { code: "EADDRINUSE" });
+      assert.equal(existsSync(absentState), false);
+    } finally {
+      await owner.close();
+    }
+  });
+});
+
+test("state initialization failure after binding releases the listener", async () => {
+  await withTempDir(async (directory) => {
+    const invalidState = join(directory, "state-file");
+    await writeFile(invalidState, "synthetic obstruction");
+    const proxy = createProxyServer(
+      await options({
+        stateDir: invalidState,
+        codexHome: join(directory, "home"),
+      }),
+      silentLogger,
+    );
+    await assert.rejects(proxy.listen(), /EEXIST/);
+    assert.equal(proxy.server.listening, false);
+    assert.equal(existsSync(join(directory, "home")), false);
+  });
+});
+
+test("readiness and a transport both require a completed listen", async () => {
+  const proxy = createProxyServer(await options(), silentLogger);
+  const fake = createFakeTransport({ onMessage: () => undefined });
+  try {
+    assert.throws(() => proxy.setReady(true), /Listen before/);
+    assert.throws(() => proxy.setTransport(fake.rpc), /Listen before/);
+    // Clearing state is always safe, so shutdown paths need no ordering check.
+    proxy.setReady(false);
+    proxy.setTransport(undefined);
+  } finally {
+    fake.close();
+  }
 });
 
 test("every route rejects missing, malformed, and non-loopback Host headers", async () => {

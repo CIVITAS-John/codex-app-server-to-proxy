@@ -7,7 +7,12 @@ import {
 } from "node:http";
 import type { Socket } from "node:net";
 import { HttpError, writeError, writeJson } from "./errors.js";
-import type { ServeOptions } from "../core/config.js";
+import {
+  finalizeServeOptions,
+  normalizeLoopbackHost,
+  type PreparedServeOptions,
+  type ServeOptions,
+} from "../core/config.js";
 import type { Logger } from "../core/logger.js";
 import type { JsonRpcTransport } from "../app-server/json-rpc.js";
 import type { ThreadConfigResolver } from "../app-server/windows-sandbox.js";
@@ -25,11 +30,13 @@ import {
 /** Controls the proxy HTTP listener and readiness state. */
 export interface ProxyServer {
   server: Server;
-  listen(): Promise<{ address: string; port: number }>;
+  listen(): Promise<{ address: string; port: number; options: ServeOptions }>;
   close(): Promise<void>;
+  /** Changes readiness; becoming ready requires a completed `listen()`. */
   setReady(ready: boolean): void;
   /**
-   * Installs or clears the app-server transport. Omitted requirements reset to
+   * Installs or clears the app-server transport. Installing one requires a
+   * completed `listen()`. Omitted requirements reset to
    * unrestricted proxy defaults, which is only meaningful when the transport is
    * being cleared.
    */
@@ -42,7 +49,7 @@ export interface ProxyServer {
 
 /** Creates a loopback proxy with bounded concurrency and request lifetimes. */
 export function createProxyServer(
-  options: ServeOptions,
+  options: PreparedServeOptions,
   log: Logger,
 ): ProxyServer {
   let ready = false;
@@ -50,7 +57,7 @@ export function createProxyServer(
   let requirements = UNRESTRICTED_POLICY_REQUIREMENTS;
   let resolveThreadConfig: ThreadConfigResolver | undefined;
   let continuations: ContinuationCoordinator | undefined;
-  const continuationStore = new ResponseStore(options.stateDir);
+  let continuationStore: ResponseStore | undefined;
   let active = 0;
   const controllers = new Set<AbortController>();
   const sockets = new Set<Socket>();
@@ -174,10 +181,18 @@ export function createProxyServer(
     sockets.add(socket);
     socket.once("close", () => sockets.delete(socket));
   });
+  // The continuation store exists only once this process owns the listener,
+  // so serving work before `listen()` resolves is a caller ordering bug.
+  const requireListening = (): ResponseStore => {
+    if (!continuationStore)
+      throw new Error("Listen before readying or installing a transport.");
+    return continuationStore;
+  };
 
   return {
     server,
     setReady(value) {
+      if (value) requireListening();
       ready = value;
     },
     setTransport(
@@ -185,6 +200,7 @@ export function createProxyServer(
       nextRequirements?: PolicyRequirements,
       nextThreadConfigResolver?: ThreadConfigResolver,
     ) {
+      const store = value ? requireListening() : undefined;
       // Update requirements before the same-transport short-circuit so a refresh
       // of managed policy against an unchanged transport still takes effect.
       requirements = nextRequirements ?? UNRESTRICTED_POLICY_REQUIREMENTS;
@@ -194,16 +210,19 @@ export function createProxyServer(
       if (transport && transport !== value)
         transport.close(new Error("app-server transport replaced"));
       transport = value;
-      continuations = value
-        ? new ContinuationCoordinator(continuationStore, value)
-        : undefined;
+      continuations =
+        value && store ? new ContinuationCoordinator(store, value) : undefined;
     },
     listen: () =>
       new Promise((resolve, reject) => {
         const onError = (error: Error): void => reject(error);
         server.once("error", onError);
         server.listen(
-          { host: options.host, port: options.port, exclusive: true },
+          {
+            host: normalizeLoopbackHost(options.host),
+            port: options.port,
+            exclusive: true,
+          },
           () => {
             server.off("error", onError);
             const address = server.address();
@@ -211,7 +230,20 @@ export function createProxyServer(
               return reject(
                 new Error("Listener did not return a TCP address."),
               );
-            resolve({ address: address.address, port: address.port });
+            try {
+              // A conflicting process must never load or rewrite this instance's
+              // store. Ownership of the exclusive listener comes first.
+              const finalized = finalizeServeOptions(options, address.port);
+              continuationStore = new ResponseStore(finalized.stateDir);
+              resolve({
+                address: address.address,
+                port: address.port,
+                options: finalized,
+              });
+            } catch (error) {
+              server.close(() => reject(error));
+              server.closeAllConnections();
+            }
           },
         );
       }),

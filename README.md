@@ -28,7 +28,7 @@ Check status:
 
 ## Authentication
 
-The proxy signs in with a ChatGPT account — no API key is exchanged. The spawned Codex runs in a proxy-owned home (`~/.codex-openai-proxy/codex-home` by default; override with `--codex-home`), isolated from any `~/.codex` install. On every startup, the proxy compares that home's `auth.json` with the existing `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`) and adopts the source only when it is missing locally or the source is strictly newer. This newest-wins rule propagates a Codex CLI token refresh without replacing credentials the proxy refreshed more recently. If the available credentials are unusable, the proxy attempts one logout and runs the normal login flow instead of exiting:
+The proxy signs in with a ChatGPT account — no API key is exchanged. The spawned Codex runs in a proxy-owned home under the [instance directory](#instance-directories) (override with `--codex-home`), isolated from any `~/.codex` install. On every startup, the proxy compares that home's `auth.json` with the existing `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`) and adopts the source only when it is missing locally or the source is strictly newer. This newest-wins rule propagates a Codex CLI token refresh without replacing credentials the proxy refreshed more recently. If the available credentials are unusable, the proxy attempts one logout and runs the normal login flow instead of exiting:
 
 Choose the login flow with `--login <auto|device-code|browser>`:
 
@@ -40,11 +40,19 @@ Notes:
 
 - Completions return `app_server_not_ready` and `/ready` returns 503 until login finishes.
 - The login deadline is fixed at 5 minutes.
-- `--sync-auth never` leaves the proxy's Codex home untouched, including when the source has newer credentials. The only other mode is the default, `always`.
+- `--sync-auth never` disables credential synchronization in both directions. A new home then needs its own login or separately provisioned credentials. The only other mode is the default, `always`.
 - The proxy writes a recovered login back to the main Codex home only after startup proved a pulled credential unusable and fresh recovery login succeeded. It uses a best-effort strictly-newer guard and atomic replacement for an existing older `auth.json`; `never` does not write back, and the proxy never creates the target.
 - ChatGPT refresh tokens are single-use. Sharing one login between the Codex CLI and proxy means either side can invalidate the other's stored refresh token. For heavy simultaneous use, choose `--sync-auth never` and complete a proxy-only login.
 - Treat authorization URLs and device codes as credentials. Plaintext proxy logs may contain them, so keep log captures local and never paste them into issues without reviewing the full contents.
-- The proxy's login lives in its Codex home; deleting `~/.codex-openai-proxy/codex-home` signs the proxy out without touching the Codex CLI's own `~/.codex` session.
+- The proxy's login lives in its selected Codex home; deleting that directory signs the proxy out without touching the Codex CLI's own `~/.codex` session.
+
+### Instance directories
+
+Default storage is `~/.codex-openai-proxy/<root-hash>/<family>-<port>/`, with continuation mappings in `state/` and the Codex login, configuration, and caches in `codex-home/`. The root hash is the first 16 hexadecimal characters of SHA-256 over the canonical `--root`; the workspace root itself does not change. The family is `ipv4` for `127.0.0.1` and `localhost`, or `ipv6` for `::1`. The port is the actual bound port. A fixed root and endpoint reuse their directories across restarts; `--port 0` selects an unpredictable port and therefore may select new directories on restart, so startup logs an `ephemeral_instance_directories` warning naming any defaulted directory. Nothing reuses or removes those directories later.
+
+`--state-dir` and `--codex-home` each replace their corresponding default exactly; relative paths resolve against the canonical root. If you override them for simultaneous processes, choose distinct directories yourself. Unique temporary filenames protect atomic publication, but the continuation store has no cross-process locking or merging.
+
+The new default layout leaves old root-only state and the former shared `~/.codex-openai-proxy/codex-home` untouched. It does not import their mappings, configuration, caches, or proxy-only login. Old response IDs follow the existing fresh-execution fallback rules when their records are unavailable. Default authentication sync can seed credentials from the ordinary Codex home; `--sync-auth never` needs a separate login or provisioned credentials. Separate homes isolate local files but do not guarantee a fix for an upstream 403: synchronized OAuth tokens can still rotate across processes.
 
 ### Temporary Responses Lite override
 
@@ -270,13 +278,15 @@ One response can span several Codex model requests, for example when internal to
 
 ## Quota errors
 
-Only app-server `codexErrorInfo: "usageLimitExceeded"` becomes HTTP 429 with `error.type: "rate_limit_error"`, normally `error.code: "usage_limit_exceeded"`. This is error enrichment, not a public quota endpoint or proactive admission check, and it is distinct from response-token usage.
+Only terminal app-server `codexErrorInfo: "usageLimitExceeded"` becomes HTTP 429 with `error.type: "rate_limit_error"`, normally `error.code: "usage_limit_exceeded"`. This is error enrichment, not a public quota endpoint or proactive admission check, and it is distinct from response-token usage.
 
 For each such failed request, the proxy makes at most one memoized, abortable `account/rateLimits/read`. When it finds a trustworthy future reset, nonstandard `error.x_codex.reset_at` is Unix seconds; an uncommitted response also has the matching integer-seconds `Retry-After` header. A failed or malformed lookup omits both reset values but preserves the typed 429. Client cancellation remains cancellation.
 
 Explicit workspace credit exhaustion always uses `insufficient_credits` with no reset. An explicit workspace usage cap uses `workspace_usage_limit_exceeded` only without a trustworthy individual spend-control reset; when `spendControlReached` and a valid future `individualLimit` reset exist, it remains `usage_limit_exceeded` with reset metadata. Vox Agents treats both workspace codes as non-retryable. The reset is the latest future exhausted primary or secondary window from `rateLimitsByLimitId.codex`, falling back to `rateLimits`; `individualLimit` participates only when `spendControlReached`. The proxy uses stale-percent data only for `rate_limit_reached` and never infers a workspace reset from rolling windows. It never sleeps, queues, consumes reset credit, retries, or replays a request.
 
 ## Capacity errors
+
+An app-server error with `willRetry: true` is internal progress while Codex owns its retries and transport fallback. The proxy waits for a later terminal outcome within the existing request deadline, without starting a replacement execution or exposing a new HTTP field or SSE event; each retry is logged as an `app_server_retry` warning. Missing, false, or malformed `willRetry` values retain terminal error handling and the existing status mapping.
 
 App-server `codexErrorInfo: "serverOverloaded"` — the failure behind Codex's "Selected model is at capacity. Please try a different model." — becomes HTTP 503 with `error.type: "server_error"` and `error.code: "server_overloaded"`, carrying the Codex message unchanged. It is an upstream condition rather than your account's quota, so it triggers no rate-limit lookup and never carries `Retry-After` or `reset_at`. Every other unclassified turn failure remains 502 `app_server_error`. This includes strict Guardian denial-limit errors (`tooManyDenials`) carried by an interrupted turn; an interruption without an error keeps `finish_reason: "length"`. The proxy does not retry a capacity failure for you; treat 503 as retryable, ideally with another model.
 
@@ -320,9 +330,9 @@ npm uninstall --global codex-openai-proxy
 npm uninstall codex-openai-proxy
 ```
 
-- Continuation state lives under `~/.codex-openai-proxy` (one namespace per `--root`), or your custom `--state-dir`. The proxy's Codex home — including its ChatGPT login and Codex caches — lives at `~/.codex-openai-proxy/codex-home`, or your custom `--codex-home`. Uninstalling deletes neither.
+- Continuation state and the Codex home live in the selected [instance directories](#instance-directories), or your custom `--state-dir` and `--codex-home`. Uninstalling deletes neither. Old root-only state and the former shared Codex home also remain until you remove them.
 - The temporary `models.no-responses-lite.json` catalog and its marked `config.toml` block also remain in the selected Codex home after uninstall. Remove both together only while every proxy using that home is stopped.
-- Stop every proxy using a root before deleting its namespace. Deleting state invalidates its `previous_response_id` values but does not touch Codex's threads; deleting `codex-home` also signs the proxy out (the next startup re-seeds from `~/.codex` when a login exists there unless `--sync-auth never` is set). A recovered login can update an existing older Codex CLI `auth.json` under the guarded conditions in [Authentication](#authentication).
+- Stop every proxy using a directory before deleting it. Deleting state invalidates its `previous_response_id` values but does not touch Codex's threads; deleting `codex-home` also signs the proxy out (the next startup re-seeds from `~/.codex` when a login exists there unless `--sync-auth never` is set). A recovered login can update an existing older Codex CLI `auth.json` under the guarded conditions in [Authentication](#authentication).
 
 ## Documentation
 

@@ -27,11 +27,13 @@ flowchart LR
 | HTTP contract            | `src/http/`         | Route requests, validate Chat Completions input, execute turns, normalize app-server events, and serialize JSON, SSE, and errors.                     |
 | Continuation state       | `src/continuation/` | Persist response-to-thread mappings, pending client tool calls, usage boundaries, and thread leases.                                                  |
 
-The HTTP listener opens before app-server authentication completes. `/health` reports that the proxy process is listening; `/ready` and model or chat requests require an authenticated, initialized app-server transport. If the child exits, the supervisor withdraws readiness and makes bounded restart attempts. It installs a replacement transport only after startup succeeds.
+The HTTP listener opens before app-server authentication completes. Once binding succeeds, its actual port finalizes the default instance paths; only then are continuation state and the private app-server initialized. A failed bind creates neither default state nor a Codex home and starts no child. `/health` reports that the proxy process is listening; `/ready` and model or chat requests require an authenticated, initialized app-server transport. If the child exits, the supervisor withdraws readiness and makes bounded restart attempts. It installs a replacement transport only after startup succeeds.
 
 ## Startup ownership
 
 The proxy uses the exact `@openai/codex` package pin by default and rejects an explicit executable override with a different reported version. It runs app-server in a proxy-owned Codex home, separate from the ordinary Codex CLI home. Authentication can synchronize a strictly newer `auth.json` from the ordinary home unless `--sync-auth never` is set; the normal login flow handles an absent or unusable credential. The proxy never stores credentials in its continuation records.
+
+Default state and Codex home are sibling directories keyed by the canonical root and the actual bound endpoint; [instance directories](../README.md#instance-directories) describes the layout, overrides, and legacy data.
 
 Each new proxy process makes one bounded, catalog-only refresh attempt in a temporary Codex home. A valid refreshed cache replaces the selected home's cache; a failed refresh retains the previous cache. The temporary Responses Lite catalog override is built separately from Codex's refreshable cache and must be loaded by the serving child before readiness. Because catalog selection is a startup setting, installing or rebuilding the override can require a private child restart. App-server recovery within the same proxy process does not repeat the catalog refresh. See [upstream compatibility](codex-app-server.md#pinned-compatibility-note) for the pinned protocol context.
 
@@ -40,6 +42,8 @@ Each new proxy process makes one bounded, catalog-only refresh attempt in a temp
 The public routes are `/health`, `/ready`, `GET /v1/models`, and `POST /v1/chat/completions`. The model route reads the active app-server catalog without starting a Codex thread or turn. A chat request is validated and assigned an effective policy before any turn starts. Execution chooses a fresh thread or an admitted continuation, then uses the same app-server event stream for aggregate JSON and SSE output. The event normalizer exposes only supported activity; unknown notifications remain diagnostic. Token usage appears only when app-server provides attributable counts.
 
 For streaming, setup and the first event are processed before SSE headers are committed so early failures retain their HTTP error status. After headers are sent, failures are emitted inside the stream. Output writes honor backpressure; request cancellation and deadlines release the active turn and its transport work. [Continuation](continuation.md) describes how client-defined tool batches end a turn and resume through later HTTP requests.
+
+An app-server error with literal `willRetry: true` is internal progress rather than a terminal failure; see [capacity errors](../README.md#capacity-errors).
 
 Child-agent lifecycle events are observational `x_codex` tool activity. The pinned app-server may report a start as `subAgentActivity` rather than `spawnAgent`; the normalizer preserves the recognized activity kind and child thread ID in arguments and result content, while omitting agent paths. This preserves correlation without making child activity a client-executable function call.
 

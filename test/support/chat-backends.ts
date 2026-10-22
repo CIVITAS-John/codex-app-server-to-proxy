@@ -284,7 +284,6 @@ async function seedLiveModelCache(
 ): Promise<void> {
   const sourceHomes = [
     process.env.CODEX_HOME,
-    join(homedir(), ".codex-openai-proxy", "codex-home"),
     join(homedir(), ".codex"),
   ].filter((candidate): candidate is string => candidate !== undefined);
   await mkdir(codexHome, { recursive: true, mode: 0o700 });

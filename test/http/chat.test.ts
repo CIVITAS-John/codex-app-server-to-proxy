@@ -50,6 +50,7 @@ import {
   startProxyWithTransport,
 } from "../support/http.js";
 import { silentLogger } from "../support/logger.js";
+import { retryAppServer, retryError } from "../support/retry-app-server.js";
 import { withTempDir } from "../support/temp.js";
 import {
   completeRawResponseBatch,
@@ -4776,6 +4777,73 @@ async function newExecuteFixture(
     },
   };
 }
+
+test.each(["timeout", "disconnect", "process exit"] as const)(
+  "a retry followed by %s releases listeners, the thread lease, and tool ownership",
+  async (exit) => {
+    await withTempDir(async (directory) => {
+      const fake = retryAppServer(
+        (send, turnId) => send(retryError(true, turnId)),
+        false,
+      );
+      const controller = new AbortController();
+      const { request, fixture } = await newExecuteFixture(
+        directory,
+        controller.signal,
+        fake,
+      );
+      vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+      try {
+        if (exit === "timeout") setTimeout(() => controller.abort(), 100);
+        const execution = await execute(
+          request,
+          fixture.options,
+          "chatcmpl_retry_cleanup",
+        );
+        const events: unknown[] = [];
+        const collected = (async () => {
+          try {
+            for await (const event of execution.events) events.push(event);
+            return undefined;
+          } catch (error) {
+            return error;
+          }
+        })();
+        await vi.advanceTimersByTimeAsync(99);
+        // A fresh retry immediately before the deadline must not renew it.
+        fake.send(retryError(true));
+        await vi.advanceTimersByTimeAsync(0);
+        if (exit === "timeout") await vi.advanceTimersByTimeAsync(1);
+        else if (exit === "disconnect") controller.abort();
+        else fake.close(new Error("Synthetic app-server process exit."));
+        const error = await collected;
+        assert.ok(error instanceof Error);
+        if (exit !== "process exit") {
+          assert.ok(error instanceof HttpError);
+          assert.equal(error.code, "request_timeout");
+          assert.equal(fake.methods.includes("turn/interrupt"), true);
+        }
+        assert.deepEqual(events, []);
+        assert.equal(fake.rpc.listenerCount("notification"), 0);
+        assert.equal(
+          fixture.continuations.store.get("chatcmpl_retry_cleanup"),
+          undefined,
+        );
+        const lease = fixture.continuations.acquireThread(
+          "thr_retry",
+          () => {},
+        );
+        assert.ok(lease);
+        lease.release();
+        assert.equal(vi.getTimerCount(), 0);
+      } finally {
+        fixture.continuations.dispose();
+        fake.close();
+        vi.useRealTimers();
+      }
+    }, "codex-retry-cleanup-");
+  },
+);
 
 test.each(["completed", "interrupted"] as const)(
   "%s turns retain the production grace through late usage and repeated idle",

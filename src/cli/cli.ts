@@ -4,7 +4,8 @@ import {
   DEFAULT_STATE_DIR_DESCRIPTION,
   isInteractiveLogin,
   parseServeOptions,
-  resolveServeOptions,
+  prepareServeOptions,
+  type PreparedServeOptions,
   type ServeOptions,
 } from "../core/config.js";
 import { createLogger, type Logger } from "../core/logger.js";
@@ -69,7 +70,7 @@ export async function run(argv: readonly string[]): Promise<number> {
   const parsed = parseServeOptions(argv.slice(1));
   let log = createLogger(parsed.logLevel);
   try {
-    const options = await resolveServeOptions(parsed);
+    const options = await prepareServeOptions(parsed);
     log = createLogger(options.logLevel);
     return await runServer(options, log);
   } catch (error) {
@@ -335,10 +336,14 @@ class AppServerSupervisor {
   }
 }
 
-/** Runs the proxy lifecycle after configuration has been fully resolved. */
-async function runServer(options: ServeOptions, log: Logger): Promise<number> {
-  const proxy = createProxyServer(options, log);
+/** Binds the instance before any app-server or continuation state is touched. */
+async function runServer(
+  prepared: PreparedServeOptions,
+  log: Logger,
+): Promise<number> {
+  const proxy = createProxyServer(prepared, log);
   const address = await proxy.listen();
+  const options = address.options;
   log("info", "server_listening", {
     proxy_version: CLIENT_VERSION,
     codex_version: PINNED_CODEX_VERSION,
@@ -350,6 +355,16 @@ async function runServer(options: ServeOptions, log: Logger): Promise<number> {
     ready: false,
   });
   log("debug", "server_root", { root: options.root });
+  // Default directories are keyed by the bound port, so an ephemeral port
+  // starts a fresh instance that no later run reuses or removes.
+  if (
+    prepared.port === 0 &&
+    (prepared.stateDir === undefined || prepared.codexHome === undefined)
+  )
+    log("warn", "ephemeral_instance_directories", {
+      state_dir: options.stateDir,
+      codex_home: options.codexHome,
+    });
 
   const lifecycle = new AbortController();
   const supervisor = new AppServerSupervisor({

@@ -121,7 +121,7 @@ test("CLI recovery uses the documented bounded retry schedule", () => {
     APP_SERVER_RECOVERY_DELAYS_MS,
     [1_000, 3_000, 5_000, 10_000],
   );
-  assert.match(usage, /per-root under ~\/\.codex-openai-proxy/);
+  assert.match(usage, /<root-hash>\/<ipv4\|ipv6>-<bound-port>\/state/);
   assert.equal(usage.includes("<root>/.codex-openai-proxy"), false);
   // Every configurable limit must be discoverable from the help output.
   assert.match(usage, /--request-timeout <duration>/);
@@ -192,6 +192,8 @@ test("CLI reports a bind-time port conflict before starting app-server", async (
           String(reservation.port),
           "--state-dir",
           join(directory, "state"),
+          "--codex-home",
+          join(directory, "home"),
           "--codex-path",
           join(directory, "must-not-start"),
         ],
@@ -206,6 +208,8 @@ test("CLI reports a bind-time port conflict before starting app-server", async (
       assert.match(stderr, /startup_failed/);
       assert.match(stderr, /EADDRINUSE/);
       assert.equal(stderr.includes("must-not-start"), false);
+      assert.equal(existsSync(join(directory, "state")), false);
+      assert.equal(existsSync(join(directory, "home")), false);
     } finally {
       await reservation.close();
     }

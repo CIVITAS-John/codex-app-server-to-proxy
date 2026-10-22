@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { renameSync } from "node:fs";
 import {
   chmod,
   mkdir,
   readFile,
-  rm,
+  readdir,
   stat,
   symlink,
   writeFile,
@@ -19,6 +21,11 @@ import {
 import { bindingHash } from "../../src/core/canonical.js";
 import { HttpError } from "../../src/http/errors.js";
 import { withTempDir } from "../support/temp.js";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, renameSync: vi.fn(actual.renameSync) };
+});
 
 /** Common immutable binding used by persistence tests. */
 const binding = {
@@ -210,7 +217,10 @@ test("leftover atomic-write temporary files cannot replace valid records", async
       ...binding,
     });
     await writeFile(
-      join(directory, `continuations.json.${process.pid}.tmp`),
+      join(
+        directory,
+        `continuations.json.${process.pid}.00000000-0000-4000-8000-000000000000.tmp`,
+      ),
       "abruptly truncated",
     );
 
@@ -218,10 +228,42 @@ test("leftover atomic-write temporary files cannot replace valid records", async
       new ResponseStore(directory).get("response_1")?.state,
       "ready",
     );
+    assert.equal(
+      await readFile(
+        join(
+          directory,
+          `continuations.json.${process.pid}.00000000-0000-4000-8000-000000000000.tmp`,
+        ),
+        "utf8",
+      ),
+      "abruptly truncated",
+    );
   }, "codex-proxy-state-");
 });
 
-test("a temporary stranded by an interrupted write is overwritten, not trusted", async () => {
+test("loading removes only temporaries whose writer process has exited", async () => {
+  await withTempDir(async (directory) => {
+    const uuid = "00000000-0000-4000-8000-000000000000";
+    const exited = spawnSync(process.execPath, ["-e", ""]).pid;
+    const orphan = join(directory, `continuations.json.${exited}.${uuid}.tmp`);
+    const live = join(
+      directory,
+      `continuations.json.${process.pid}.${uuid}.tmp`,
+    );
+    const foreign = join(directory, "continuations.json.other-writer.tmp");
+    await Promise.all(
+      [orphan, live, foreign].map((path) => writeFile(path, "partial")),
+    );
+
+    assert.equal(new ResponseStore(directory).get("missing"), undefined);
+    assert.deepEqual((await readdir(directory)).sort(), [
+      `continuations.json.${process.pid}.${uuid}.tmp`,
+      "continuations.json.other-writer.tmp",
+    ]);
+  }, "codex-proxy-state-");
+});
+
+test("a stranded legacy temporary is ignored and left untouched", async () => {
   await withTempDir(async (directory) => {
     await writeFile(
       join(directory, "continuations.json.tmp"),
@@ -240,12 +282,16 @@ test("a temporary stranded by an interrupted write is overwritten, not trusted",
       new ResponseStore(directory).get("response_1")?.state,
       "ready",
     );
+    assert.equal(
+      await readFile(join(directory, "continuations.json.tmp"), "utf8"),
+      "abruptly truncated",
+    );
   }, "codex-proxy-state-");
 });
 
 test("a failed atomic write leaves the last durable state on disk", async () => {
   await withTempDir(async (directory) => {
-    const temporary = join(directory, "continuations.json.tmp");
+    const leftover = join(directory, "continuations.json.other-writer.tmp");
     const store = new ResponseStore(directory);
     store.put({
       responseId: "response_1",
@@ -253,8 +299,15 @@ test("a failed atomic write leaves the last durable state on disk", async () => 
       state: "ready",
       ...binding,
     });
-    // A directory at the temporary path makes the next atomic write fail.
-    await mkdir(temporary);
+    await writeFile(leftover, "another writer's partial data");
+    const durable = await readFile(
+      join(directory, "continuations.json"),
+      "utf8",
+    );
+    // Fail publication after the new private temporary file has been written.
+    vi.mocked(renameSync).mockImplementationOnce(() => {
+      throw Object.assign(new Error("publication failed"), { code: "EIO" });
+    });
 
     assert.throws(() =>
       store.put({
@@ -264,7 +317,18 @@ test("a failed atomic write leaves the last durable state on disk", async () => 
         ...binding,
       }),
     );
-    await rm(temporary, { recursive: true });
+    assert.equal(
+      await readFile(join(directory, "continuations.json"), "utf8"),
+      durable,
+    );
+    assert.equal(
+      await readFile(leftover, "utf8"),
+      "another writer's partial data",
+    );
+    assert.deepEqual((await readdir(directory)).sort(), [
+      "continuations.json",
+      "continuations.json.other-writer.tmp",
+    ]);
     // Memory may lead disk after a failed write; the durable record is what a
     // restart resumes from, and it never observed the failed mutation.
     const reloaded = new ResponseStore(directory);

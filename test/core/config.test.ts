@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { mkdir, realpath, symlink } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -11,7 +12,9 @@ import {
   isInteractiveLogin,
   normalizeLoopbackHost,
   parseServeOptions,
-  resolveServeOptions,
+  prepareServeOptions,
+  finalizeServeOptions,
+  type ParsedServeOptions,
 } from "../../src/core/config.js";
 import { withTempDir } from "../support/temp.js";
 
@@ -32,6 +35,11 @@ afterAll(() => {
   if (originalWindowsUserProfile === undefined) delete process.env.USERPROFILE;
   else process.env.USERPROFILE = originalWindowsUserProfile;
 });
+
+/** Resolves configuration with a synthetic bound port without creating state. */
+async function resolveServeOptions(parsed: ParsedServeOptions, port = 8787) {
+  return finalizeServeOptions(await prepareServeOptions(parsed), port);
+}
 
 test("loopback validation accepts only exact safe forms", () => {
   assert.equal(normalizeLoopbackHost("127.0.0.1"), "127.0.0.1");
@@ -188,11 +196,10 @@ test("serve options have safe documented defaults and reject ambiguity", async (
       finalized.stateDir.startsWith(`${canonicalProject}${sep}`),
       false,
     );
-    // The default Codex home is shared across roots so login persists, while
-    // staying isolated from any differently-versioned install using ~/.codex.
+    // Each bound instance keeps its app-server files beside its own state.
     assert.equal(
       finalized.codexHome,
-      join(canonicalHome, ".codex-openai-proxy", "codex-home"),
+      join(finalized.stateDir, "..", "codex-home"),
     );
 
     const explicit = parseServeOptions(
@@ -214,16 +221,29 @@ test("serve options have safe documented defaults and reject ambiguity", async (
       finalized.stateDir,
     );
 
+    // Preparation rejects these before any port is bound.
     await assert.rejects(
-      resolveServeOptions(parseServeOptions([], homedir())),
+      prepareServeOptions(parseServeOptions([], homedir())),
       /default --state-dir falls inside --root/,
     );
     await assert.rejects(
-      resolveServeOptions(
+      prepareServeOptions(
         parseServeOptions(["--state-dir", join(directory, "state")], homedir()),
       ),
       /default --codex-home falls inside --root/,
     );
+    const explicitInsideHome = await prepareServeOptions(
+      parseServeOptions(
+        [
+          "--state-dir",
+          join(directory, "state"),
+          "--codex-home",
+          join(directory, "home"),
+        ],
+        homedir(),
+      ),
+    );
+    assert.equal(explicitInsideHome.codexHome, join(directory, "home"));
     assert.throws(
       () => parseServeOptions(["--port", "80", "--port", "81"]),
       /Duplicate/,
@@ -239,4 +259,79 @@ test("serve options have safe documented defaults and reject ambiguity", async (
       /true or false/,
     );
   }, "codex-config-test-");
+});
+
+test("default directories identify the canonical root and normalized bound endpoint", async () => {
+  await withTempDir(async (directory) => {
+    const root = join(directory, "project");
+    const otherRoot = join(directory, "other");
+    await Promise.all([mkdir(root), mkdir(otherRoot)]);
+    const prepared = await prepareServeOptions(
+      parseServeOptions(["--root", root, "--port", "0"]),
+    );
+    assert.equal(prepared.stateDir, undefined);
+    assert.equal(prepared.codexHome, undefined);
+    assert.throws(() => finalizeServeOptions(prepared, 0), /bound port/);
+    const first = finalizeServeOptions(prepared, 40001);
+    const hash = createHash("sha256")
+      .update(prepared.root)
+      .digest("hex")
+      .slice(0, 16);
+    const instance = join(
+      realpathSync(homedir()),
+      ".codex-openai-proxy",
+      hash,
+      "ipv4-40001",
+    );
+    assert.equal(first.root, prepared.root);
+    assert.equal(first.port, 40001);
+    assert.equal(first.stateDir, join(instance, "state"));
+    assert.equal(first.codexHome, join(instance, "codex-home"));
+    assert.deepEqual(finalizeServeOptions(prepared, 40001), first);
+    const localhost = await prepareServeOptions(
+      parseServeOptions(["--root", root, "--host", "localhost"]),
+    );
+    assert.equal(
+      finalizeServeOptions(localhost, 40001).stateDir,
+      first.stateDir,
+    );
+    for (const candidate of [
+      finalizeServeOptions(prepared, 40002),
+      finalizeServeOptions({ ...prepared, host: "::1" }, 40001),
+      finalizeServeOptions(
+        await prepareServeOptions(parseServeOptions(["--root", otherRoot])),
+        40001,
+      ),
+    ]) {
+      assert.notEqual(candidate.stateDir, first.stateDir);
+      assert.notEqual(candidate.codexHome, first.codexHome);
+    }
+    const explicit = await prepareServeOptions(
+      parseServeOptions([
+        "--root",
+        root,
+        "--state-dir",
+        "chosen-state",
+        "--codex-home",
+        "chosen-home",
+      ]),
+    );
+    for (const port of [40001, 40002]) {
+      const selected = finalizeServeOptions(explicit, port);
+      assert.equal(selected.stateDir, join(prepared.root, "chosen-state"));
+      assert.equal(selected.codexHome, join(prepared.root, "chosen-home"));
+    }
+    assert.equal(
+      finalizeServeOptions({ ...prepared, stateDir: explicit.stateDir }, 40001)
+        .codexHome,
+      first.codexHome,
+    );
+    assert.equal(
+      finalizeServeOptions(
+        { ...prepared, codexHome: explicit.codexHome },
+        40001,
+      ).stateDir,
+      first.stateDir,
+    );
+  });
 });

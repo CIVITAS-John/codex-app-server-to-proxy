@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { canonicalizeRoot, isPathWithinRoot } from "./policy.js";
 
 /** Default maximum accepted HTTP request-body size. */
@@ -15,13 +15,13 @@ export const DEFAULT_BODY_LIMIT = 1024 * 1024;
  */
 export const DEFAULT_STARTUP_TIMEOUT_MS = 5 * 60_000;
 
-/** User-facing description of the root-namespaced state default. */
+/** User-facing description of the instance state default. */
 export const DEFAULT_STATE_DIR_DESCRIPTION =
-  "per-root under ~/.codex-openai-proxy";
+  "~/.codex-openai-proxy/<root-hash>/<ipv4|ipv6>-<bound-port>/state";
 
 /** User-facing description of the isolated Codex home default. */
 export const DEFAULT_CODEX_HOME_DESCRIPTION =
-  "~/.codex-openai-proxy/codex-home";
+  "~/.codex-openai-proxy/<root-hash>/<ipv4|ipv6>-<bound-port>/codex-home";
 
 /** Fully validated configuration for the proxy server. */
 export interface ServeOptions {
@@ -42,7 +42,7 @@ export interface ServeOptions {
   codexHome: string;
 }
 
-/** Syntactically valid CLI options awaiting canonical root finalization. */
+/** Validated CLI options whose directories are finalized after binding. */
 export interface ParsedServeOptions extends Omit<
   ServeOptions,
   "stateDir" | "codexHome"
@@ -50,6 +50,18 @@ export interface ParsedServeOptions extends Omit<
   stateDir?: string | undefined;
   codexHome?: string | undefined;
 }
+
+/** Brand reserved for options produced by `prepareServeOptions`. */
+declare const prepared: unique symbol;
+
+/**
+ * Parsed options with a canonical root and absolute explicit directories. Only
+ * `prepareServeOptions` mints this type, so binding code cannot derive a
+ * default instance directory from an unresolved root.
+ */
+export type PreparedServeOptions = ParsedServeOptions & {
+  readonly [prepared]: true;
+};
 
 /** Supported structured-log severity levels. */
 export const LOG_LEVELS = ["debug", "info", "warn", "error"] as const;
@@ -160,8 +172,8 @@ function oneOf<T extends string>(
   return selected;
 }
 
-/** Builds the default per-root state directory from a canonical root. */
-function defaultStateDir(root: string): string {
+/** Builds the per-root namespace that holds every bound instance directory. */
+function defaultNamespaceDir(root: string): string {
   const namespace = createHash("sha256")
     .update(root)
     .digest("hex")
@@ -169,42 +181,56 @@ function defaultStateDir(root: string): string {
   return join(realpathSync(homedir()), ".codex-openai-proxy", namespace);
 }
 
-/** Builds the default proxy-owned Codex home shared across roots. */
-// Isolating CODEX_HOME keeps the pinned app-server's on-disk caches (for
-// example models_cache.json) from clashing with differently-versioned Codex
-// installs that share ~/.codex, at the cost of a proxy-scoped ChatGPT login.
-function defaultCodexHome(): string {
-  return join(realpathSync(homedir()), ".codex-openai-proxy", "codex-home");
-}
-
-/** Canonicalizes the root and derives every root-dependent serve option. */
-export async function resolveServeOptions(
+/**
+ * Canonicalizes the root and resolves explicit paths without touching state.
+ * Default directories differ only by their port-specific leaf, so a default
+ * that would fall inside the root is rejected here, before the port is bound.
+ */
+export async function prepareServeOptions(
   parsed: ParsedServeOptions,
-): Promise<ServeOptions> {
+): Promise<PreparedServeOptions> {
   const canonicalRoot = await canonicalizeRoot(parsed.root);
-  const usesDefaultStateDir = parsed.stateDir === undefined;
-  const stateDir =
-    parsed.stateDir === undefined
-      ? defaultStateDir(canonicalRoot)
-      : isAbsolute(parsed.stateDir)
-        ? parsed.stateDir
-        : resolve(canonicalRoot, parsed.stateDir);
-  if (usesDefaultStateDir && isPathWithinRoot(canonicalRoot, stateDir))
+  const namespaceInsideRoot =
+    (parsed.stateDir === undefined || parsed.codexHome === undefined) &&
+    isPathWithinRoot(canonicalRoot, defaultNamespaceDir(canonicalRoot));
+  if (namespaceInsideRoot && parsed.stateDir === undefined)
     throw new Error(
       "The default --state-dir falls inside --root; set --state-dir to a directory outside the root.",
     );
-  const usesDefaultCodexHome = parsed.codexHome === undefined;
-  const codexHome =
-    parsed.codexHome === undefined
-      ? defaultCodexHome()
-      : isAbsolute(parsed.codexHome)
-        ? parsed.codexHome
-        : resolve(canonicalRoot, parsed.codexHome);
-  if (usesDefaultCodexHome && isPathWithinRoot(canonicalRoot, codexHome))
+  if (namespaceInsideRoot && parsed.codexHome === undefined)
     throw new Error(
       "The default --codex-home falls inside --root; set --codex-home to a directory outside the root.",
     );
-  return { ...parsed, root: canonicalRoot, stateDir, codexHome };
+  return {
+    ...parsed,
+    root: canonicalRoot,
+    ...(parsed.stateDir === undefined
+      ? {}
+      : { stateDir: resolve(canonicalRoot, parsed.stateDir) }),
+    ...(parsed.codexHome === undefined
+      ? {}
+      : { codexHome: resolve(canonicalRoot, parsed.codexHome) }),
+  } as PreparedServeOptions;
+}
+
+/** Derives default directories only after the listener owns its actual port. */
+export function finalizeServeOptions(
+  options: PreparedServeOptions,
+  port: number,
+): ServeOptions {
+  if (!Number.isInteger(port) || port < 1 || port > 65_535)
+    throw new Error("The bound port must be between 1 and 65535.");
+  const instanceDir = (): string =>
+    join(
+      defaultNamespaceDir(options.root),
+      `${options.host === "::1" ? "ipv6" : "ipv4"}-${port}`,
+    );
+  return {
+    ...options,
+    port,
+    stateDir: options.stateDir ?? join(instanceDir(), "state"),
+    codexHome: options.codexHome ?? join(instanceDir(), "codex-home"),
+  };
 }
 
 /** Parses and validates CLI syntax without accessing the filesystem. */
