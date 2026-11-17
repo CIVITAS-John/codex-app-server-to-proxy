@@ -295,6 +295,7 @@ App-server `codexErrorInfo: "serverOverloaded"` — the failure behind Codex's "
 - The listener accepts loopback only (`127.0.0.1`, `::1`, `localhost`); non-loopback `Host` authorities and any request with an `Origin` header are rejected.
 - There is no local bearer-token check, so any process running as your user can call the proxy. See the [security model](https://github.com/CIVITAS-John/codex-app-server-to-proxy/blob/main/docs/security.md).
 - Structured JSON logs go to stderr in plaintext and are not redacted. Any level may contain filesystem paths, login URLs, tokens, prompts, child stderr, or tool details; treat every log capture as sensitive.
+- In plain-text child logs, the exact router diagnostic `ERROR codex_core::tools::router: error=tool call cancelled` is logged at debug because normal client-tool handoffs interrupt the turn. The older dynamic-tool cancellation diagnostic stays suppressed. Unrecognized records, including JSON-formatted child logs, remain warnings; see [diagnostic handling](docs/architecture.md#http-translation).
 - Successful `/health` and `/ready` probes — including the 503 returned before startup finishes — are logged at debug so a polling health checker stays out of default-level output. Rejected or failed requests to those paths are still logged at info.
 
 Default limits (all configurable via CLI flags):

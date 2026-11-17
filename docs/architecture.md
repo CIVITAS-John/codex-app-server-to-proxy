@@ -43,6 +43,8 @@ The public routes are `/health`, `/ready`, `GET /v1/models`, and `POST /v1/chat/
 
 For streaming, setup and the first event are processed before SSE headers are committed so early failures retain their HTTP error status. After headers are sent, failures are emitted inside the stream. Output writes honor backpressure; request cancellation and deadlines release the active turn and its transport work. [Continuation](continuation.md) describes how client-defined tool batches end a turn and resume through later HTTP requests.
 
+Client-tool handoffs capture the calls before interrupting the Codex turn. The older diagnostic `dynamic tool call was cancelled before receiving a response` is suppressed. In plain-text child logs, the newer exact `ERROR codex_core::tools::router: error=tool call cancelled` record, optionally prefixed by a timestamp, is retained at debug: it is expected during handoff, but carries no identifiers to distinguish an unrelated cancellation. Different modules, additional error context, and unrecognized records, including JSON-formatted child logs, remain warnings. This changes logging only; tool delivery and usage collection timing are unchanged.
+
 An app-server error with literal `willRetry: true` is internal progress rather than a terminal failure; see [capacity errors](../README.md#capacity-errors).
 
 Child-agent lifecycle events are observational `x_codex` tool activity. The pinned app-server may report a start as `subAgentActivity` rather than `spawnAgent`; the normalizer preserves the recognized activity kind and child thread ID in arguments and result content, while omitting agent paths. This preserves correlation without making child activity a client-executable function call.

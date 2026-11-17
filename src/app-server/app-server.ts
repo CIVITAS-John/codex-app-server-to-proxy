@@ -56,6 +56,10 @@ export const CLIENT_VERSION = (
 const CANCELLED_DYNAMIC_TOOL_DIAGNOSTIC =
   "dynamic tool call was cancelled before receiving a response";
 
+/** Router cancellation emitted during tool handoff, retained for debug diagnosis. */
+const ROUTER_TOOL_CANCELLATION =
+  /^(?:\d{4}-\d{2}-\d{2}T\S+\s+)?ERROR codex_core::tools::router: error=tool call cancelled\s*$/;
+
 /** Package metadata that owns the runtime and generated protocol version. */
 interface CodexPackageMetadata {
   version: string;
@@ -265,7 +269,10 @@ export function attachAppServerStderrLogging(
 ): void {
   createInterface(stderr).on("line", (line) => {
     if (line.includes(CANCELLED_DYNAMIC_TOOL_DIAGNOSTIC)) return;
-    options.log("warn", "app_server_stderr", { message: line });
+    // The newer router message has no tool or turn identity. Keep it available
+    // at debug rather than dropping a cancellation we cannot correlate.
+    const level = ROUTER_TOOL_CANCELLATION.test(line) ? "debug" : "warn";
+    options.log(level, "app_server_stderr", { message: line });
   });
 }
 

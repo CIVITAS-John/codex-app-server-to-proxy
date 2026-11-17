@@ -88,6 +88,64 @@ test("stderr logging suppresses every decoration of the expected record", () => 
   );
 });
 
+test("stderr logging retains fragmented router cancellation at debug", async () => {
+  const stderr = new PassThrough();
+  const entries: Array<Record<string, unknown>> = [];
+  attachAppServerStderrLogging(stderr, {
+    log: createLogger("debug", (entry) => entries.push(entry)),
+  });
+
+  stderr.write(
+    "2030-01-01T00:00:00Z ERROR codex_core::tools::router: error=tool call can",
+  );
+  // An unterminated final line must follow the same classification.
+  stderr.end("celled");
+  await once(stderr, "end");
+
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0]?.event, "app_server_stderr");
+  assert.equal(entries[0]?.level, "debug");
+  assert.equal(
+    entries[0]?.message,
+    "2030-01-01T00:00:00Z ERROR codex_core::tools::router: error=tool call cancelled",
+  );
+});
+
+test("stderr logging keeps other cancellation diagnostics visible at info", () => {
+  const stderr = new PassThrough();
+  const entries: Array<Record<string, unknown>> = [];
+  attachAppServerStderrLogging(stderr, {
+    log: createLogger("info", (entry) => entries.push(entry)),
+  });
+  const unexpected = [
+    "ERROR codex_core::tools::router: error=tool call cancelled unexpectedly",
+    "ERROR codex_core::tools::router: error=tool call cancelled: transport closed",
+    "ERROR other_module: error=tool call cancelled",
+    "ERROR other_module: shutdown failed: ERROR codex_core::tools::router: error=tool call cancelled",
+    JSON.stringify({
+      level: "ERROR",
+      target: "codex_core::tools::router",
+      fields: { error: "tool call cancelled" },
+    }),
+    "ERROR codex_core::tools::router: error=tool execution failed",
+  ];
+
+  stderr.end(
+    [
+      "ERROR codex_core::tools::router: error=tool call cancelled",
+      ...unexpected,
+      "",
+    ].join("\n"),
+  );
+
+  assert.deepEqual(
+    entries.map((entry) => entry.message),
+    unexpected,
+  );
+  assert.ok(entries.every((entry) => entry.level === "warn"));
+  assert.ok(entries.every((entry) => entry.event === "app_server_stderr"));
+});
+
 test("stderr logging emits a final line that never received a newline", async () => {
   const stderr = new PassThrough();
   const entries: Array<Record<string, unknown>> = [];
