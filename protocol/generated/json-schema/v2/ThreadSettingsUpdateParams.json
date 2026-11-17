@@ -79,6 +79,9 @@
       ],
       "type": "object"
     },
+    "LegacyAppPathString": {
+      "type": "string"
+    },
     "ModeKind": {
       "description": "Initial collaboration mode to use when the TUI starts.",
       "enum": [
@@ -279,6 +282,31 @@
         "model"
       ],
       "type": "object"
+    },
+    "TurnEnvironmentParams": {
+      "properties": {
+        "cwd": {
+          "$ref": "#/definitions/LegacyAppPathString"
+        },
+        "environmentId": {
+          "type": "string"
+        },
+        "runtimeWorkspaceRoots": {
+          "description": "Environment-native runtime workspace roots. Omitted defaults to `cwd`.",
+          "items": {
+            "$ref": "#/definitions/LegacyAppPathString"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "cwd",
+        "environmentId"
+      ],
+      "type": "object"
     }
   },
   "properties": {
@@ -342,6 +370,16 @@
         }
       ],
       "description": "Override the reasoning effort for subsequent turns."
+    },
+    "environments": {
+      "description": "Replace the environments for future turns without changing the running turn. Omitted/null preserves the selection unless `cwd` is also provided, which selects the default environments for that directory. [] clears the selection.",
+      "items": {
+        "$ref": "#/definitions/TurnEnvironmentParams"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
     },
     "model": {
       "description": "Override the model for subsequent turns.",

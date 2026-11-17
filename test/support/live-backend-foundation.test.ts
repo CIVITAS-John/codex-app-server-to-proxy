@@ -90,6 +90,14 @@ test("the final permitted answer reaches stop before another turn is rejected", 
         params: {
           threadId: "root",
           turnId,
+          item: { type: "configuration_update", reasoning: { effort: "high" } },
+        },
+      });
+      observe({
+        method: "rawResponseItem/completed",
+        params: {
+          threadId: "root",
+          turnId,
           item: {
             type: "message",
             role: "assistant",

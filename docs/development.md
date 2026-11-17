@@ -109,6 +109,8 @@ The live suite runs serially with only `gpt-6-luna`, caps captured diagnostics, 
 
 The core contract's hard cost guard is 32 distinct upstream model responses, deduplicated by `(threadId, responseId)` from `rawResponse/completed` across parent and child threads and retained across app-server restarts and both live backends. Here, the provider is the upstream model service used by app-server; one proxy-issued `turn/start` can produce several of these responses around tool calls, and child threads produce their own. The guard interrupts further work at the limit. A spawn run fails rather than undercounting if the app-server does not expose the child thread's raw completion. No expected normal count is stated until an authorized live calibration records one.
 
+At the response limit, the guard lets a root turn with a final answer and no outstanding tool work finish normally. Codex's `configuration_update` item records the selected reasoning effort and does not count as tool work. Tool calls, unknown raw item kinds, and child work still trigger the interrupt at the limit.
+
 ```sh
 npm run test:live
 ```

@@ -50,7 +50,23 @@ export function protocolInitializeResponse(): InitializeResponse {
 /** Builds a complete authenticated account response for fake app-servers. */
 export function protocolAuthenticatedAccountResponse(): GetAccountResponse {
   return {
-    account: { type: "chatgpt", email: null, planType: "unknown" },
+    account: {
+      type: "chatgpt",
+      email: null,
+      planType: "unknown",
+      workspaceName: null,
+    },
+    userId: null,
+    requiresOpenaiAuth: true,
+    workspaceRouting: null,
+  };
+}
+
+/** Builds a complete account response for a fake app-server awaiting login. */
+export function protocolUnauthenticatedAccountResponse(): GetAccountResponse {
+  return {
+    account: null,
+    userId: null,
     requiresOpenaiAuth: true,
     workspaceRouting: null,
   };
@@ -189,6 +205,7 @@ export function protocolThread(
     daybreakEnabled: null,
     sessionId: `session_${id}`,
     forkedFromId: null,
+    attachedToThreadId: null,
     parentThreadId: null,
     preview: "",
     ephemeral: false,

@@ -27,6 +27,7 @@ import {
   protocolThread,
   protocolThreadStartResponse,
   protocolTurn,
+  protocolUnauthenticatedAccountResponse,
 } from "../support/protocol-fixtures.js";
 import { withTempDir } from "../support/temp.js";
 
@@ -36,11 +37,9 @@ const testWithPosixExecutable = test.skipIf(process.platform === "win32");
 /** Generated results embedded in maintained fake child-process scripts. */
 const embeddedProtocolResults = {
   authenticatedAccount: JSON.stringify(protocolAuthenticatedAccountResponse()),
-  unauthenticatedAccount: JSON.stringify({
-    account: null,
-    requiresOpenaiAuth: true,
-    workspaceRouting: null,
-  } satisfies ReturnType<typeof protocolAuthenticatedAccountResponse>),
+  unauthenticatedAccount: JSON.stringify(
+    protocolUnauthenticatedAccountResponse(),
+  ),
   login: JSON.stringify(
     protocolResponse("account/login/start", 0, {
       type: "chatgptDeviceCode",

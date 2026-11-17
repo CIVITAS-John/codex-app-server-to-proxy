@@ -9,6 +9,7 @@ import {
   protocolAuthenticatedAccountResponse,
   protocolNotification,
   protocolResponse,
+  protocolUnauthenticatedAccountResponse,
 } from "../support/protocol-fixtures.js";
 
 /** Authentication scenario simulated by fakeRpc. */
@@ -66,7 +67,7 @@ function fakeRpc(
           );
         } else if (kind === "refresh-error-still-unauthenticated") {
           input.write(
-            `${JSON.stringify(protocolResponse("account/read", message.id, { account: null, requiresOpenaiAuth: true, workspaceRouting: null }))}\n`,
+            `${JSON.stringify(protocolResponse("account/read", message.id, protocolUnauthenticatedAccountResponse()))}\n`,
           );
         } else if (
           kind === "refresh-error" ||
@@ -93,11 +94,7 @@ function fakeRpc(
                 message.id,
                 kind === "logged-in"
                   ? protocolAuthenticatedAccountResponse()
-                  : {
-                      account: null,
-                      requiresOpenaiAuth: true,
-                      workspaceRouting: null,
-                    },
+                  : protocolUnauthenticatedAccountResponse(),
               ),
             )}\n`,
           );

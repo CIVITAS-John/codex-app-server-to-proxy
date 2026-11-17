@@ -376,6 +376,20 @@ const embeddedDeclinedRequests = JSON.stringify([
     },
   }),
   protocolServerRequest({
+    id: "human-command",
+    method: "item/commandExecution/requestApproval",
+    params: {
+      threadId: "thread_decline",
+      turnId: "turn_decline",
+      itemId: "item_human_command",
+      startedAtMs: 0,
+      kind: "humanCommand",
+      approvalId: "approval_fixture",
+      environmentId: null,
+      availableDecisions: ["accept", "decline", "cancel"],
+    },
+  }),
+  protocolServerRequest({
     id: "file",
     method: "item/fileChange/requestApproval",
     params: {
@@ -471,7 +485,7 @@ test("app-server arguments disable subagents by default and support opt-in", () 
 });
 
 testWithPosixExecutable(
-  "app-server initializes in order and declines elicitation without advertising it",
+  "app-server initializes in order and declines unsupported prompts without advertising them",
   async () => {
     await withTempDir(async (directory) => {
       const executable = join(directory, "codex");
@@ -544,7 +558,7 @@ let initialized = false;`,
           id: "verification",
           result: { action: "decline", content: null },
         });
-        for (const id of ["command", "file"])
+        for (const id of ["command", "human-command", "file"])
           assert.deepEqual(response(id), {
             id,
             result: { decision: "decline" },
@@ -1112,6 +1126,7 @@ testWithPosixExecutable(
             checkForUpdateOnStartup: null,
             allowLoginShell: null,
             feedback: null,
+            otel: null,
           },
         },
       ).result;

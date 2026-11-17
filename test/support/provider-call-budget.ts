@@ -85,6 +85,8 @@ export class ProviderCallBudget {
         mayContinue: false,
       };
       const item = objectRecord(value?.item);
+      // Codex records the selected reasoning effort as a configuration update
+      // alongside raw output. That metadata cannot cause another model request.
       if (item?.type === "message") {
         if (
           item.role === "assistant" &&
@@ -100,7 +102,10 @@ export class ProviderCallBudget {
           })
         )
           output.finalAnswer = true;
-      } else if (item?.type !== "reasoning") {
+      } else if (
+        item?.type !== "reasoning" &&
+        item?.type !== "configuration_update"
+      ) {
         // Tool calls (including unknown future kinds) can trigger another
         // provider request even if the response also contains final prose.
         output.mayContinue = true;

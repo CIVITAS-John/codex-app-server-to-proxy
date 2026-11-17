@@ -308,6 +308,13 @@
           "type": "null"
         }
       ]
+    },
+    "voiceSessionId": {
+      "description": "Client-generated identifier for the product voice session. This is distinct from `realtimeSessionId`.",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [

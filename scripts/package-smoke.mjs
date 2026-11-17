@@ -232,7 +232,7 @@ const cwd = process.cwd();
 const thread = {
   id: "thr_package_smoke", extra: null, sessionId: "session_package_smoke",
   environments: null, originator: null, daybreakEnabled: null,
-  forkedFromId: null, parentThreadId: null, preview: "", ephemeral: false,
+  forkedFromId: null, attachedToThreadId: null, parentThreadId: null, preview: "", ephemeral: false,
   section: null, sectionEnteredAt: null, projectId: null,
   historyMode: "paginated", modelProvider: "openai", model: null, reasoningEffort: null,
   createdAt: 0, updatedAt: 0,
@@ -267,8 +267,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   else if (message.method === "config/read")
     send({ id: message.id, result: { config: { windows: null }, origins: {}, layers: null }});
   else if (message.method === "account/read") send({ id: message.id, result: {
-    account: { type: "chatgpt", email: null, planType: "unknown" },
-    requiresOpenaiAuth: true, workspaceRouting: null
+    account: { type: "chatgpt", email: null, planType: "unknown", workspaceName: null },
+    userId: null, requiresOpenaiAuth: true, workspaceRouting: null
   }});
   else if (message.method === "model/list") {
     writeFileSync(join(process.env.CODEX_HOME, "models_cache.json"), JSON.stringify({
@@ -479,6 +479,8 @@ async function main() {
         stateDirectory,
         "--codex-home",
         codexHome,
+        "--sync-auth",
+        "never",
         "--shutdown-timeout",
         "2s",
       ],

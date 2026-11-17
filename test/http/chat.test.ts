@@ -1229,10 +1229,13 @@ test("an interrupted turn with a Guardian error fails without a separate error n
 });
 
 test.each([
+  "modelNotFound",
+  "policyCapacityUnavailable",
+  "inferenceHookDenied",
   "futurePolicyFailure",
   { futurePolicyFailure: { privateDetail: "synthetic" } },
 ])(
-  "unknown app-server error classifications remain terminal: %j",
+  "unmapped app-server error classifications remain terminal: %j",
   (codexErrorInfo) => {
     const notification = protocolNotification({
       method: "turn/completed",
@@ -1241,7 +1244,7 @@ test.each([
         turn: {
           ...protocolTurn("turn", "failed"),
           error: {
-            message: "Synthetic future failure.",
+            message: "Synthetic upstream failure.",
             codexErrorInfo,
             additionalDetails: null,
             misalignment: null,
@@ -1259,12 +1262,12 @@ test.each([
     assert.equal(events[0]?.terminalError?.code, "app_server_error");
     assert.equal(
       events[0]?.terminalError?.message,
-      "Synthetic future failure.",
+      "Synthetic upstream failure.",
     );
   },
 );
 
-test("upstream read receipts and prompt-only tool schemas remain private", () => {
+test("upstream history, item metadata, and prompt-only tool schemas remain private", () => {
   const normalizer = new EventNormalizer();
   const notifications = [
     protocolNotification({
@@ -1272,6 +1275,31 @@ test("upstream read receipts and prompt-only tool schemas remain private", () =>
       params: {
         threadId: "thread",
         readState: { firstUnread: null, revision: "synthetic-revision" },
+      },
+    }),
+    protocolNotification({
+      method: "thread/section/changed",
+      params: { threadId: "thread", sectionId: "synthetic-section" },
+    }),
+    protocolNotification({
+      method: "item/completed",
+      params: {
+        threadId: "thread",
+        turnId: "turn",
+        completedAtMs: 2,
+        contentTokenCount: 42,
+        item: {
+          type: "agentMessage",
+          id: "item_message",
+          startedAtMs: 1,
+          completedAtMs: 2,
+          phase: "final_answer",
+          text: "Synthetic completed message.",
+          moderation: { moderated: false, display: null },
+          memoryCitation: null,
+          delivery: null,
+          questions: null,
+        },
       },
     }),
     protocolNotification({

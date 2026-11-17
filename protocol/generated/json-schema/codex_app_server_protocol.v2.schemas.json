@@ -642,10 +642,34 @@
           "type": "object"
         },
         {
-          "properties": {
-            "audio_url": {
-              "type": "string"
+          "anyOf": [
+            {
+              "properties": {
+                "audio_url": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "audio_url"
+              ],
+              "title": "AudioUrlContentItem",
+              "type": "object"
             },
+            {
+              "properties": {
+                "file_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file_id"
+              ],
+              "title": "FileIdContentItem",
+              "type": "object"
+            }
+          ],
+          "description": "Inline audio data or an uploaded file loaded by the Responses API.",
+          "properties": {
             "type": {
               "enum": [
                 "input_audio"
@@ -655,7 +679,6 @@
             }
           },
           "required": [
-            "audio_url",
             "type"
           ],
           "title": "InputAudioContentItem",
@@ -786,10 +809,34 @@
           "type": "object"
         },
         {
-          "properties": {
-            "audio_url": {
-              "type": "string"
+          "anyOf": [
+            {
+              "properties": {
+                "audio_url": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "audio_url"
+              ],
+              "title": "AudioUrlFunctionCallOutputContentItem",
+              "type": "object"
             },
+            {
+              "properties": {
+                "file_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file_id"
+              ],
+              "title": "FileIdFunctionCallOutputContentItem",
+              "type": "object"
+            }
+          ],
+          "description": "Inline audio data or an uploaded file loaded by the Responses API.",
+          "properties": {
             "type": {
               "enum": [
                 "input_audio"
@@ -799,7 +846,6 @@
             }
           },
           "required": [
-            "audio_url",
             "type"
           ],
           "title": "InputAudioFunctionCallOutputContentItem",
@@ -2179,6 +2225,10 @@
           ],
           "description": "Override where approval requests are routed for review on this thread and subsequent turns."
         },
+        "attachToSource": {
+          "description": "Persist the fork as an attached thread of its resolved source, hidden from ordinary lists. The source cannot be deleted while attached threads exist. Requires a paginated source and local storage; incompatible with ephemeral and deferGoalContinuation. Omitted or false creates an ordinary fork.",
+          "type": "boolean"
+        },
         "baseInstructions": {
           "type": [
             "string",
@@ -2222,8 +2272,12 @@
           "description": "When true, return only thread metadata and live fork state without populating `thread.turns`. This is useful when the client plans to call `thread/turns/list` immediately after forking. Full-history hydration is deprecated for paginated threads; use this with `thread/turns/list` and `thread/items/list` instead.",
           "type": "boolean"
         },
+        "experimentalDisablePredictionMcp": {
+          "description": "Disable MCP servers in prediction mode when the inherited window uses incremental tools on Responses Lite. Requires `experimentalPredictionMode: true`.",
+          "type": "boolean"
+        },
         "experimentalPredictionMode": {
-          "description": "Start from the loaded parent's effective config, tools, environments, and persisted history to maximize prompt-cache reuse. Requires a loaded, persisted parent and `ephemeral: true`. Enables `features.reasoning_effort_override` on the fork. Cannot be combined with configuration overrides, `path`, `lastTurnId`, or `beforeTurnId`.",
+          "description": "Start from the loaded parent's effective config, tools, environments, and persisted history to maximize prompt-cache reuse. Requires a loaded, persisted parent and `ephemeral: true`. Enables `features.reasoning_effort_override` on the fork. Only `config.thread_unload_delay_secs` may override the inherited config. Cannot be combined with `path`, `lastTurnId`, or `beforeTurnId`.",
           "type": "boolean"
         },
         "lastTurnId": {
@@ -2800,6 +2854,16 @@
           ],
           "description": "Override the reasoning effort for subsequent turns."
         },
+        "environments": {
+          "description": "Replace the environments for future turns without changing the running turn. Omitted/null preserves the selection unless `cwd` is also provided, which selects the default environments for that directory. [] clears the selection.",
+          "items": {
+            "$ref": "#/definitions/TurnEnvironmentParams"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "model": {
           "description": "Override the model for subsequent turns.",
           "type": [
@@ -3081,6 +3145,17 @@
             "null"
           ]
         },
+        "attachedToThreadId": {
+          "description": "Return only persistent threads attached to this thread, including empty threads. Mutually exclusive with parentThreadId and ancestorThreadId. Omitting this filter keeps attached threads hidden from ordinary listings.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "currentAccountOnly": {
+          "description": "Show local history visible to the current ChatGPT account. Defaults to false.",
+          "type": "boolean"
+        },
         "cursor": {
           "description": "Opaque pagination cursor returned by a previous call.",
           "type": [
@@ -3108,6 +3183,10 @@
             "array",
             "null"
           ]
+        },
+        "includeAttachedThreads": {
+          "description": "Include persistent threads attached to a parent when searching by title.",
+          "type": "boolean"
         },
         "limit": {
           "description": "Optional page size; defaults to a reasonable server-side value.",
@@ -3216,12 +3295,20 @@
             "null"
           ]
         },
+        "currentAccountOnly": {
+          "description": "Show local history visible to the current ChatGPT account. Defaults to false.",
+          "type": "boolean"
+        },
         "cursor": {
           "description": "Opaque pagination cursor returned by a previous call.",
           "type": [
             "string",
             "null"
           ]
+        },
+        "includeAttachedThreads": {
+          "description": "Include persistent threads attached to a parent in search results.",
+          "type": "boolean"
         },
         "limit": {
           "description": "Optional page size; defaults to a reasonable server-side value.",
@@ -3380,6 +3467,17 @@
           ],
           "description": "Opaque continuation cursor or an exclusive item anchor in the requested visible turn. An item anchor requires a non-empty `turnId`; ascending (the default) returns items after it, and descending returns items before it. Continue with the returned string cursor."
         },
+        "deferOutput": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadItemOutputDeferral"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "For a single turn, choose which saved outputs to fetch separately by item ID."
+        },
         "limit": {
           "description": "Optional item page size.",
           "format": "uint32",
@@ -3474,11 +3572,18 @@
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
         "cwds": {
-          "description": "When empty, defaults to the current session working directory.",
+          "description": "Working directories to inspect when no thread is specified. An empty list uses the session cwd.",
           "items": {
             "type": "string"
           },
           "type": "array"
+        },
+        "threadId": {
+          "description": "List a loaded thread's hooks, including its selected environments. Omit `cwds` in this mode.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "title": "HooksListParams",
@@ -4130,6 +4235,13 @@
         "kind": {
           "$ref": "#/definitions/AdditionalContextKind"
         },
+        "name": {
+          "description": "Optional name for untrusted context, used to label its tool output.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "value": {
           "type": "string"
         }
@@ -4304,6 +4416,32 @@
           "type": "object"
         },
         {
+          "anyOf": [
+            {
+              "properties": {
+                "url": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "url"
+              ],
+              "title": "UrlUserInput",
+              "type": "object"
+            },
+            {
+              "properties": {
+                "fileId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "fileId"
+              ],
+              "title": "FileIdUserInput",
+              "type": "object"
+            }
+          ],
           "properties": {
             "type": {
               "enum": [
@@ -4311,14 +4449,10 @@
               ],
               "title": "AudioUserInputType",
               "type": "string"
-            },
-            "url": {
-              "type": "string"
             }
           },
           "required": [
-            "type",
-            "url"
+            "type"
           ],
           "title": "AudioUserInput",
           "type": "object"
@@ -4550,7 +4684,17 @@
           "additionalProperties": {
             "type": "string"
           },
-          "description": "Optional metadata to enrich Codex's ResponsesAPI turn metadata.\n\nEntries are flattened into the JSON string sent as `client_metadata[\"x-codex-turn-metadata\"]` on ResponsesAPI HTTP and websocket requests.\n\nThey are not sent as top-level ResponsesAPI `client_metadata` keys, and reserved keys such as `session_id`, `thread_id`, `turn_id`, and `window_id` cannot be overridden.",
+          "description": "Optional metadata to enrich Codex's ResponsesAPI turn metadata. Replaces unprotected client-provided entries when supplied; an empty map clears them.\n\nEntries are flattened into the JSON string sent as `client_metadata[\"x-codex-turn-metadata\"]` on ResponsesAPI HTTP and websocket requests.\n\nThey are not sent as top-level ResponsesAPI `client_metadata` keys, and reserved keys such as `session_id`, `thread_id`, `turn_id`, and `window_id` cannot be overridden.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "responsesapiClientMetadataPatch": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Merge entries into the ResponsesAPI turn metadata without removing existing entries. Applied after `responsesapiClientMetadata` if both are provided; reserved keys remain protected.",
           "type": [
             "object",
             "null"
@@ -4670,7 +4814,17 @@
           "additionalProperties": {
             "type": "string"
           },
-          "description": "Optional metadata to enrich Codex's ResponsesAPI turn metadata.\n\nEntries are flattened into the JSON string sent as `client_metadata[\"x-codex-turn-metadata\"]` on ResponsesAPI HTTP and websocket requests.\n\nThey are not sent as top-level ResponsesAPI `client_metadata` keys, and reserved keys such as `session_id`, `thread_id`, `turn_id`, and `window_id` cannot be overridden.",
+          "description": "Optional metadata to enrich Codex's ResponsesAPI turn metadata. Replaces unprotected client-provided entries when supplied; an empty map clears them.\n\nEntries are flattened into the JSON string sent as `client_metadata[\"x-codex-turn-metadata\"]` on ResponsesAPI HTTP and websocket requests.\n\nThey are not sent as top-level ResponsesAPI `client_metadata` keys, and reserved keys such as `session_id`, `thread_id`, `turn_id`, and `window_id` cannot be overridden.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "responsesapiClientMetadataPatch": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Merge entries into the ResponsesAPI turn metadata without removing existing entries. Applied after `responsesapiClientMetadata` if both are provided; reserved keys remain protected.",
           "type": [
             "object",
             "null"
@@ -4981,6 +5135,13 @@
               "type": "null"
             }
           ]
+        },
+        "voiceSessionId": {
+          "description": "Client-generated identifier for the product voice session. This is distinct from `realtimeSessionId`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -5120,8 +5281,7 @@
     },
     "ReviewDelivery": {
       "enum": [
-        "inline",
-        "detached"
+        "inline"
       ],
       "type": "string"
     },
@@ -5229,7 +5389,7 @@
             }
           ],
           "default": null,
-          "description": "Where to run the review: inline (default) on the current thread or detached on a new thread (returned in `reviewThreadId`). Detached delivery is deprecated and emits `deprecationNotice`. Use `thread/start` followed by an inline review for a separate review thread."
+          "description": "Reviews run inline on the supplied thread. Omit this field or pass `inline`. To review on a separate thread, start a thread first and use its id."
         },
         "target": {
           "$ref": "#/definitions/ReviewTarget"
@@ -5268,6 +5428,13 @@
           "minimum": 0,
           "type": [
             "integer",
+            "null"
+          ]
+        },
+        "modelProvider": {
+          "description": "List models for this configured provider instead of the app-server default.",
+          "type": [
+            "string",
             "null"
           ]
         }
@@ -5674,6 +5841,14 @@
     "McpResourceReadParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
+        "_meta": {
+          "additionalProperties": true,
+          "description": "Additional MCP request metadata. Account and turn routing keys are reserved.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "connectorId": {
           "type": [
             "string",
@@ -6858,6 +7033,8 @@
             "rateLimitExceeded",
             "flexUnavailable",
             "serverOverloaded",
+            "modelNotFound",
+            "policyCapacityUnavailable",
             "cyberPolicy",
             "misalignmentPolicyViolation",
             "tooManyDenials",
@@ -6867,6 +7044,13 @@
             "threadRollbackFailed",
             "sandboxError",
             "other"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The workspace's inference hook explicitly denied this request.",
+          "enum": [
+            "inferenceHookDenied"
           ],
           "type": "string"
         },
@@ -7636,6 +7820,13 @@
             "null"
           ]
         },
+        "attachedToThreadId": {
+          "description": "Parent that owns this persisted attached thread, independent of fork or spawn lineage.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "canAcceptDirectInput": {
           "description": "Whether the app server accepts direct turn input for this loaded thread. `None` means the capability is unavailable, such as for an unloaded stored thread.",
           "type": [
@@ -7890,6 +8081,7 @@
       "type": "string"
     },
     "ThreadItem": {
+      "description": "A thread item and its recorded lifecycle times. The payload stays flat on the wire.",
       "oneOf": [
         {
           "properties": {
@@ -7971,6 +8163,17 @@
               "anyOf": [
                 {
                   "$ref": "#/definitions/MemoryCitation"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "moderation": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/AgentMessageModeration"
                 },
                 {
                   "type": "null"
@@ -8633,6 +8836,33 @@
           "type": "object"
         },
         {
+          "anyOf": [
+            {
+              "properties": {
+                "fileId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "fileId"
+              ],
+              "title": "FileIdThreadItem",
+              "type": "object"
+            },
+            {
+              "properties": {
+                "result": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "result"
+              ],
+              "title": "ResultThreadItem",
+              "type": "object"
+            }
+          ],
+          "description": "Either inline generated-image data or its durable attachment-store identity.\n\n`File` must remain first so rollouts written during the migration, which contain both an empty `result` and a `fileId`, retain the file reference when deserialized.",
           "properties": {
             "failure": {
               "anyOf": [
@@ -8645,11 +8875,23 @@
               ],
               "default": null
             },
+            "generationId": {
+              "default": null,
+              "description": "Image generation identifier for the generated image, when provided by the image backend.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "id": {
               "type": "string"
             },
-            "result": {
-              "type": "string"
+            "inputImages": {
+              "description": "Observed local inputs for a completed generation, absent on older items.",
+              "items": {
+                "$ref": "#/definitions/ImageGenerationInputImage"
+              },
+              "type": "array"
             },
             "revisedPrompt": {
               "type": [
@@ -8687,7 +8929,6 @@
           },
           "required": [
             "id",
-            "result",
             "status",
             "type"
           ],
@@ -8762,7 +9003,28 @@
           "title": "ContextCompactionThreadItem",
           "type": "object"
         }
-      ]
+      ],
+      "properties": {
+        "completedAtMs": {
+          "default": null,
+          "description": "Unix timestamp in milliseconds when the item completed, if recorded.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "startedAtMs": {
+          "default": null,
+          "description": "Unix timestamp in milliseconds when the item started, if recorded.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     },
     "ThreadStatus": {
       "oneOf": [
@@ -10225,6 +10487,8 @@
     },
     "HookEventName": {
       "enum": [
+        "preModelRequest",
+        "postModelRequest",
         "preToolUse",
         "permissionRequest",
         "postToolUse",
@@ -10345,6 +10609,13 @@
         },
         "enabled": {
           "type": "boolean"
+        },
+        "environmentId": {
+          "description": "The owning execution environment, if this hook came from its requirements.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "eventName": {
           "$ref": "#/definitions/HookEventName"
@@ -10668,7 +10939,7 @@
           ]
         },
         "defaultPrompt": {
-          "description": "Starter prompts for the plugin. Capped at 3 entries with a maximum of 128 characters per entry.",
+          "description": "Starter prompts for the plugin. Capped at 3 entries with a maximum of 512 characters per entry.",
           "items": {
             "type": "string"
           },
@@ -12215,7 +12486,7 @@
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
         "reviewThreadId": {
-          "description": "Identifies the thread where the review runs.\n\nFor inline reviews, this is the original thread id. For detached reviews, this is the id of the new review thread.",
+          "description": "The thread id supplied to `review/start`.",
           "type": "string"
         },
         "turn": {
@@ -13162,6 +13433,9 @@
             }
           ]
         },
+        "toolListMeta": {
+          "description": "Opaque `_meta` from the first page of the corresponding MCP tool catalog. Null when unavailable."
+        },
         "tools": {
           "additionalProperties": {
             "$ref": "#/definitions/Tool"
@@ -13633,6 +13907,8 @@
         "edu",
         "edu_plus",
         "edu_pro",
+        "sci",
+        "sci_plus",
         "unknown"
       ],
       "type": "string"
@@ -14488,6 +14764,17 @@
               "type": "null"
             }
           ]
+        },
+        "client_search_provider": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WebSearchProvider"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Effective tools.client_search_provider hint. Model-selected providers take precedence."
         },
         "compact_prompt": {
           "type": [
@@ -15647,6 +15934,16 @@
             }
           ]
         },
+        "otel": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OtelRequirements"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "sqliteHome": {
           "type": [
             "string",
@@ -15829,6 +16126,13 @@
           },
           "type": "array"
         },
+        "PostModelRequest": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/ConfiguredHookMatcherGroup"
+          },
+          "type": "array"
+        },
         "PostToolUse": {
           "items": {
             "$ref": "#/definitions/ConfiguredHookMatcherGroup"
@@ -15836,6 +16140,13 @@
           "type": "array"
         },
         "PreCompact": {
+          "items": {
+            "$ref": "#/definitions/ConfiguredHookMatcherGroup"
+          },
+          "type": "array"
+        },
+        "PreModelRequest": {
+          "default": [],
           "items": {
             "$ref": "#/definitions/ConfiguredHookMatcherGroup"
           },
@@ -15993,7 +16304,7 @@
           "additionalProperties": {
             "$ref": "#/definitions/NetworkDomainPermission"
           },
-          "description": "Canonical network permission map for `experimental_network`.",
+          "description": "Canonical managed network permission map.",
           "type": [
             "object",
             "null"
@@ -16020,6 +16331,16 @@
             "null"
           ]
         },
+        "reviewDomains": {
+          "description": "Host patterns routed to network approval before ordinary allow rules.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "socksPort": {
           "format": "uint16",
           "minimum": 0,
@@ -16032,7 +16353,7 @@
           "additionalProperties": {
             "$ref": "#/definitions/NetworkUnixSocketPermission"
           },
-          "description": "Canonical unix socket permission map for `experimental_network`.",
+          "description": "Canonical managed unix socket permission map.",
           "type": [
             "object",
             "null"
@@ -16142,6 +16463,13 @@
               ],
               "title": "ChatgptAccountType",
               "type": "string"
+            },
+            "workspaceName": {
+              "description": "Display name of the selected ChatGPT workspace, when available.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -16171,6 +16499,23 @@
           ],
           "title": "AmazonBedrockAccount",
           "type": "object"
+        },
+        {
+          "description": "Google Cloud Vertex AI with externally managed credentials.",
+          "properties": {
+            "type": {
+              "enum": [
+                "gcp"
+              ],
+              "title": "GcpAccountType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "GcpAccount",
+          "type": "object"
         }
       ]
     },
@@ -16189,6 +16534,14 @@
         },
         "requiresOpenaiAuth": {
           "type": "boolean"
+        },
+        "userId": {
+          "default": null,
+          "description": "ChatGPT user ID belonging to this account response, when available.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "workspaceRouting": {
           "anyOf": [
@@ -16415,6 +16768,17 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "environments": {
+          "default": null,
+          "description": "Environments configured for future turns, in priority order, primary first. `null` means the server does not expose the selection; [] means none are selected.",
+          "items": {
+            "$ref": "#/definitions/ThreadEnvironment"
+          },
+          "type": [
+            "array",
+            "null"
           ]
         },
         "model": {
@@ -16680,7 +17044,7 @@
           "default": "unknown"
         },
         "sourcePath": {
-          "$ref": "#/definitions/AbsolutePathBuf"
+          "$ref": "#/definitions/LegacyAppPathString"
         },
         "startedAt": {
           "format": "int64",
@@ -17592,6 +17956,16 @@
           "format": "int64",
           "type": "integer"
         },
+        "contentTokenCount": {
+          "default": null,
+          "description": "Native content tokens for the completed assistant message, including a sampled footer. Null when unavailable. Completion telemetry is not part of the stored thread item.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "item": {
           "$ref": "#/definitions/ThreadItem"
         },
@@ -17797,6 +18171,13 @@
           "description": "Process exit code.",
           "format": "int32",
           "type": "integer"
+        },
+        "outputDrainTimedOut": {
+          "description": "Whether output collection hit its post-exit deadline before seeing EOF or reaching the requested byte cap on either stream. Older servers omit this field.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "processHandle": {
           "description": "Client-supplied, connection-scoped `processHandle` from `process/spawn`.",
@@ -18998,6 +19379,10 @@
           "default": false,
           "description": "Opt into `attestation/generate` requests for upstream `x-oai-attestation`.",
           "type": "boolean"
+        },
+        "requiredHumanApproval": {
+          "description": "Present `humanCommand` approvals to a person and return only a one-time decision. Requires `experimentalApi`. Pending requests can be replayed to compatible clients.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -19420,6 +19805,54 @@
             "params"
           ],
           "title": "Thread/forkRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "thread/sample"
+              ],
+              "title": "Thread/sampleRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadSampleParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/sampleRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "thread/sample/cancel"
+              ],
+              "title": "Thread/sample/cancelRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadSampleCancelParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/sample/cancelRequest",
           "type": "object"
         },
         {
@@ -19998,6 +20431,30 @@
             "params"
           ],
           "title": "Thread/memoryMode/setRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "thread/memory/read"
+              ],
+              "title": "Thread/memory/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadMemoryReadParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/memory/readRequest",
           "type": "object"
         },
         {
@@ -20744,6 +21201,31 @@
           "type": "object"
         },
         {
+          "description": "Review the idle thread's final injected exec_command without executing it.",
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "thread/guardianReview"
+              ],
+              "title": "Thread/guardianReviewRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadGuardianReviewParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/guardianReviewRequest",
+          "type": "object"
+        },
+        {
           "description": "Append raw Responses API items to the thread history without starting a user turn.",
           "properties": {
             "id": {
@@ -20766,6 +21248,30 @@
             "params"
           ],
           "title": "Thread/injectItemsRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "thread/prepareApprovedPlan"
+              ],
+              "title": "Thread/prepareApprovedPlanRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadPrepareApprovedPlanParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/prepareApprovedPlanRequest",
           "type": "object"
         },
         {
@@ -21861,7 +22367,14 @@
               "type": "string"
             },
             "params": {
-              "type": "null"
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/GatewayOAuthReadParams"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -21884,7 +22397,14 @@
               "type": "string"
             },
             "params": {
-              "type": "null"
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/GatewayOAuthLoginParams"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -21915,6 +22435,54 @@
             "method"
           ],
           "title": "Account/gatewayOAuth/cancelRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "modelProvider/list"
+              ],
+              "title": "ModelProvider/listRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ModelProviderListParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "ModelProvider/listRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "modelProvider/config/write"
+              ],
+              "title": "ModelProvider/config/writeRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ModelProviderConfigWriteParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "ModelProvider/config/writeRequest",
           "type": "object"
         },
         {
@@ -22610,6 +23178,30 @@
             },
             "method": {
               "enum": [
+                "account/gcp/setup"
+              ],
+              "title": "Account/gcp/setupRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/GcpSetupParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Account/gcp/setupRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
                 "account/bedrock/checkGovCloudRequirements"
               ],
               "title": "Account/bedrock/checkGovCloudRequirementsRequestMethod",
@@ -22658,6 +23250,54 @@
             },
             "method": {
               "enum": [
+                "accountSession/list"
+              ],
+              "title": "AccountSession/listRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AccountSessionsListParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "AccountSession/listRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "accountSession/switch"
+              ],
+              "title": "AccountSession/switchRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/AccountSessionsSwitchParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "AccountSession/switchRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
                 "account/logout"
               ],
               "title": "Account/logoutRequestMethod",
@@ -22672,6 +23312,29 @@
             "method"
           ],
           "title": "Account/logoutRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "account/securitySetup/read"
+              ],
+              "title": "Account/securitySetup/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "id",
+            "method"
+          ],
+          "title": "Account/securitySetup/readRequest",
           "type": "object"
         },
         {
@@ -22827,6 +23490,30 @@
             "params"
           ],
           "title": "Feedback/uploadRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "feedback/save"
+              ],
+              "title": "Feedback/saveRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/FeedbackSaveParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Feedback/saveRequest",
           "type": "object"
         },
         {
@@ -23565,6 +24252,26 @@
             "params"
           ],
           "title": "Thread/name/updatedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "thread/section/changed"
+              ],
+              "title": "Thread/section/changedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadSectionChangedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Thread/section/changedNotification",
           "type": "object"
         },
         {
@@ -25598,6 +26305,10 @@
         "item": {
           "$ref": "#/definitions/ThreadItem"
         },
+        "outputDeferred": {
+          "description": "The saved output was omitted. Fetch the complete item with `thread/items/read`.",
+          "type": "boolean"
+        },
         "startedAtMs": {
           "description": "Unix timestamp (milliseconds) when the item started, if recorded by the producer.",
           "format": "int64",
@@ -27318,6 +28029,16 @@
             "$ref": "#/definitions/UserInput"
           },
           "type": "array"
+        },
+        "responsesapiClientMetadata": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Metadata retained with this input, including across reconnect and restoration.",
+          "type": [
+            "object",
+            "null"
+          ]
         }
       },
       "required": [
@@ -27465,6 +28186,16 @@
             "$ref": "#/definitions/UserInput"
           },
           "type": "array"
+        },
+        "responsesapiClientMetadata": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "ResponsesAPI metadata captured from the client submitting this input.",
+          "type": [
+            "object",
+            "null"
+          ]
         },
         "threadId": {
           "type": "string"
@@ -27654,6 +28385,16 @@
         },
         "queuedSubmissionId": {
           "type": "string"
+        },
+        "responsesapiClientMetadata": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Non-empty metadata replaces the input's metadata; omission or an empty map preserves it.",
+          "type": [
+            "object",
+            "null"
+          ]
         },
         "threadId": {
           "type": "string"
@@ -28457,6 +29198,14 @@
           },
           "type": "array"
         },
+        "nativeUsageUsdMicros": {
+          "description": "Native dollar usage, independent of credit estimates. None means unknown, not zero.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "threadId": {
           "type": "string"
         }
@@ -28559,6 +29308,16 @@
             }
           ],
           "description": "Omission or `null` leaves the effort unchanged."
+        },
+        "environments": {
+          "description": "Replace the environments for subsequent steps of this turn, not future turns. Omitted/null preserves the selection; [] clears it. An already-started step is unchanged.",
+          "items": {
+            "$ref": "#/definitions/TurnEnvironmentParams"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "model": {
           "description": "Omission or `null` leaves the model unchanged.",
@@ -28680,6 +29439,16 @@
           "anyOf": [
             {
               "$ref": "#/definitions/ApplicationNetworkRequirements"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "storage": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ApplicationStorageRequirements"
             },
             {
               "type": "null"
@@ -29310,6 +30079,13 @@
             "null"
           ]
         },
+        "loginId": {
+          "description": "Identifies the completed device login attempt.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "providerId": {
           "type": "string"
         },
@@ -29326,6 +30102,18 @@
     },
     "GatewayOAuthLoginResponse": {
       "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "prompt": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GatewayOAuthPrompt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
       "title": "GatewayOAuthLoginResponse",
       "type": "object"
     },
@@ -29359,6 +30147,11 @@
             }
           ],
           "description": "Null when the effective provider does not use gateway OAuth."
+        },
+        "supportsDeviceAuth": {
+          "default": false,
+          "description": "Whether the administrator configured a device authorization endpoint.",
+          "type": "boolean"
         }
       },
       "required": [
@@ -29966,6 +30759,1546 @@
           "type": "object"
         }
       ]
+    },
+    "AccountSecuritySetupAction": {
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "label",
+        "url"
+      ],
+      "type": "object"
+    },
+    "AccountSecuritySetupNotice": {
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "action": {
+          "$ref": "#/definitions/AccountSecuritySetupAction"
+        },
+        "description": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "userId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId",
+        "action",
+        "description",
+        "title",
+        "userId"
+      ],
+      "type": "object"
+    },
+    "AccountSession": {
+      "properties": {
+        "displayName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "imageUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isActive": {
+          "type": "boolean"
+        },
+        "lastUsedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "selectedWorkspaceAccountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sessionId": {
+          "type": "string"
+        },
+        "userId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspaces": {
+          "items": {
+            "$ref": "#/definitions/AccountSessionWorkspace"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "isActive",
+        "lastUsedAt",
+        "sessionId",
+        "workspaces"
+      ],
+      "type": "object"
+    },
+    "AccountSessionWorkspace": {
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "imageUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccountSessionWorkspaceKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "accountId"
+      ],
+      "type": "object"
+    },
+    "AccountSessionWorkspaceKind": {
+      "enum": [
+        "personal",
+        "workspace"
+      ],
+      "type": "string"
+    },
+    "AccountSessionsListParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "refreshWorkspaceMetadata": {
+          "type": "boolean"
+        }
+      },
+      "title": "AccountSessionsListParams",
+      "type": "object"
+    },
+    "AccountSessionsResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "activeSessionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sessions": {
+          "items": {
+            "$ref": "#/definitions/AccountSession"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "sessions"
+      ],
+      "title": "AccountSessionsResponse",
+      "type": "object"
+    },
+    "AccountSessionsSwitchParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "accountId": {
+          "description": "Workspace to select within that login; this is not a user identifier.",
+          "type": "string"
+        },
+        "allowBrowserLogin": {
+          "description": "Allow Core to start browser sign-in if this session needs SSO for the workspace.",
+          "type": "boolean"
+        },
+        "sessionId": {
+          "description": "Opaque active-login identifier returned by accountSession/list.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId",
+        "sessionId"
+      ],
+      "title": "AccountSessionsSwitchParams",
+      "type": "object"
+    },
+    "AccountSessionsSwitchResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "anyOf": [
+        {
+          "properties": {
+            "activeSessionId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sessions": {
+              "items": {
+                "$ref": "#/definitions/AccountSession"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "sessions"
+          ],
+          "title": "Sessionsv2::AccountSessionsSwitchResponse",
+          "type": "object"
+        },
+        {
+          "description": "Open the URL and await account/login/completed for this login ID.",
+          "properties": {
+            "auth_url": {
+              "type": "string"
+            },
+            "login_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "auth_url",
+            "login_id"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "AccountSessionsSwitchResponse"
+    },
+    "AgentMessageDisplay": {
+      "description": "A presentation instruction for Chat to apply to this answer when recovering history.",
+      "properties": {
+        "action": {
+          "description": "Unknown actions must be left for the producing client to handle.",
+          "type": "string"
+        },
+        "blockType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "checkTrustedContacts": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "cyberTrustedAccess": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    },
+    "AgentMessageModeration": {
+      "properties": {
+        "display": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AgentMessageDisplay"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "moderated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "moderated"
+      ],
+      "type": "object"
+    },
+    "ApplicationStorageRequirements": {
+      "description": "Managed storage settings for new Desktop workspaces, not filesystem access restrictions.",
+      "properties": {
+        "defaultProjectParent": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "projectlessWorkspaceRoot": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "BedrockProviderId": {
+      "enum": [
+        "amazon-bedrock",
+        "amazon-bedrock-runtime"
+      ],
+      "type": "string"
+    },
+    "FeedbackSaveParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "classification": {
+          "type": "string"
+        },
+        "extraLogFiles": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "includeLogs": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "savePath": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/LegacyAppPathString"
+            }
+          ],
+          "description": "Absolute, previously unused ZIP path on the app-server host. The caller owns this file, including after a disconnected RPC."
+        },
+        "tags": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "threadId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "classification",
+        "savePath"
+      ],
+      "title": "FeedbackSaveParams",
+      "type": "object"
+    },
+    "FeedbackSaveResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "promptHash": {
+          "description": "Same prompt hash as feedback/upload; null when prompt metadata is absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "savedPath": {
+          "$ref": "#/definitions/LegacyAppPathString"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "savedPath",
+        "threadId"
+      ],
+      "title": "FeedbackSaveResponse",
+      "type": "object"
+    },
+    "GatewayAuth": {
+      "oneOf": [
+        {
+          "properties": {
+            "mode": {
+              "enum": [
+                "none"
+              ],
+              "title": "NoneGatewayAuthMode",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "title": "NoneGatewayAuth",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "envKey": {
+              "type": "string"
+            },
+            "mode": {
+              "enum": [
+                "environmentVariable"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "envKey",
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Authentication is configured outside the gateway form. Preserve it on edits.",
+          "properties": {
+            "envKey": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "mode": {
+              "enum": [
+                "externallyConfigured"
+              ],
+              "title": "ModeGatewayAuthMode",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "title": "ModeGatewayAuth",
+          "type": "object"
+        }
+      ]
+    },
+    "GatewayOAuthLoginParams": {
+      "description": "Authorize a configured provider without changing the default or any thread's provider.",
+      "properties": {
+        "deviceAuth": {
+          "description": "Select device authorization when the server advertises support for it.",
+          "type": "boolean"
+        },
+        "modelProvider": {
+          "description": "Defaults to the current provider when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "GatewayOAuthPrompt": {
+      "properties": {
+        "loginId": {
+          "type": "string"
+        },
+        "userCode": {
+          "type": "string"
+        },
+        "verificationUrl": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "loginId",
+        "userCode",
+        "verificationUrl"
+      ],
+      "type": "object"
+    },
+    "GatewayOAuthReadParams": {
+      "description": "Read credential readiness for a configured provider without starting browser login.",
+      "properties": {
+        "modelProvider": {
+          "description": "Defaults to the current provider when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "GcpProviderId": {
+      "enum": [
+        "gcp"
+      ],
+      "type": "string"
+    },
+    "GcpSetupParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "credentialFile": {
+          "description": "Absolute path to a credential file on the app-server host. Omit or pass `null` to clear the active user configuration's override and use ADC. If another configuration layer would still supply a credential file, setup fails without saving changes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "location": {
+          "description": "Vertex AI location. Omission or null selects `global`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "projectId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "projectId"
+      ],
+      "title": "GcpSetupParams",
+      "type": "object"
+    },
+    "GcpSetupResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "GcpSetupResponse",
+      "type": "object"
+    },
+    "GetAccountSecuritySetupResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "Optional security reminder bound to the account that fetched it. Unavailable or ineligible accounts return no notice; this read never changes account security.",
+      "properties": {
+        "notice": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccountSecuritySetupNotice"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "title": "GetAccountSecuritySetupResponse",
+      "type": "object"
+    },
+    "GuardianAssessmentOutcome": {
+      "description": "Final allow/deny outcome returned by the guardian reviewer.",
+      "enum": [
+        "allow",
+        "deny"
+      ],
+      "type": "string"
+    },
+    "ImageGenerationInputImage": {
+      "description": "A local image file successfully read for this exact image-generation request.",
+      "properties": {
+        "path": {
+          "$ref": "#/definitions/AbsolutePathBuf"
+        },
+        "sha256": {
+          "description": "Lowercase SHA-256 of the file bytes read before image normalization.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "ModelProviderConfigWriteParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "settings": {
+          "$ref": "#/definitions/ProviderSettingsPatch"
+        }
+      },
+      "required": [
+        "settings"
+      ],
+      "title": "ModelProviderConfigWriteParams",
+      "type": "object"
+    },
+    "ModelProviderConfigWriteResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "provider": {
+          "$ref": "#/definitions/ModelProviderSummary"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "title": "ModelProviderConfigWriteResponse",
+      "type": "object"
+    },
+    "ModelProviderError": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "Structured JSON-RPC error data. Unknown errors must retain the client's normal fallback.",
+      "oneOf": [
+        {
+          "properties": {
+            "currentModelProvider": {
+              "type": "string"
+            },
+            "modelProvider": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "modelProviderMismatch"
+              ],
+              "title": "ModelProviderMismatchv2::ModelProviderErrorType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "currentModelProvider",
+            "modelProvider",
+            "type"
+          ],
+          "title": "ModelProviderMismatchv2::ModelProviderError",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "modelProvider": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "modelProviderNotConfigured"
+              ],
+              "title": "ModelProviderNotConfiguredv2::ModelProviderErrorType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "modelProvider",
+            "type"
+          ],
+          "title": "ModelProviderNotConfiguredv2::ModelProviderError",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "modelProvider": {
+              "type": "string"
+            },
+            "requiredModelProvider": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "modelProviderPolicyConflict"
+              ],
+              "title": "ModelProviderPolicyConflictv2::ModelProviderErrorType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "modelProvider",
+            "requiredModelProvider",
+            "type"
+          ],
+          "title": "ModelProviderPolicyConflictv2::ModelProviderError",
+          "type": "object"
+        }
+      ],
+      "title": "ModelProviderError"
+    },
+    "ModelProviderListParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "ModelProviderListParams",
+      "type": "object"
+    },
+    "ModelProviderListResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "canChangeDefault": {
+          "type": "boolean"
+        },
+        "data": {
+          "items": {
+            "$ref": "#/definitions/ModelProviderSummary"
+          },
+          "type": "array"
+        },
+        "defaultProviderId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "canChangeDefault",
+        "data",
+        "defaultProviderId"
+      ],
+      "title": "ModelProviderListResponse",
+      "type": "object"
+    },
+    "ModelProviderSummary": {
+      "properties": {
+        "baseUrl": {
+          "description": "Null when the endpoint is absent or cannot be safely displayed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "canEdit": {
+          "description": "Whether a supported configuration field can be edited in the active user layer.",
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "settings": {
+          "$ref": "#/definitions/ProviderSettings"
+        }
+      },
+      "required": [
+        "canEdit",
+        "id",
+        "name",
+        "settings"
+      ],
+      "type": "object"
+    },
+    "NullableGatewayOAuthLoginParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/GatewayOAuthLoginParams"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Nullable_GatewayOAuthLoginParams"
+    },
+    "NullableGatewayOAuthReadParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/GatewayOAuthReadParams"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Nullable_GatewayOAuthReadParams"
+    },
+    "OtelExporter": {
+      "oneOf": [
+        {
+          "enum": [
+            "none",
+            "statsig"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "otlp-http": {
+              "properties": {
+                "endpoint": {
+                  "type": "string"
+                },
+                "headers": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "description": "Header names are retained; values are redacted by the server.",
+                  "type": "object"
+                },
+                "protocol": {
+                  "$ref": "#/definitions/OtelHttpProtocol"
+                },
+                "tls": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/OtelTlsConfig"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "endpoint",
+                "headers",
+                "protocol"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "otlp-http"
+          ],
+          "title": "OtlpHttpOtelExporter",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "otlp-grpc": {
+              "properties": {
+                "endpoint": {
+                  "type": "string"
+                },
+                "headers": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "description": "Header names are retained; values are redacted by the server.",
+                  "type": "object"
+                },
+                "tls": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/OtelTlsConfig"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "endpoint",
+                "headers"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "otlp-grpc"
+          ],
+          "title": "OtlpGrpcOtelExporter",
+          "type": "object"
+        }
+      ]
+    },
+    "OtelHttpProtocol": {
+      "enum": [
+        "binary",
+        "json"
+      ],
+      "type": "string"
+    },
+    "OtelRequirements": {
+      "properties": {
+        "environment": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exporter": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OtelExporter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "log_agent_responses": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "log_guardian_assessments": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "log_sse_deltas": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "log_user_prompt": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "metrics_exporter": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OtelExporter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "span_attributes": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "tool_result": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OtelToolResultLogConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "trace_exporter": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/OtelExporter"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tracestate": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "OtelTlsConfig": {
+      "properties": {
+        "ca-certificate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client-certificate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "client-private-key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "OtelToolResultLogConfig": {
+      "properties": {
+        "max_bytes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_bytes"
+      ],
+      "type": "object"
+    },
+    "ProviderSettings": {
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "openai"
+              ],
+              "title": "OpenaiProviderSettingsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "OpenaiProviderSettings",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "auth": {
+              "$ref": "#/definitions/GatewayAuth"
+            },
+            "type": {
+              "enum": [
+                "customGateway"
+              ],
+              "title": "CustomGatewayProviderSettingsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "auth",
+            "type"
+          ],
+          "title": "CustomGatewayProviderSettings",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "profile": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "region": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "bedrock"
+              ],
+              "title": "BedrockProviderSettingsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "BedrockProviderSettings",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "credentialFile": {
+              "description": "Path on the app-server host, without credential-file contents.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "location": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "projectId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "gcp"
+              ],
+              "title": "GcpProviderSettingsType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "GcpProviderSettings",
+          "type": "object"
+        }
+      ]
+    },
+    "ProviderSettingsPatch": {
+      "description": "Omitted patch fields preserve their values. Explicit null clears a nullable field.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "baseUrl": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "envKey": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "providerId": {
+              "description": "Omit or pass null to allocate a new custom provider ID.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "customGateway"
+              ],
+              "title": "CustomGatewayProviderSettingsPatchType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "CustomGatewayProviderSettingsPatch",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "AWS configuration fields for built-in Bedrock providers.",
+          "properties": {
+            "profile": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "providerId": {
+              "$ref": "#/definitions/BedrockProviderId"
+            },
+            "region": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "bedrock"
+              ],
+              "title": "BedrockProviderSettingsPatchType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "providerId",
+            "type"
+          ],
+          "title": "BedrockProviderSettingsPatch",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "GCP configuration fields. Credential-file paths refer to the app-server host.",
+          "properties": {
+            "credentialFile": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "location": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "projectId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "providerId": {
+              "$ref": "#/definitions/GcpProviderId"
+            },
+            "type": {
+              "enum": [
+                "gcp"
+              ],
+              "title": "GcpProviderSettingsPatchType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "providerId",
+            "type"
+          ],
+          "title": "GcpProviderSettingsPatch",
+          "type": "object"
+        }
+      ]
+    },
+    "ThreadGuardianAssessment": {
+      "properties": {
+        "outcome": {
+          "$ref": "#/definitions/GuardianAssessmentOutcome"
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "riskLevel": {
+          "$ref": "#/definitions/GuardianRiskLevel"
+        },
+        "userAuthorization": {
+          "$ref": "#/definitions/GuardianUserAuthorization"
+        }
+      },
+      "required": [
+        "outcome",
+        "rationale",
+        "riskLevel",
+        "userAuthorization"
+      ],
+      "type": "object"
+    },
+    "ThreadGuardianReviewParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "Calling `thread/guardianReview` subscribes the connection to the thread. The subscription remains after the review completes, keeping the thread loaded until the client calls `thread/unsubscribe` or disconnects.",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "title": "ThreadGuardianReviewParams",
+      "type": "object"
+    },
+    "ThreadGuardianReviewResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "assessment": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadGuardianAssessment"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Null when current policy or a remembered approval skips review."
+        },
+        "callId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "callId"
+      ],
+      "title": "ThreadGuardianReviewResponse",
+      "type": "object"
+    },
+    "ThreadItemOutputDeferral": {
+      "properties": {
+        "commandExecution": {
+          "description": "Defer nonempty output from successful commands.",
+          "type": "boolean"
+        },
+        "mcpToolCall": {
+          "description": "Defer nonempty plain-text results from successful MCP tool calls.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ThreadMemoryReadParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "threadId": {
+          "description": "The thread must already be started or resumed.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "title": "ThreadMemoryReadParams",
+      "type": "object"
+    },
+    "ThreadMemoryReadResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "summary": {
+          "description": "Summary from the thread's selected memory version. Null when memory use is disabled or the selected summary is missing, unreadable, or blank.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "ThreadMemoryReadResponse",
+      "type": "object"
+    },
+    "ThreadPrepareApprovedPlanParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "Prepare an approved plan for the first turn of a fresh thread.",
+      "properties": {
+        "attachmentPath": {
+          "description": "Absolute path to the optional app-server copy of the plan.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "markdown": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "markdown",
+        "threadId"
+      ],
+      "title": "ThreadPrepareApprovedPlanParams",
+      "type": "object"
+    },
+    "ThreadPrepareApprovedPlanResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "prompt": {
+          "description": "Initial user prompt. If no attachment is readable, the plan is already in the thread's context.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "prompt"
+      ],
+      "title": "ThreadPrepareApprovedPlanResponse",
+      "type": "object"
+    },
+    "ThreadSampleCancelParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "additionalProperties": false,
+      "properties": {
+        "requestId": {
+          "$ref": "#/definitions/RequestId"
+        }
+      },
+      "required": [
+        "requestId"
+      ],
+      "title": "ThreadSampleCancelParams",
+      "type": "object"
+    },
+    "ThreadSampleCancelResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "ThreadSampleCancelResponse",
+      "type": "object"
+    },
+    "ThreadSampleParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "allowInProgressTurn": {
+          "description": "Allow sampling the latest turn before it finishes.",
+          "type": "boolean"
+        },
+        "disableMcp": {
+          "description": "Disable MCP servers when the inherited window uses incremental tools on Responses Lite.",
+          "type": "boolean"
+        },
+        "effort": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ReasoningEffort"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Applied only when the provider and model support cache-preserving reasoning-effort updates."
+        },
+        "expectedTurnId": {
+          "description": "The loaded source's latest turn, which must be finished (completed, failed, or interrupted) unless `allowInProgressTurn` is true.",
+          "type": "string"
+        },
+        "interruptOnCancel": {
+          "description": "Override upstream interruption on cancellation for this sample; otherwise inherit the parent.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "responsesapiClientMetadata": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Optional metadata to enrich Codex's ResponsesAPI turn metadata.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "threadSource": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "turnTrigger": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "expectedTurnId",
+        "prompt",
+        "threadId"
+      ],
+      "title": "ThreadSampleParams",
+      "type": "object"
+    },
+    "ThreadSampleResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "cachedInputTokens": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "inputTokens": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "outputTokens": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "responseId": {
+          "type": "string"
+        },
+        "sourceTurnId": {
+          "type": "string"
+        },
+        "text": {
+          "description": "Assistant text from the response, or null if it attempted a tool call or completed without text.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "responseId",
+        "sourceTurnId"
+      ],
+      "title": "ThreadSampleResponse",
+      "type": "object"
+    },
+    "ThreadSectionChangedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "Broadcast after a successful move into, within, or out of a section.",
+      "properties": {
+        "sectionId": {
+          "description": "Destination section, or `null` when the thread was removed from its section.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sectionId",
+        "threadId"
+      ],
+      "title": "ThreadSectionChangedNotification",
+      "type": "object"
+    },
+    "WebSearchProvider": {
+      "description": "Provider preference selected by the resolved model catalog entry.",
+      "enum": [
+        "standalone",
+        "search_mcp"
+      ],
+      "type": "string"
     }
   },
   "title": "CodexAppServerProtocolV2",
